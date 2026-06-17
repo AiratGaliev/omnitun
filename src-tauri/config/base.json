@@ -1,0 +1,17 @@
+{
+  "log": { "level": "debug", "timestamp": true },
+  "inbounds": [{
+    "type": "http",
+    "tag": "proxy-in",
+    "listen": "127.0.0.1",
+    "listen_port": 10809
+  }],
+  "outbounds": [
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": {
+    "rules": [],
+    "final": "proxy",
+    "auto_detect_interface": true
+  }
+}

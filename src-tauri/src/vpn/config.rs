@@ -69,26 +69,9 @@ fn set_tls(outbound: &mut Value, sni: &str) {
 mod tests {
     use super::*;
 
-    const TEST_TEMPLATE: &str = r#"{
-        "log": { "level": "debug", "timestamp": true },
-        "inbounds": [{
-            "type": "http",
-            "tag": "proxy-in",
-            "listen": "127.0.0.1",
-            "listen_port": 10809
-        }],
-        "outbounds": [
-            { "type": "direct", "tag": "direct" }
-        ],
-        "route": {
-            "rules": [],
-            "final": "proxy",
-            "auto_detect_interface": true
-        }
-    }"#;
-
     #[test]
     fn test_generate_vless_config() {
+        let template = include_str!("../../config/base.json");
         let profile = ServerProfile {
             id: "test-1".into(),
             name: "Test VLESS".into(),
@@ -104,7 +87,7 @@ mod tests {
             private_key: None,
         };
 
-        let result = generate_config(TEST_TEMPLATE, &profile).unwrap();
+        let result = generate_config(template, &profile).unwrap();
         println!("=== GENERATED CONFIG ===");
         println!("{}", result);
     }

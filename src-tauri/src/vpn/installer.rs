@@ -52,6 +52,29 @@ impl Installer {
         Ok(binary_path)
     }
 
+    pub async fn latest_version() -> Result<String, VpnError> {
+        let client = reqwest::Client::new();
+        let resp = client
+            .get("https://api.github.com/repos/SagerNet/sing-box/releases/latest")
+            .header("User-Agent", "omnitun/0.1.0")
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| VpnError::Install(format!("Failed to check latest version: {e}")))?;
+
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| VpnError::Install(format!("Failed to parse version: {e}")))?;
+
+        let tag = json["tag_name"]
+            .as_str()
+            .ok_or_else(|| VpnError::Install("Missing tag_name in response".into()))?;
+
+        // Strip leading 'v' from tag
+        Ok(tag.trim_start_matches('v').to_string())
+    }
+
     fn extract_zip(bytes: &[u8], bin_dir: &PathBuf, binary_name: &str) -> Result<(), VpnError> {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
             .map_err(|e| VpnError::Install(format!("Failed to open zip: {e}")))?;
