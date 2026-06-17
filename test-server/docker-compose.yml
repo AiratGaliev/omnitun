@@ -1,0 +1,45 @@
+services:
+  mock-server:
+    build:
+      context: ./mock-server
+      dockerfile: Dockerfile
+    container_name: omnitun-mock-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  sing-box:
+    build:
+      context: ./sing-box
+      dockerfile: Dockerfile
+    container_name: omnitun-singbox
+    entrypoint: [ "/entrypoint.sh" ]
+    command: run -c /etc/sing-box/config.json
+    ports:
+      - "8442:8442"  # Vless+TLS
+      - "8443:8443"  # Vless
+      - "8444:8444"  # VMess
+      - "8445:8445"  # Trojan
+      - "8446:8446"  # Shadowsocks
+      - "8447:8447/udp"  # Hysteria2
+      - "8448:8448/udp"  # TUIC
+      - "8449:8449/udp"  # WireGuard
+      - "8451:8451"  # SOCKS5
+      - "8452:8452"  # HTTP proxy
+    volumes:
+      - ./sing-box-config/config.json:/etc/sing-box/config.json:ro
+      - ./certs:/etc/sing-box/certs
+      - ./wg-keys:/etc/sing-box/wg-keys
+      - ./entrypoint.sh:/entrypoint.sh:ro
+    depends_on:
+      mock-server:
+        condition: service_healthy
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW

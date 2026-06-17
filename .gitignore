@@ -25,3 +25,7 @@ dist-ssr
 # Documentation (but not README)
 *.md
 !README.md
+
+# Certs and keys
+*.pem
+*.key

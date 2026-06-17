@@ -1,0 +1,11 @@
+{
+  "name": "omnitun-mock-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node index.ts"
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  }
+}
