@@ -1,17 +1,41 @@
 {
-  "log": { "level": "debug", "timestamp": true },
-  "inbounds": [{
-    "type": "http",
-    "tag": "proxy-in",
-    "listen": "127.0.0.1",
-    "listen_port": 10809
-  }],
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "http",
+      "tag": "proxy-in",
+      "listen": "127.0.0.1",
+      "listen_port": 10809,
+      "sniff": true
+    }
+  ],
   "outbounds": [
-    { "type": "direct", "tag": "direct" }
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "block",
+      "tag": "block"
+    }
   ],
   "route": {
-    "rules": [],
+    "rules": [
+      {
+        "ip_is_private": true,
+        "outbound": "direct"
+      }
+    ],
     "final": "proxy",
     "auto_detect_interface": true
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "path": "cache.db"
+    }
   }
 }

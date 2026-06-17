@@ -1,12 +1,12 @@
+mod events;
+mod subscription;
+mod vpn;
+
 use crate::events::emit_status;
 use crate::vpn::{ServerProfile, VpnManager, VpnStatus};
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::sync::Mutex;
-
-mod events;
-mod subscription;
-mod vpn;
 
 struct VpnState {
     manager: Arc<Mutex<VpnManager>>,

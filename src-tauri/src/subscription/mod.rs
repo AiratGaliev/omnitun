@@ -1,4 +1,6 @@
-mod parser;
+#![allow(dead_code)]
+
+pub mod parser;
 
 use crate::vpn::ServerProfile;
 use serde::{Deserialize, Serialize};

@@ -1,4 +1,5 @@
 use crate::vpn::{ServerProfile, VpnError};
+use std::collections::HashMap;
 
 pub fn parse_subscription(data: &str) -> Result<Vec<ServerProfile>, VpnError> {
     let decoded = try_base64_decode(data).unwrap_or_else(|_| data.to_string());
@@ -65,8 +66,8 @@ fn parse_vless(data: &str) -> Option<ServerProfile> {
     })
 }
 
-fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
-    let mut params = std::collections::HashMap::new();
+fn parse_query(query: &str) -> HashMap<String, String> {
+    let mut params = HashMap::new();
     for pair in query.split('&') {
         if let Some((key, value)) = pair.split_once('=') {
             params.insert(
@@ -99,4 +100,39 @@ fn urlencoding_decode(s: &str) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine as _;
+
+    #[test]
+    fn test_parse_vless_uri() {
+        let uri = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.2:8443?flow=xtls-rprx-vision&sni=127.0.0.2&remark=Test%20VLESS";
+        let result = parse_uri(uri);
+        assert!(result.is_some());
+        let p = result.unwrap();
+        assert_eq!(p.protocol, "vless");
+        assert_eq!(p.server, "127.0.0.2");
+        assert_eq!(p.port, 8443);
+        assert_eq!(p.uuid.unwrap(), "b831381d-6324-4d53-ad4f-8cda48b30811");
+        assert_eq!(p.flow.unwrap(), "xtls-rprx-vision");
+        assert_eq!(p.sni.unwrap(), "127.0.0.2");
+        assert_eq!(p.name, "Test VLESS");
+    }
+
+    #[test]
+    fn test_base64_decode() {
+        let encoded = base64::engine::general_purpose::STANDARD.encode("hello world");
+        let decoded = try_base64_decode(&encoded).unwrap();
+        assert_eq!(decoded, "hello world");
+    }
+
+    #[test]
+    fn test_urlencoding_decode() {
+        assert_eq!(urlencoding_decode("Test%20Server"), "Test Server");
+        assert_eq!(urlencoding_decode("hello+world"), "hello world");
+        assert_eq!(urlencoding_decode("normal"), "normal");
+    }
 }

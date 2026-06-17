@@ -14,11 +14,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum VpnError {
-    #[error("Config error: {0}")]
+    #[error("Config generation failed: {0}")]
     Config(String),
     #[error("Process error: {0}")]
     Process(String),
-    #[error("Install error: {0}")]
+    #[error("Installation error: {0}")]
     Install(String),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),

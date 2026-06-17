@@ -16,7 +16,8 @@ impl Installer {
     }
 
     pub fn is_installed(bin_dir: &PathBuf) -> bool {
-        bin_dir.join(Self::binary_name()).exists()
+        let binary_path = bin_dir.join(Self::binary_name());
+        binary_path.exists()
     }
 
     pub async fn install(bin_dir: &PathBuf, version: &str) -> Result<PathBuf, VpnError> {
@@ -28,7 +29,7 @@ impl Installer {
 
         let response = reqwest::get(&url)
             .await
-            .map_err(|e| VpnError::Install(format!("Failed to download: {e}")))?;
+            .map_err(|e| VpnError::Install(format!("Failed to download sing-box: {e}")))?;
 
         let bytes = response
             .bytes()
@@ -46,7 +47,7 @@ impl Installer {
         #[cfg(not(target_os = "windows"))]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755))
+            std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755))?;
         }
 
         Ok(binary_path)
@@ -86,14 +87,15 @@ impl Installer {
 
             let entry_name = entry.name().to_string();
             if entry_name.ends_with(binary_name) || entry_name.ends_with("sing-box") {
-                let mut out = std::fs::File::create(bin_dir.join(entry_name))
-                    .map_err(|e| VpnError::Install(format!("Failed to create binary: {e}")))?;
+                let mut out = std::fs::File::create(bin_dir.join(binary_name))
+                    .map_err(|e| VpnError::Install(format!("Failed to create binary file: {e}")))?;
                 std::io::copy(&mut entry, &mut out)
-                    .map_err(|e| VpnError::Install(format!("Failed to extract: {e}")))?;
+                    .map_err(|e| VpnError::Install(format!("Failed to extract binary: {e}")))?;
                 return Ok(());
             }
         }
-        Err(VpnError::Install("Binary not found in archive".into()))
+
+        Err(VpnError::Install("Binary not found in zip archive".into()))
     }
 
     fn extract_tar_gz(bytes: &[u8], bin_dir: &PathBuf, binary_name: &str) -> Result<(), VpnError> {
@@ -105,7 +107,8 @@ impl Installer {
             .map_err(|e| VpnError::Install(format!("Failed to read tar: {e}")))?
         {
             let mut entry =
-                entry.map_err(|e| VpnError::Install(format!("Failed to read entry: {e}")))?;
+                entry.map_err(|e| VpnError::Install(format!("Failed to read tar entry: {e}")))?;
+
             let path = entry.path().map_err(|e| VpnError::Install(e.to_string()))?;
             let file_name = path
                 .file_name()
@@ -115,16 +118,19 @@ impl Installer {
             if file_name == binary_name || file_name == "sing-box" {
                 entry
                     .unpack(bin_dir.join(binary_name))
-                    .map_err(|e| VpnError::Install(format!("Failed to extract: {e}")))?;
+                    .map_err(|e| VpnError::Install(format!("Failed to extract binary: {e}")))?;
                 return Ok(());
             }
         }
-        Err(VpnError::Install("Binary not found in archive".into()))
+
+        Err(VpnError::Install(
+            "Binary not found in tar.gz archive".into(),
+        ))
     }
 
     fn download_url(version: &str) -> String {
         let suffix = Self::platform_suffix();
-        format!("https://github.com/SagerNet/sing-box/releases/download/{version}/sing-box-{version}-{suffix}")
+        format!("https://github.com/SagerNet/sing-box/releases/download/v{version}/sing-box-{version}-{suffix}")
     }
 
     fn platform_suffix() -> &'static str {
@@ -136,5 +142,44 @@ impl Installer {
         {
             "linux-amd64.tar.gz"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_binary_name_not_empty() {
+        let name = Installer::binary_name();
+        assert!(!name.is_empty());
+        #[cfg(target_os = "windows")]
+        assert!(name.ends_with(".exe"));
+        #[cfg(not(target_os = "windows"))]
+        assert!(!name.ends_with(".exe"));
+    }
+
+    #[test]
+    fn test_platform_suffix_not_empty() {
+        let suffix = Installer::platform_suffix();
+        assert!(!suffix.is_empty());
+        assert!(suffix.ends_with(".zip") || suffix.ends_with(".tar.gz"));
+    }
+
+    #[test]
+    fn test_download_url_format() {
+        let url = Installer::download_url("1.13.13");
+        assert!(url.starts_with("https://github.com/SagerNet/sing-box/releases/download/"));
+        assert!(url.contains("v1.13.13"));
+        assert!(url.contains("sing-box-1.13.13-"));
+
+        let suffix = Installer::platform_suffix();
+        assert!(url.ends_with(suffix));
+    }
+
+    #[test]
+    fn test_is_installed_returns_false_for_nonexistent() {
+        let dir = PathBuf::from("/nonexistent/path");
+        assert!(!Installer::is_installed(&dir));
     }
 }
