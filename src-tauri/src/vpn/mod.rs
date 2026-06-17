@@ -1,3 +1,5 @@
+mod config;
+pub mod geoip;
 pub mod installer;
 mod process;
 
@@ -17,7 +19,7 @@ pub enum VpnError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServerConfig {
+pub struct ServerProfile {
     pub id: String,
     pub name: String,
     pub protocol: String,
@@ -32,7 +34,7 @@ pub struct ServerConfig {
     pub private_key: Option<String>,
 }
 
-impl Default for ServerConfig {
+impl Default for ServerProfile {
     fn default() -> Self {
         Self {
             id: String::new(),
