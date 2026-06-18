@@ -16,8 +16,10 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('home');
   const hasOnboarded = useVPNStore((state) => state.hasOnboarded);
   const hasAcceptedTerms = useVPNStore((state) => state.hasAcceptedTerms);
-  const { profiles, updateProfile, settings } = useVPNStore();
+  const { profiles, settings } = useVPNStore();
   const initListener = useVPNStore((state) => state.initListener);
+  const loadProfiles = useVPNStore((state) => state.loadProfiles);
+  const refreshProfile = useVPNStore((state) => state.refreshProfile);
   const status = useVPNStore((state) => state.status);
 
   // Init Tauri event listener on mount
@@ -35,21 +37,26 @@ export default function App() {
     };
   }, [initListener]);
 
-  // Auto-update profile timestamps
+  // Load saved profiles on mount
+  useEffect(() => {
+    loadProfiles().catch(() => undefined);
+  }, [loadProfiles]);
+
+  // Auto-refresh subscriptions at interval
   useEffect(() => {
     if (!settings.autoUpdateInterval || settings.autoUpdateInterval <= 0) return;
 
     const intervalMs = settings.autoUpdateInterval * 60 * 1000;
     const timer = setInterval(() => {
       profiles.forEach((p) => {
-        updateProfile(p.id, { lastUpdated: Date.now() });
+        refreshProfile(p.id).catch(() => undefined);
       });
     }, intervalMs);
 
     return () => {
       clearInterval(timer);
     };
-  }, [profiles, settings.autoUpdateInterval, updateProfile]);
+  }, [profiles, settings.autoUpdateInterval, refreshProfile]);
 
   const bgGlow = status === 'connected' ? 'shadow-[0_0_100px_rgba(16,185,129,0.15)]' : 'shadow-2xl';
 

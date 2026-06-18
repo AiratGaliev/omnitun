@@ -11,15 +11,19 @@ export function Onboarding() {
   const { settings, updateSettings } = useVPNStore();
   const { t } = useTranslation();
 
-  const handleConnectImpl = (linkStr: string, customName?: string) => {
-    if (linkStr) {
-      addProfile({
-        name: customName ?? 'Initial Profile',
-        url: linkStr,
-      });
+  const handleConnectImpl = async (linkStr: string, customName?: string) => {
+    try {
+      if (linkStr) {
+        await addProfile({
+          name: customName ?? 'Initial Profile',
+          url: linkStr,
+        });
+      }
+      toast.success(t('addedSuccess'));
+      completeOnboarding();
+    } catch {
+      toast.error('Failed to add subscription. Check the URL and try again.');
     }
-    toast.success(t('addedSuccess'));
-    completeOnboarding();
   };
 
   return (
