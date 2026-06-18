@@ -3,8 +3,11 @@ export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'er
 export interface Server {
   id: string;
   name: string;
-  flag: string;
-  ping: number;
+  flag?: string;
+  ping?: number;
+  protocol?: string;
+  host?: string;
+  port?: number;
 }
 
 export interface Profile {
@@ -12,6 +15,8 @@ export interface Profile {
   name: string;
   url: string;
   lastUpdated?: number;
+  servers: Server[];
+  error?: string;
 }
 
 export interface CustomCountry {

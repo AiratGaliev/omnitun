@@ -7,6 +7,22 @@ interface VpnStatusPayload {
   status: string | { error: string };
 }
 
+interface RustServerProfile {
+  id: string;
+  name: string;
+  protocol: string;
+  server: string;
+  port: number;
+}
+
+interface RustSubscriptionProfile {
+  id: string;
+  name: string;
+  url: string;
+  servers: RustServerProfile[];
+  updated_at: string;
+}
+
 interface VPNStore {
   status: ConnectionStatus;
   activeServer: Server | null;
@@ -20,9 +36,11 @@ interface VPNStore {
   setStatus: (status: ConnectionStatus) => void;
   setActiveServer: (server: Server) => void;
   setServers: (servers: Server[]) => void;
-  addProfile: (profile: Omit<Profile, 'id'>) => void;
+  addProfile: (data: { name: string; url: string }) => Promise<void>;
   updateProfile: (id: string, data: Partial<Profile>) => void;
-  removeProfile: (id: string) => void;
+  removeProfile: (id: string) => Promise<void>;
+  refreshProfile: (id: string) => Promise<void>;
+  loadProfiles: () => Promise<void>;
   updateSettings: (settings: Partial<Settings>) => void;
   completeOnboarding: () => void;
   acceptTerms: () => void;
@@ -52,6 +70,22 @@ function extractError(payload: VpnStatusPayload): string | undefined {
   return undefined;
 }
 
+function mapRustProfile(rust: RustSubscriptionProfile): Profile {
+  return {
+    id: rust.id,
+    name: rust.name,
+    url: rust.url,
+    lastUpdated: Date.parse(rust.updated_at) || Date.now(),
+    servers: (rust.servers || []).map((s: RustServerProfile): Server => ({
+      id: s.id,
+      name: s.name,
+      protocol: s.protocol,
+      host: s.server,
+      port: s.port,
+    })),
+  };
+}
+
 export const useVPNStore = create<VPNStore>((set, get) => ({
   status: 'disconnected',
   activeServer: defaultServers[0],
@@ -79,45 +113,62 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     autoUpdateInterval: 5,
   },
 
-  setStatus: (status) => {
-    set({ status });
+  setStatus: (status) => { set({ status }); },
+  setActiveServer: (server) => { set({ activeServer: server }); },
+  setServers: (servers) => { set({ servers }); },
+
+  addProfile: async (data) => {
+    try {
+      const result = await invoke<RustSubscriptionProfile>('add_subscription', {
+        name: data.name,
+        url: data.url,
+      });
+      const profile = mapRustProfile(result);
+      set((state) => ({ profiles: [...state.profiles, profile] }));
+    } catch (e) {
+      // Error handled by caller (toast)
+      throw e;
+    }
   },
-  setActiveServer: (server) => {
-    set({ activeServer: server });
+
+  updateProfile: (id, data) => set((state) => ({
+    profiles: state.profiles.map((p) => (p.id === id ? { ...p, ...data } : p)),
+  })),
+
+  removeProfile: async (id) => {
+    try {
+      await invoke('remove_subscription', { id });
+      set((state) => ({ profiles: state.profiles.filter((p) => p.id !== id) }));
+    } catch (e) {
+      throw e;
+    }
   },
-  setServers: (servers) => {
-    set({ servers });
+
+  refreshProfile: async (id) => {
+    try {
+      const result = await invoke<RustSubscriptionProfile>('refresh_subscription', { id });
+      const updated = mapRustProfile(result);
+      set((state) => ({
+        profiles: state.profiles.map((p) => (p.id === id ? { ...p, ...updated } : p)),
+      }));
+    } catch (e) {
+      throw e;
+    }
   },
-  addProfile: (profileData) => {
-    set((state) => ({
-      profiles: [
-        ...state.profiles,
-        { ...profileData, id: crypto.randomUUID(), lastUpdated: Date.now() },
-      ],
-    }));
+
+  loadProfiles: async () => {
+    try {
+      const results = await invoke<RustSubscriptionProfile[]>('get_subscriptions');
+      set({ profiles: results.map(mapRustProfile) });
+    } catch {
+      // Failed to load — stay with empty list
+    }
   },
-  updateProfile: (id, data) => {
-    set((state) => ({
-      profiles: state.profiles.map((p) => (p.id === id ? { ...p, ...data } : p)),
-    }));
-  },
-  removeProfile: (id) => {
-    set((state) => ({
-      profiles: state.profiles.filter((p) => p.id !== id),
-    }));
-  },
-  updateSettings: (newSettings) => {
-    set((state) => ({ settings: { ...state.settings, ...newSettings } }));
-  },
-  completeOnboarding: () => {
-    set({ hasOnboarded: true });
-  },
-  acceptTerms: () => {
-    set({ hasAcceptedTerms: true });
-  },
-  setSpeeds: (speeds) => {
-    set({ speeds });
-  },
+
+  updateSettings: (newSettings) => set((state) => ({ settings: { ...state.settings, ...newSettings } })),
+  completeOnboarding: () => { set({ hasOnboarded: true }); },
+  acceptTerms: () => { set({ hasAcceptedTerms: true }); },
+  setSpeeds: (speeds) => { set({ speeds }); },
 
   toggleConnection: async () => {
     const { status } = get();
@@ -126,7 +177,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         set({ status: 'connecting' });
         const profile = {
           id: 'default',
-          name: get().activeServer?.name ?? 'Default',
+          name: get().activeServer?.name || 'Default',
           protocol: 'vless',
           server: '127.0.0.1',
           port: 443,
