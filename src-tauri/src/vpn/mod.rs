@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::AppHandle;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -84,13 +83,13 @@ pub struct VpnManager {
 }
 
 impl VpnManager {
-    pub fn new(app_handle: AppHandle, data_dir: PathBuf) -> Self {
+    pub fn new(data_dir: PathBuf) -> Self {
         let bin_dir = data_dir.join("binaries");
         let config_dir = data_dir.join("config");
         let binary_path = bin_dir.join(Installer::binary_name());
 
         Self {
-            process_mgr: ProcessManager::new(app_handle.clone(), binary_path),
+            process_mgr: ProcessManager::new(binary_path),
             bin_dir,
             config_dir,
             installed: Arc::new(AtomicBool::new(false)),

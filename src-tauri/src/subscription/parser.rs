@@ -34,6 +34,10 @@ fn try_base64_decode(data: &str) -> Result<String, anyhow::Error> {
 fn parse_uri(uri: &str) -> Option<ServerProfile> {
     if let Some(remainder) = uri.strip_prefix("vless://") {
         parse_vless(remainder)
+    } else if let Some(remainder) = uri.strip_prefix("vmess://") {
+        parse_vmess(remainder)
+    } else if let Some(remainder) = uri.strip_prefix("ss://") {
+        parse_ss(remainder)
     } else {
         None
     }
@@ -61,6 +65,91 @@ fn parse_vless(data: &str) -> Option<ServerProfile> {
         method: None,
         sni: params.get("sni").cloned(),
         flow: params.get("flow").cloned(),
+        public_key: None,
+        private_key: None,
+    })
+}
+
+fn parse_vmess(data: &str) -> Option<ServerProfile> {
+    use base64::Engine as _;
+
+    let json_str = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(data.trim())
+            .ok()?,
+    )
+    .ok()?;
+
+    let v: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+
+    let server = v.get("add")?.as_str()?.to_string();
+    let port: u16 = v.get("port")?.as_u64()? as u16;
+
+    Some(ServerProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: v
+            .get("ps")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        protocol: "vmess".into(),
+        server,
+        port,
+        uuid: v.get("id").and_then(|x| x.as_str()).map(String::from),
+        password: None,
+        method: v
+            .get("scy")
+            .and_then(|x| x.as_str())
+            .map(String::from),
+        sni: v
+            .get("tls")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from),
+        flow: None,
+        public_key: None,
+        private_key: None,
+    })
+}
+
+fn parse_ss(data: &str) -> Option<ServerProfile> {
+    use base64::Engine as _;
+
+    let (userinfo_b64, host_part) = data.split_once('@')?;
+
+    let decoded = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(userinfo_b64.trim())
+            .ok()?,
+    )
+    .ok()?;
+
+    let (method, password) = decoded.split_once(':')?;
+
+    let (host, rest) = host_part.rsplit_once(':')?;
+    let (port_str, name) = if let Some((p, n)) = rest.split_once('#') {
+        (p, Some(n.to_string()))
+    } else {
+        (rest, None)
+    };
+    let port: u16 = port_str.parse().ok()?;
+
+    let server = host.to_string();
+    let name = name
+        .map(|n| urlencoding_decode(&n))
+        .unwrap_or_default();
+
+    Some(ServerProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        name,
+        protocol: "ss".into(),
+        server,
+        port,
+        uuid: None,
+        password: Some(password.to_string()),
+        method: Some(method.to_string()),
+        sni: None,
+        flow: None,
         public_key: None,
         private_key: None,
     })
@@ -134,5 +223,72 @@ mod tests {
         assert_eq!(urlencoding_decode("Test%20Server"), "Test Server");
         assert_eq!(urlencoding_decode("hello+world"), "hello world");
         assert_eq!(urlencoding_decode("normal"), "normal");
+    }
+
+    #[test]
+    fn test_parse_vmess_uri() {
+        let json = r#"{"v":"2","ps":"VMess 127.0.0.3","add":"127.0.0.3","port":8444,"id":"b831381d-6324-4d53-ad4f-8cda48b30811","aid":0,"scy":"auto","net":"tcp","type":"none","tls":""}"#;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(json);
+        let uri = format!("vmess://{}", encoded);
+        let result = parse_uri(&uri);
+        assert!(result.is_some(), "VMess URI should parse");
+        let p = result.unwrap();
+        assert_eq!(p.protocol, "vmess");
+        assert_eq!(p.server, "127.0.0.3");
+        assert_eq!(p.port, 8444);
+        assert_eq!(p.uuid.unwrap(), "b831381d-6324-4d53-ad4f-8cda48b30811");
+        assert_eq!(p.name, "VMess 127.0.0.3");
+        assert_eq!(p.method.unwrap(), "auto");
+        assert!(p.sni.is_none(), "Empty tls field means no SNI");
+    }
+
+    #[test]
+    fn test_parse_vmess_with_tls() {
+        let json = r#"{"v":"2","ps":"VMess TLS","add":"127.0.0.3","port":8444,"id":"b831381d-6324-4d53-ad4f-8cda48b30811","aid":0,"scy":"auto","net":"tcp","type":"none","tls":"example.com"}"#;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(json);
+        let uri = format!("vmess://{}", encoded);
+        let p = parse_uri(&uri).unwrap();
+        assert_eq!(p.sni.unwrap(), "example.com");
+    }
+
+    #[test]
+    fn test_parse_shadowsocks_uri() {
+        let userinfo = base64::engine::general_purpose::STANDARD.encode("aes-256-gcm:omnitun-test-password");
+        let uri = format!("ss://{}@127.0.0.4:8446#Shadowsocks+127.0.0.4", userinfo);
+        let result = parse_uri(&uri);
+        assert!(result.is_some(), "Shadowsocks URI should parse");
+        let p = result.unwrap();
+        assert_eq!(p.protocol, "ss");
+        assert_eq!(p.server, "127.0.0.4");
+        assert_eq!(p.port, 8446);
+        assert_eq!(p.method.unwrap(), "aes-256-gcm");
+        assert_eq!(p.password.unwrap(), "omnitun-test-password");
+        assert_eq!(p.name, "Shadowsocks 127.0.0.4");
+    }
+
+    #[test]
+    fn test_parse_shadowsocks_without_remark() {
+        let userinfo = base64::engine::general_purpose::STANDARD.encode("chacha20-ietf-poly1305:password");
+        let uri = format!("ss://{}@example.com:18443", userinfo);
+        let p = parse_uri(&uri).unwrap();
+        assert_eq!(p.server, "example.com");
+        assert_eq!(p.port, 18443);
+        assert_eq!(p.name, "");
+    }
+
+    #[test]
+    fn test_parse_subscription_multiple_protocols() {
+        let vless = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.2:8443?remark=VLESS+Test";
+        let vmess_json = r#"{"v":"2","ps":"VMess Test","add":"127.0.0.3","port":8444,"id":"b831381d-6324-4d53-ad4f-8cda48b30811","aid":0,"scy":"auto","net":"tcp","type":"none","tls":""}"#;
+        let vmess = format!("vmess://{}", base64::engine::general_purpose::STANDARD.encode(vmess_json));
+        let ss_userinfo = base64::engine::general_purpose::STANDARD.encode("aes-256-gcm:test");
+        let ss = format!("ss://{}@127.0.0.4:8446#SS+Test", ss_userinfo);
+
+        let data = format!("{}\n{}\n{}", vless, vmess, ss);
+        let servers = parse_subscription(&data).unwrap();
+        assert_eq!(servers.len(), 3);
+        assert_eq!(servers[0].protocol, "vless");
+        assert_eq!(servers[1].protocol, "vmess");
+        assert_eq!(servers[2].protocol, "ss");
     }
 }

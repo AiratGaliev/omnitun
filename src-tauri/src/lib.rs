@@ -70,7 +70,7 @@ pub fn run() {
 
             std::fs::create_dir_all(&data_dir).expect("Failed to create app data dir");
 
-            let manager = VpnManager::new(app.handle().clone(), data_dir);
+            let manager = VpnManager::new(data_dir);
             let state = VpnState {
                 manager: Arc::new(Mutex::new(manager)),
             };
