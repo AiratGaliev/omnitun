@@ -1,5 +1,12 @@
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
+export interface LogEntry {
+  id: string;
+  timestamp: number;
+  message: string;
+  type: 'info' | 'error' | 'warning' | 'success';
+}
+
 export interface Server {
   id: string;
   name: string;

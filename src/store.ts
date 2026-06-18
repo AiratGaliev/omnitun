@@ -1,7 +1,7 @@
 import {create} from 'zustand';
 import {invoke} from '@tauri-apps/api/core';
 import {listen} from '@tauri-apps/api/event';
-import type {ConnectionStatus, Profile, Server, Settings} from './types';
+import type {ConnectionStatus, Profile, Server, Settings, LogEntry} from './types';
 
 interface VpnStatusPayload {
   status: string | { error: string };
@@ -32,6 +32,7 @@ interface VPNStore {
   hasOnboarded: boolean;
   hasAcceptedTerms: boolean;
   speeds: { up: number; down: number };
+  logs: LogEntry[];
   isDirty: boolean;
   savingIn: number | null;
 
@@ -46,6 +47,8 @@ interface VPNStore {
   updateSettings: (settings: Partial<Settings>) => void;
   saveSettings: () => Promise<void>;
   loadSettings: () => Promise<void>;
+  addLog: (message: string, type?: LogEntry['type']) => void;
+  clearLogs: () => void;
   completeOnboarding: () => void;
   acceptTerms: () => void;
   setSpeeds: (speeds: { up: number; down: number }) => void;
@@ -103,6 +106,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   hasOnboarded: false,
   hasAcceptedTerms: false,
   speeds: {up: 0, down: 0},
+  logs: [],
   isDirty: false,
   savingIn: null,
   settings: {
@@ -233,6 +237,17 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       console.warn('[omnitun] Failed to load settings:', msg);
     }
   },
+
+  addLog: (message, type = 'info') => {
+    set((state) => ({
+      logs: [{id: crypto.randomUUID(), timestamp: Date.now(), message, type}, ...state.logs].slice(0, 1000),
+    }));
+  },
+
+  clearLogs: () => {
+    set({logs: []});
+  },
+
   completeOnboarding: () => {
     set({hasOnboarded: true});
   },
