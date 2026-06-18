@@ -1,5 +1,6 @@
 mod events;
 mod profile;
+mod settings;
 mod subscription;
 mod vpn;
 
