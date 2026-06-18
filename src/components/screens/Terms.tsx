@@ -2,11 +2,11 @@ import { motion } from 'framer-motion';
 import { ShieldAlert, Check, Languages } from 'lucide-react';
 import { useVPNStore } from '../../store';
 import { useTranslation } from '../../hooks/useTranslation';
+import { i18n } from '../../i18n';
 
 export function Terms() {
   const acceptTerms = useVPNStore((state) => state.acceptTerms);
-  const { settings, updateSettings } = useVPNStore();
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
 
   return (
     <motion.div
@@ -19,9 +19,9 @@ export function Terms() {
         <Languages size={16} className="text-zinc-500" />
         <div className="relative">
           <select
-            value={settings.language}
+            value={lang}
             onChange={(e) => {
-              updateSettings({ language: e.target.value as 'en' | 'ru' });
+              void i18n.changeLanguage(e.target.value);
             }}
             className="appearance-none bg-black/20 border border-white/10 rounded-lg pl-3 pr-8 py-1.5 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none cursor-pointer transition-colors"
           >

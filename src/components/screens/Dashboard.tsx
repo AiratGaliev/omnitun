@@ -72,9 +72,9 @@ export function Dashboard() {
         toast(t('protectionDisabled'));
       }
     } catch (e: unknown) {
-      const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : 'Connection failed';
+      const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : t('statusError');
       toast.error(msg, {
-        description: 'Check your configuration and try again',
+        description: t('connectionFailedDesc'),
       });
     }
   };
@@ -265,7 +265,7 @@ export function Dashboard() {
                 className={`text-xs font-bold uppercase tracking-widest ${isConnected ? 'text-emerald-500' : isConnecting ? 'text-blue-500' : status === 'error' ? 'text-red-500' : 'text-zinc-500'}`}
               >
                 {status === 'error'
-                  ? 'Error'
+                  ? t('statusError')
                   : isConnected
                     ? t('connected')
                     : isConnecting

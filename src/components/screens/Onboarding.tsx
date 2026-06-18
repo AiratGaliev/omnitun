@@ -3,13 +3,13 @@ import { ShieldCheck, Languages } from 'lucide-react';
 import { toast } from 'sonner';
 import { useVPNStore } from '../../store';
 import { useTranslation } from '../../hooks/useTranslation';
+import { i18n } from '../../i18n';
 import { AddProfileOptions } from '../AddProfileOptions';
 
 export function Onboarding() {
   const completeOnboarding = useVPNStore((state) => state.completeOnboarding);
   const addProfile = useVPNStore((state) => state.addProfile);
-  const { settings, updateSettings } = useVPNStore();
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
 
   const handleConnectImpl = async (linkStr: string, customName?: string) => {
     try {
@@ -22,7 +22,7 @@ export function Onboarding() {
       toast.success(t('addedSuccess'));
       completeOnboarding();
     } catch {
-      toast.error('Failed to add subscription. Check the URL and try again.');
+      toast.error(t('addFailed'));
     }
   };
 
@@ -37,9 +37,9 @@ export function Onboarding() {
         <Languages size={16} className="text-zinc-500" />
         <div className="relative z-50">
           <select
-            value={settings.language}
+            value={lang}
             onChange={(e) => {
-              updateSettings({ language: e.target.value as 'en' | 'ru' });
+              void i18n.changeLanguage(e.target.value);
             }}
             className="appearance-none bg-black/20 border border-white/10 rounded-lg pl-3 pr-8 py-1.5 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none cursor-pointer transition-colors"
           >

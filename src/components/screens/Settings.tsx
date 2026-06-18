@@ -16,6 +16,7 @@ import {
 import { toast } from 'sonner';
 import { useState, type ReactNode } from 'react';
 import { useTranslation } from '../../hooks/useTranslation';
+import { i18n } from '../../i18n';
 import * as z from 'zod';
 import { SegmentedControl } from '../SegmentedControl';
 
@@ -76,7 +77,7 @@ export function Settings() {
 
 function GeneralSettings() {
   const { settings, updateSettings } = useVPNStore();
-  const { t } = useTranslation();
+  const { t, lang } = useTranslation();
 
   return (
     <div className="space-y-4">
@@ -92,9 +93,9 @@ function GeneralSettings() {
         </div>
         <div className="relative">
           <select
-            value={settings.language}
+            value={lang}
             onChange={(e) => {
-              updateSettings({ language: e.target.value as 'en' | 'ru' });
+              void i18n.changeLanguage(e.target.value);
             }}
             className="appearance-none bg-black/20 border border-white/10 rounded-lg pl-3 pr-8 py-1.5 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none cursor-pointer transition-colors"
           >
