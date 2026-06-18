@@ -2,19 +2,15 @@ use crate::vpn::VpnError;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tauri::AppHandle;
 
 pub struct ProcessManager {
-    #[allow(dead_code)]
-    app_handle: AppHandle,
     binary_path: PathBuf,
     running: Arc<AtomicBool>,
 }
 
 impl ProcessManager {
-    pub fn new(app_handle: AppHandle, binary_path: PathBuf) -> Self {
+    pub fn new(binary_path: PathBuf) -> Self {
         Self {
-            app_handle,
             binary_path,
             running: Arc::new(AtomicBool::new(false)),
         }
@@ -118,5 +114,55 @@ impl ProcessManager {
         drop(status);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn test_initial_state_not_running() {
+        let mgr = ProcessManager::new(PathBuf::from("sing-box"));
+        assert!(!mgr.is_running());
+    }
+
+    #[tokio::test]
+    async fn test_stop_when_not_running_is_noop() {
+        let mgr = ProcessManager::new(PathBuf::from("sing-box"));
+        let result = mgr.stop().await;
+        assert!(result.is_ok());
+        assert!(!mgr.is_running());
+    }
+
+    #[tokio::test]
+    async fn test_double_start_returns_error() {
+        let mgr = ProcessManager::new(PathBuf::from("sing-box"));
+        mgr.running.store(true, Ordering::SeqCst);
+        let result = mgr.start(&PathBuf::from("config.json")).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("VPN is already running"));
+    }
+
+    #[tokio::test]
+    async fn test_running_flag_persists_after_forced_set() {
+        let mgr = ProcessManager::new(PathBuf::from("sing-box"));
+        assert!(!mgr.is_running());
+        mgr.running.store(true, Ordering::SeqCst);
+        assert!(mgr.is_running());
+        mgr.running.store(false, Ordering::SeqCst);
+        assert!(!mgr.is_running());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_invalid_config_path_returns_error() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let mgr = ProcessManager::new(PathBuf::from("sing-box"));
+        let bad_path = PathBuf::from(OsStr::from_bytes(&[0xFF]));
+        let result = mgr.start(&bad_path).await;
+        assert!(result.is_err());
     }
 }
