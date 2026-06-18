@@ -7,6 +7,7 @@ mod vpn;
 use crate::events::emit_status;
 use crate::profile::ProfileManager;
 use crate::subscription::SubscriptionProfile;
+use crate::settings::{AppSettings, SettingsManager};
 use crate::vpn::{ServerProfile, VpnManager, VpnStatus};
 use std::sync::Arc;
 use tauri::Manager;
@@ -100,6 +101,26 @@ async fn refresh_subscription(
     mgr.refresh(&id).await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn get_settings(state: tauri::State<'_, Mutex<AppSettings>>) -> Result<AppSettings, String> {
+    let settings = state.lock().await;
+    Ok(settings.clone())
+}
+
+#[tauri::command]
+async fn update_settings(
+    new_settings: AppSettings,
+    settings: tauri::State<'_, Mutex<AppSettings>>,
+    settings_mgr: tauri::State<'_, Mutex<SettingsManager>>,
+) -> Result<(), String> {
+    {
+        let mut current = settings.lock().await;
+        *current = new_settings.clone();
+    }
+    let mgr = settings_mgr.lock().await;
+    mgr.save(&new_settings)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -121,6 +142,11 @@ pub fn run() {
             };
             app.manage(vpn_state);
 
+            let settings_mgr = SettingsManager::new(data_dir.clone());
+            let settings = settings_mgr.load().expect("Failed to load settings");
+            app.manage(Mutex::new(settings_mgr));
+            app.manage(Mutex::new(settings));
+
             let mut profile_manager = ProfileManager::new(data_dir);
             profile_manager
                 .load()
@@ -140,6 +166,8 @@ pub fn run() {
             remove_subscription,
             get_subscriptions,
             refresh_subscription,
+            get_settings,
+            update_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
