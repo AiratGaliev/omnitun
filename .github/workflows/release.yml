@@ -11,7 +11,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
+  build:
     strategy:
       fail-fast: false
       matrix:
@@ -64,10 +64,77 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
-      - name: Upload Release Artifact
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ matrix.target }}
+          path: src-tauri/target/release/bundle/
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all bundle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bundle-*
+          merge-multiple: true
+          path: bundles
+
+      - name: Generate updater.json
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          REPO="${{ github.repository }}"
+          TAG="${{ github.ref_name }}"
+
+          # Windows signature
+          WIN_SIG=""
+          WIN_SIG_FILE=$(find bundles -name "*.nsis.zip.sig" | head -1)
+          if [ -n "$WIN_SIG_FILE" ]; then
+            WIN_SIG=$(cat "$WIN_SIG_FILE")
+            WIN_URL="https://github.com/${REPO}/releases/download/${TAG}/$(basename "${WIN_SIG_FILE%.sig}")"
+          fi
+
+          # Linux signature
+          LINUX_SIG=""
+          LINUX_SIG_FILE=$(find bundles -name "*.AppImage.tar.gz.sig" | head -1)
+          if [ -n "$LINUX_SIG_FILE" ]; then
+            LINUX_SIG=$(cat "$LINUX_SIG_FILE")
+            LINUX_URL="https://github.com/${REPO}/releases/download/${TAG}/$(basename "${LINUX_SIG_FILE%.sig}")"
+          fi
+
+          jq -n \
+            --arg v "$VERSION" \
+            --arg date "$DATE" \
+            --arg win_url "${WIN_URL:-}" \
+            --arg win_sig "${WIN_SIG:-}" \
+            --arg linux_url "${LINUX_URL:-}" \
+            --arg linux_sig "${LINUX_SIG:-}" \
+            '{
+              version: $v,
+              pub_date: $date,
+              platforms: {
+                "windows-x86_64": {
+                  signature: $win_sig,
+                  url: $win_url
+                },
+                "linux-x86_64": {
+                  signature: $linux_sig,
+                  url: $linux_url
+                }
+              }
+            }' > bundles/updater.json
+
+          echo "updater.json generated for version $VERSION"
+
+      - name: Upload Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            src-tauri/target/release/bundle/**/*
+          files: bundles/**/*
           generate_release_notes: true
           draft: true
