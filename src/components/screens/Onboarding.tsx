@@ -79,7 +79,7 @@ export function Onboarding() {
 
       <AddProfileOptions
         onAdd={(url, name) => {
-          handleConnectImpl(url, name);
+          void handleConnectImpl(url, name);
         }}
         horizontal={true}
       />

@@ -76,13 +76,15 @@ function mapRustProfile(rust: RustSubscriptionProfile): Profile {
     name: rust.name,
     url: rust.url,
     lastUpdated: Date.parse(rust.updated_at) || Date.now(),
-    servers: (rust.servers || []).map((s: RustServerProfile): Server => ({
-      id: s.id,
-      name: s.name,
-      protocol: s.protocol,
-      host: s.server,
-      port: s.port,
-    })),
+    servers: rust.servers.map(
+      (s: RustServerProfile): Server => ({
+        id: s.id,
+        name: s.name,
+        protocol: s.protocol,
+        host: s.server,
+        port: s.port,
+      }),
+    ),
   };
 }
 
@@ -113,9 +115,15 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     autoUpdateInterval: 5,
   },
 
-  setStatus: (status) => { set({ status }); },
-  setActiveServer: (server) => { set({ activeServer: server }); },
-  setServers: (servers) => { set({ servers }); },
+  setStatus: (status) => {
+    set({ status });
+  },
+  setActiveServer: (server) => {
+    set({ activeServer: server });
+  },
+  setServers: (servers) => {
+    set({ servers });
+  },
 
   addProfile: async (data) => {
     try {
@@ -131,9 +139,11 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     }
   },
 
-  updateProfile: (id, data) => set((state) => ({
-    profiles: state.profiles.map((p) => (p.id === id ? { ...p, ...data } : p)),
-  })),
+  updateProfile: (id, data) => {
+    set((state) => ({
+      profiles: state.profiles.map((p) => (p.id === id ? { ...p, ...data } : p)),
+    }));
+  },
 
   removeProfile: async (id) => {
     try {
@@ -165,10 +175,18 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     }
   },
 
-  updateSettings: (newSettings) => set((state) => ({ settings: { ...state.settings, ...newSettings } })),
-  completeOnboarding: () => { set({ hasOnboarded: true }); },
-  acceptTerms: () => { set({ hasAcceptedTerms: true }); },
-  setSpeeds: (speeds) => { set({ speeds }); },
+  updateSettings: (newSettings) => {
+    set((state) => ({ settings: { ...state.settings, ...newSettings } }));
+  },
+  completeOnboarding: () => {
+    set({ hasOnboarded: true });
+  },
+  acceptTerms: () => {
+    set({ hasAcceptedTerms: true });
+  },
+  setSpeeds: (speeds) => {
+    set({ speeds });
+  },
 
   toggleConnection: async () => {
     const { status } = get();
@@ -177,7 +195,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         set({ status: 'connecting' });
         const profile = {
           id: 'default',
-          name: get().activeServer?.name || 'Default',
+          name: get().activeServer?.name ?? 'Default',
           protocol: 'vless',
           server: '127.0.0.1',
           port: 443,

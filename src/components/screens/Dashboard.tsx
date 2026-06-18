@@ -154,9 +154,9 @@ export function Dashboard() {
                         </div>
                         <div className="flex items-center gap-1">
                           <span
-                            className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${server.ping < 60 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-yellow-500/20 text-yellow-400'}`}
+                            className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${(server.ping ?? 999) < 60 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-yellow-500/20 text-yellow-400'}`}
                           >
-                            {server.ping}ms
+                            {server.ping ?? '-'}ms
                           </span>
                           {activeServer?.id === server.id && <Check size={14} className="ml-1" />}
                         </div>

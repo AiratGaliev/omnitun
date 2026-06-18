@@ -16,29 +16,31 @@ const profileSchema = z.object({
 });
 
 export function Profiles() {
-  const {profiles, addProfile, removeProfile, refreshProfile} = useVPNStore();
+  const {profiles, addProfile, removeProfile, refreshProfile, updateProfile} = useVPNStore();
   const {t} = useTranslation();
 
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  const handleRefresh = async (profile: Profile) => {
-    try {
-      toast(`${t('updatingProfile')}${profile.name}...`);
-      await refreshProfile(profile.id);
+  const handleRefresh = (profile: Profile) => {
+    toast(`${t('updatingProfile')}${profile.name}...`);
+    refreshProfile(profile.id)
+    .then(() => {
       toast.success(`${t('profileStr')}${profile.name}${t('profileUpdated')}`);
-    } catch {
+    })
+    .catch(() => {
       toast.error('Failed to refresh subscription');
-    }
+    });
   };
 
-  const handleDelete = async (id: string, name: string) => {
+  const handleDelete = (id: string, name: string) => {
     if (confirm(`${t('deleteProfileConfirm')}${name}?`)) {
-      try {
-        await removeProfile(id);
+      removeProfile(id)
+      .then(() => {
         toast.success(t('profileDeleted'));
-      } catch {
+      })
+      .catch(() => {
         toast.error('Failed to delete profile');
-      }
+      });
     }
   };
 
@@ -60,8 +62,9 @@ export function Profiles() {
         <div className="mb-6 flex justify-center w-full">
           <AddProfileOptions
               onAdd={(url, name) => {
-                addProfile({name: name ?? 'New Profile', url});
-                toast.success(t('profileAdded'));
+                void addProfile({name: name ?? 'New Profile', url}).then(() => {
+                  toast.success(t('profileAdded'));
+                });
               }}
               horizontal={true}
               className="max-w-full"
@@ -74,7 +77,7 @@ export function Profiles() {
                 <ProfileItem
                     key={p.id}
                     profile={p}
-                    updateProfile={refreshProfile}
+                    updateProfile={updateProfile}
                     handleRefresh={handleRefresh}
                     t={t}
                     editingId={editingId}
@@ -103,6 +106,16 @@ export function Profiles() {
   );
 }
 
+interface ProfileItemProps {
+  readonly profile: Profile;
+  readonly updateProfile: (id: string, data: Partial<Profile>) => void;
+  readonly handleRefresh: (profile: Profile) => void;
+  readonly t: (key: TranslationKey) => string;
+  readonly editingId: string | null;
+  readonly setEditingId: (id: string | null) => void;
+  readonly handleDelete: (id: string, name: string) => void;
+}
+
 function ProfileItem({
                        profile: p,
                        updateProfile,
@@ -111,15 +124,7 @@ function ProfileItem({
                        editingId,
                        setEditingId,
                        handleDelete,
-                     }: {
-  profile: Profile;
-  updateProfile: (id: string, data: Partial<Profile>) => void;
-  handleRefresh: (profile: Profile) => void;
-  t: (key: TranslationKey) => string;
-  editingId: string | null;
-  setEditingId: (id: string | null) => void;
-  handleDelete: (id: string, name: string) => void;
-}) {
+                     }: ProfileItemProps) {
   const [editName, setEditName] = useState(p.name);
   const [editUrl, setEditUrl] = useState(p.url);
   // eslint-disable-next-line react-hooks/purity
@@ -187,7 +192,7 @@ function ProfileItem({
                   <p className="text-xs text-zinc-500 font-mono mt-1 break-all max-w-[400px] truncate">
                     {p.url}
                   </p>
-                  {p.servers && p.servers.length > 0 && (
+                  {p.servers.length > 0 && (
                       <span
                           className="inline-block mt-1.5 text-[10px] text-emerald-400/80 bg-emerald-500/10 px-2 py-0.5 rounded-full">
                   {p.servers.length} {p.servers.length === 1 ? 'server' : 'servers'}
