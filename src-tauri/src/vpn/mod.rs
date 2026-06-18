@@ -18,6 +18,8 @@ pub enum VpnError {
     Config(String),
     #[error("Process error: {0}")]
     Process(String),
+    #[error("Subscription error: {0}")]
+    Subscription(String),
     #[error("Installation error: {0}")]
     Install(String),
     #[error("IO error: {0}")]
