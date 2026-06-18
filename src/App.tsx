@@ -16,8 +16,8 @@ type Tab = 'home' | 'profiles' | 'settings' | 'logs' | 'about';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('home');
+  const [isInitialized, setIsInitialized] = useState(false);
   const hasOnboarded = useVPNStore((state) => state.hasOnboarded);
-  const hasAcceptedTerms = useVPNStore((state) => state.hasAcceptedTerms);
   const { profiles, settings } = useVPNStore();
   const initListener = useVPNStore((state) => state.initListener);
   const loadProfiles = useVPNStore((state) => state.loadProfiles);
@@ -39,10 +39,14 @@ export default function App() {
     };
   }, [initListener]);
 
-  // Load saved profiles and settings on mount
+  // Load saved profiles and settings on mount, mark initialized when done
   useEffect(() => {
-    loadProfiles().catch(() => undefined);
-    loadSettings().catch(() => undefined);
+    void Promise.all([
+      loadProfiles().catch(() => undefined),
+      loadSettings().catch(() => undefined),
+    ]).then(() => {
+      setIsInitialized(true);
+    });
   }, [loadProfiles, loadSettings]);
 
   // Apply persisted language to i18n when settings load
@@ -80,8 +84,9 @@ export default function App() {
         }}
       />
 
+      {!isInitialized ? null : (
       <AnimatePresence mode="wait">
-        {!hasAcceptedTerms ? (
+        {!settings.acceptTerms ? (
           <Terms key="terms" />
         ) : !hasOnboarded ? (
           <Onboarding key="onboarding" />
@@ -161,6 +166,7 @@ export default function App() {
           </motion.div>
         )}
       </AnimatePresence>
+      )}
     </div>
   );
 }

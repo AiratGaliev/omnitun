@@ -5,7 +5,6 @@ import {useTranslation} from '../../hooks/useTranslation';
 import {i18n} from '../../i18n';
 
 export function Terms() {
-  const acceptTerms = useVPNStore((state) => state.acceptTerms);
   const {updateSettings} = useVPNStore();
   const {t, lang} = useTranslation();
 
@@ -69,7 +68,10 @@ export function Terms() {
 
         <div className="w-full max-w-md">
           <button
-              onClick={acceptTerms}
+              onClick={() => {
+                updateSettings({acceptTerms: true});
+                void useVPNStore.getState().saveSettings();
+              }}
               className="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold rounded-xl py-4 flex items-center justify-center gap-2 transition-all active:scale-[0.98] shadow-lg shadow-emerald-500/20"
           >
             <Check size={20}/>
