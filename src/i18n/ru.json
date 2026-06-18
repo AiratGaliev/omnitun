@@ -123,5 +123,7 @@
   "statusError": "Ошибка",
   "addFailed": "Не удалось добавить подписку. Проверьте URL и попробуйте снова.",
   "serverSingular": "сервер",
-  "serverPlural": "серверов"
+  "serverPlural": "серверов",
+  "unsavedChanges": "Несохранённые изменения",
+  "savingIn": "Автосохранение через"
 }

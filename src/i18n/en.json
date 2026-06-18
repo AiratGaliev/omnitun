@@ -123,5 +123,7 @@
   "statusError": "Error",
   "addFailed": "Failed to add subscription. Check the URL and try again.",
   "serverSingular": "server",
-  "serverPlural": "servers"
+  "serverPlural": "servers",
+  "unsavedChanges": "Unsaved changes",
+  "savingIn": "Saving in"
 }

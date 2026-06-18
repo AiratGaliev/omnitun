@@ -31,12 +31,32 @@ export function Settings() {
     'general',
   );
   const { t } = useTranslation();
+  const isDirty = useVPNStore((state) => state.isDirty);
+  const savingIn = useVPNStore((state) => state.savingIn);
+  const saveSettings = useVPNStore((state) => state.saveSettings);
 
   return (
     <div className="flex flex-col h-full w-full p-8">
       <header className="mb-8">
-        <h1 className="text-2xl font-bold tracking-tight">{t('systemConfig')}</h1>
-        <p className="text-zinc-500 text-sm mt-1">{t('systemConfigDesc')}</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">{t('systemConfig')}</h1>
+            <p className="text-zinc-500 text-sm mt-1">{t('systemConfigDesc')}</p>
+          </div>
+          {isDirty && (
+            <div className="flex items-center gap-3 text-sm shrink-0">
+              <span className="text-neutral-400">
+                ○ {t('unsavedChanges')} · {t('savingIn')} {savingIn?.toFixed(1)}s
+              </span>
+              <button
+                onClick={() => { void saveSettings(); }}
+                className="rounded-lg bg-violet-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-violet-500 transition-colors"
+              >
+                {t('save')}
+              </button>
+            </div>
+          )}
+        </div>
       </header>
 
       <div className="mb-8">
