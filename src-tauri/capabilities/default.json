@@ -9,6 +9,7 @@
     "shell:default",
     "shell:allow-execute",
     "shell:allow-stdin-write",
-    "fs:default"
+    "fs:default",
+    "updater:default"
   ]
 }
