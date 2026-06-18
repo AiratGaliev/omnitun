@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Toaster } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useVPNStore } from './store';
+import { i18n } from './i18n';
 import { Onboarding } from './components/screens/Onboarding';
 import { Dashboard } from './components/screens/Dashboard';
 import { Profiles } from './components/screens/Profiles';
@@ -43,6 +44,11 @@ export default function App() {
     loadProfiles().catch(() => undefined);
     loadSettings().catch(() => undefined);
   }, [loadProfiles, loadSettings]);
+
+  // Apply persisted language to i18n when settings load
+  useEffect(() => {
+    void i18n.changeLanguage(settings.language);
+  }, [settings.language]);
 
   // Auto-refresh subscriptions at interval
   useEffect(() => {
