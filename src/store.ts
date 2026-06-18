@@ -1,7 +1,7 @@
 import {create} from 'zustand';
 import {invoke} from '@tauri-apps/api/core';
 import {listen} from '@tauri-apps/api/event';
-import type {ConnectionStatus, Profile, Server, Settings, LogEntry} from './types';
+import type {ConnectionStatus, LogEntry, Profile, Server, Settings} from './types';
 
 interface VpnStatusPayload {
   status: string | { error: string };
@@ -105,6 +105,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   logs: [],
   settingsVersion: 0,
   settings: {
+    acceptTerms: false,
     routingMode: 'vpn',
     proxyPort: 1080,
     bypassRu: true,
@@ -212,7 +213,12 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
 
   addLog: (message, type = 'info') => {
     set((state) => ({
-      logs: [{id: crypto.randomUUID(), timestamp: Date.now(), message, type}, ...state.logs].slice(0, 1000),
+      logs: [{
+        id: crypto.randomUUID(),
+        timestamp: Date.now(),
+        message,
+        type
+      }, ...state.logs].slice(0, 1000),
     }));
   },
 

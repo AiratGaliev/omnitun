@@ -5,6 +5,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
+    pub accept_terms: bool,
     pub routing_mode: String,
     pub proxy_port: u16,
     pub bypass_ru: bool,
@@ -34,6 +35,7 @@ pub struct CustomCountry {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            accept_terms: false,
             routing_mode: "vpn".to_string(),
             proxy_port: 1080,
             bypass_ru: true,

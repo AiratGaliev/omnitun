@@ -33,6 +33,7 @@ export interface CustomCountry {
 }
 
 export interface Settings {
+  acceptTerms: boolean;
   routingMode: 'vpn' | 'proxy';
   proxyPort: number;
   bypassRu: boolean;
