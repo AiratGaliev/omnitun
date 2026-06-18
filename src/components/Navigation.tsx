@@ -1,10 +1,10 @@
-import { Home, List, Settings, Info } from 'lucide-react';
+import { Home, List, Settings, Info, Terminal } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useTranslation } from '../hooks/useTranslation';
 
 interface NavigationProps {
-  activeTab: 'home' | 'profiles' | 'settings' | 'about';
-  onChange: (tab: 'home' | 'profiles' | 'settings' | 'about') => void;
+  activeTab: 'home' | 'profiles' | 'settings' | 'logs' | 'about';
+  onChange: (tab: 'home' | 'profiles' | 'settings' | 'logs' | 'about') => void;
 }
 
 export function Navigation({ activeTab, onChange }: NavigationProps) {
@@ -14,6 +14,7 @@ export function Navigation({ activeTab, onChange }: NavigationProps) {
     { id: 'home', icon: Home, label: t('navHome') },
     { id: 'profiles', icon: List, label: t('navProfiles') },
     { id: 'settings', icon: Settings, label: t('navSettings') },
+    { id: 'logs', icon: Terminal, label: t('navLogs') },
     { id: 'about', icon: Info, label: t('about') },
   ] as const;
 

@@ -6,11 +6,12 @@ import { Onboarding } from './components/screens/Onboarding';
 import { Dashboard } from './components/screens/Dashboard';
 import { Profiles } from './components/screens/Profiles';
 import { Settings } from './components/screens/Settings';
+import { Logs } from './components/screens/Logs';
 import { About } from './components/screens/About';
 import { Terms } from './components/screens/Terms';
 import { Navigation } from './components/Navigation';
 
-type Tab = 'home' | 'profiles' | 'settings' | 'about';
+type Tab = 'home' | 'profiles' | 'settings' | 'logs' | 'about';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('home');
@@ -135,6 +136,18 @@ export default function App() {
                       className="absolute inset-0"
                     >
                       <Settings />
+                    </motion.div>
+                  )}
+                  {activeTab === 'logs' && (
+                    <motion.div
+                      key="logs"
+                      initial={{ opacity: 0, x: 20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: -20 }}
+                      transition={{ duration: 0.2 }}
+                      className="absolute inset-0"
+                    >
+                      <Logs />
                     </motion.div>
                   )}
                   {activeTab === 'about' && (

@@ -125,5 +125,12 @@
   "serverSingular": "server",
   "serverPlural": "servers",
   "unsavedChanges": "Unsaved changes",
-  "savingIn": "Saving in"
+  "savingIn": "Saving in",
+  "navLogs": "Logs",
+  "logsTitle": "Event Log",
+  "logsDesc": "System events and connection log stream.",
+  "clearLogs": "Clear",
+  "noLogs": "No log entries yet.",
+  "saving": "Saving",
+  "saved": "Saved"
 }

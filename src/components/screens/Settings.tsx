@@ -12,9 +12,12 @@ import {
   Plus,
   RefreshCw,
   Lock,
+  Check,
+  Loader2,
+  Timer,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { useState, type ReactNode } from 'react';
+import { useState, useEffect, useRef, type ReactNode } from 'react';
 import { useTranslation } from '../../hooks/useTranslation';
 import { i18n } from '../../i18n';
 import * as z from 'zod';
@@ -31,32 +34,79 @@ export function Settings() {
     'general',
   );
   const { t } = useTranslation();
-  const isDirty = useVPNStore((state) => state.isDirty);
-  const savingIn = useVPNStore((state) => state.savingIn);
-  const saveSettings = useVPNStore((state) => state.saveSettings);
+  const { settings } = useVPNStore();
+  const [saveState, setSaveState] = useState<'idle' | 'countdown' | 'saving'>('idle');
+  const [countdown, setCountdown] = useState(5);
+  const isInitialMount = useRef(true);
+
+  useEffect(() => {
+    if (isInitialMount.current) {
+      isInitialMount.current = false;
+      return;
+    }
+    setSaveState('countdown');
+    setCountdown(5);
+  }, [settings]);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+
+    if (saveState === 'countdown') {
+      if (countdown > 0) {
+        timer = setTimeout(() => { setCountdown((c) => c - 1); }, 1000);
+      } else {
+        timer = setTimeout(() => {
+          setSaveState('saving');
+          void useVPNStore.getState().saveSettings();
+        }, 0);
+      }
+    } else if (saveState === 'saving') {
+      timer = setTimeout(() => { setSaveState('idle'); }, 500);
+    }
+
+    return () => { clearTimeout(timer); };
+  }, [saveState, countdown]);
+
+  const handleManualSave = () => {
+    if (saveState === 'countdown') {
+      setSaveState('saving');
+      void useVPNStore.getState().saveSettings();
+    }
+  };
 
   return (
-    <div className="flex flex-col h-full w-full p-8">
-      <header className="mb-8">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">{t('systemConfig')}</h1>
-            <p className="text-zinc-500 text-sm mt-1">{t('systemConfigDesc')}</p>
-          </div>
-          {isDirty && (
-            <div className="flex items-center gap-3 text-sm shrink-0">
-              <span className="text-neutral-400">
-                ○ {t('unsavedChanges')} · {t('savingIn')} {savingIn?.toFixed(1)}s
-              </span>
-              <button
-                onClick={() => { void saveSettings(); }}
-                className="rounded-lg bg-violet-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-violet-500 transition-colors"
-              >
-                {t('save')}
-              </button>
-            </div>
-          )}
+    <div className="flex flex-col h-full w-full p-8 pt-6">
+      <header className="mb-8 flex justify-between items-start gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">{t('systemConfig')}</h1>
+          <p className="text-zinc-500 text-sm mt-1">{t('systemConfigDesc')}</p>
         </div>
+
+        <button
+          onClick={handleManualSave}
+          disabled={saveState !== 'countdown'}
+          className={`shrink-0 flex items-center justify-center gap-2 px-3 py-1.5 md:px-4 md:py-2 rounded-xl text-xs md:text-sm font-medium transition-colors border ${
+            saveState === 'countdown'
+              ? 'bg-blue-500/10 text-blue-400 border-blue-500/20 hover:bg-blue-500/20 cursor-pointer shadow-[0_0_15px_rgba(59,130,246,0.15)]'
+              : 'bg-black/20 text-zinc-300 border-white/5 cursor-default'
+          }`}
+        >
+          {saveState === 'saving' ? (
+            <Loader2 size={16} className="animate-spin text-zinc-400" />
+          ) : saveState === 'countdown' ? (
+            <Timer size={16} className="animate-pulse" />
+          ) : (
+            <Check size={16} className="text-emerald-500" />
+          )}
+
+          <span className="hidden sm:inline">
+            {saveState === 'saving'
+              ? t('saving')
+              : saveState === 'countdown'
+              ? `${t('savingIn')} ${String(countdown)}s`
+              : t('saved')}
+          </span>
+        </button>
       </header>
 
       <div className="mb-8">

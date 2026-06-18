@@ -33,8 +33,6 @@ interface VPNStore {
   hasAcceptedTerms: boolean;
   speeds: { up: number; down: number };
   logs: LogEntry[];
-  isDirty: boolean;
-  savingIn: number | null;
 
   setStatus: (status: ConnectionStatus) => void;
   setActiveServer: (server: Server) => void;
@@ -95,9 +93,6 @@ function mapRustProfile(rust: RustSubscriptionProfile): Profile {
   };
 }
 
-let _debounceTimer: ReturnType<typeof setTimeout> | null = null;
-let _countdownInterval: ReturnType<typeof setInterval> | null = null;
-
 export const useVPNStore = create<VPNStore>((set, get) => ({
   status: 'disconnected',
   activeServer: defaultServers[0],
@@ -107,8 +102,6 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   hasAcceptedTerms: false,
   speeds: {up: 0, down: 0},
   logs: [],
-  isDirty: false,
-  savingIn: null,
   settings: {
     routingMode: 'vpn',
     proxyPort: 1080,
@@ -192,37 +185,13 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   updateSettings: (newSettings) => {
     set((state) => ({
       settings: {...state.settings, ...newSettings},
-      isDirty: true,
-      savingIn: 5,
     }));
-
-    if (_debounceTimer) clearTimeout(_debounceTimer);
-    if (_countdownInterval) clearInterval(_countdownInterval);
-
-    const startTime = Date.now();
-    const duration = 5000;
-    _countdownInterval = setInterval(() => {
-      const elapsed = Date.now() - startTime;
-      const remaining = Math.max(0, (duration - elapsed) / 1000);
-      set({savingIn: remaining});
-      if (remaining <= 0) {
-        if (_countdownInterval) {
-          clearInterval(_countdownInterval);
-          _countdownInterval = null;
-        }
-      }
-    }, 100);
-
-    _debounceTimer = setTimeout(() => {
-      void get().saveSettings();
-    }, duration);
   },
 
   saveSettings: async () => {
     try {
       const {settings} = get();
       await invoke('update_settings', {newSettings: settings});
-      set({isDirty: false, savingIn: null});
     } catch (e) {
       console.error('[omnitun] Failed to save settings:', e);
     }
@@ -231,7 +200,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   loadSettings: async () => {
     try {
       const result = await invoke<Settings>('get_settings');
-      set({settings: result, isDirty: false, savingIn: null});
+      set({settings: result});
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Unknown error';
       console.warn('[omnitun] Failed to load settings:', msg);
