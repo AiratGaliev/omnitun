@@ -32,6 +32,8 @@ interface VPNStore {
   hasOnboarded: boolean;
   hasAcceptedTerms: boolean;
   speeds: { up: number; down: number };
+  isDirty: boolean;
+  savingIn: number | null;
 
   setStatus: (status: ConnectionStatus) => void;
   setActiveServer: (server: Server) => void;
@@ -42,6 +44,8 @@ interface VPNStore {
   refreshProfile: (id: string) => Promise<void>;
   loadProfiles: () => Promise<void>;
   updateSettings: (settings: Partial<Settings>) => void;
+  saveSettings: () => Promise<void>;
+  loadSettings: () => Promise<void>;
   completeOnboarding: () => void;
   acceptTerms: () => void;
   setSpeeds: (speeds: { up: number; down: number }) => void;
@@ -88,6 +92,9 @@ function mapRustProfile(rust: RustSubscriptionProfile): Profile {
   };
 }
 
+let _debounceTimer: ReturnType<typeof setTimeout> | null = null;
+let _countdownInterval: ReturnType<typeof setInterval> | null = null;
+
 export const useVPNStore = create<VPNStore>((set, get) => ({
   status: 'disconnected',
   activeServer: defaultServers[0],
@@ -96,6 +103,8 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   hasOnboarded: false,
   hasAcceptedTerms: false,
   speeds: { up: 0, down: 0 },
+  isDirty: false,
+  savingIn: null,
   settings: {
     routingMode: 'vpn',
     proxyPort: 1080,
@@ -177,7 +186,52 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   },
 
   updateSettings: (newSettings) => {
-    set((state) => ({ settings: { ...state.settings, ...newSettings } }));
+    set((state) => ({
+      settings: { ...state.settings, ...newSettings },
+      isDirty: true,
+      savingIn: 2.0,
+    }));
+
+    if (_debounceTimer) clearTimeout(_debounceTimer);
+    if (_countdownInterval) clearInterval(_countdownInterval);
+
+    const startTime = Date.now();
+    const duration = 2000;
+    _countdownInterval = setInterval(() => {
+      const elapsed = Date.now() - startTime;
+      const remaining = Math.max(0, (duration - elapsed) / 1000);
+      set({ savingIn: remaining });
+      if (remaining <= 0) {
+        if (_countdownInterval) {
+          clearInterval(_countdownInterval);
+          _countdownInterval = null;
+        }
+      }
+    }, 100);
+
+    _debounceTimer = setTimeout(() => {
+      get().saveSettings();
+    }, duration);
+  },
+
+  saveSettings: async () => {
+    try {
+      const { settings } = get();
+      await invoke('update_settings', { newSettings: settings });
+      set({ isDirty: false, savingIn: null });
+    } catch (e) {
+      console.error('[omnitun] Failed to save settings:', e);
+    }
+  },
+
+  loadSettings: async () => {
+    try {
+      const result = await invoke<Settings>('get_settings');
+      set({ settings: result, isDirty: false, savingIn: null });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Unknown error';
+      console.warn('[omnitun] Failed to load settings:', msg);
+    }
   },
   completeOnboarding: () => {
     set({ hasOnboarded: true });

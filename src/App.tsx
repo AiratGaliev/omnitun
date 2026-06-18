@@ -19,6 +19,7 @@ export default function App() {
   const { profiles, settings } = useVPNStore();
   const initListener = useVPNStore((state) => state.initListener);
   const loadProfiles = useVPNStore((state) => state.loadProfiles);
+  const loadSettings = useVPNStore((state) => state.loadSettings);
   const refreshProfile = useVPNStore((state) => state.refreshProfile);
   const status = useVPNStore((state) => state.status);
 
@@ -37,10 +38,11 @@ export default function App() {
     };
   }, [initListener]);
 
-  // Load saved profiles on mount
+  // Load saved profiles and settings on mount
   useEffect(() => {
     loadProfiles().catch(() => undefined);
-  }, [loadProfiles]);
+    loadSettings().catch(() => undefined);
+  }, [loadProfiles, loadSettings]);
 
   // Auto-refresh subscriptions at interval
   useEffect(() => {
