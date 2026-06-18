@@ -33,6 +33,7 @@ interface VPNStore {
   hasAcceptedTerms: boolean;
   speeds: { up: number; down: number };
   logs: LogEntry[];
+  settingsVersion: number;
 
   setStatus: (status: ConnectionStatus) => void;
   setActiveServer: (server: Server) => void;
@@ -102,6 +103,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   hasAcceptedTerms: false,
   speeds: {up: 0, down: 0},
   logs: [],
+  settingsVersion: 0,
   settings: {
     routingMode: 'vpn',
     proxyPort: 1080,
@@ -185,6 +187,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   updateSettings: (newSettings) => {
     set((state) => ({
       settings: {...state.settings, ...newSettings},
+      settingsVersion: state.settingsVersion + 1,
     }));
   },
 

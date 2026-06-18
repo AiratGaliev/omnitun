@@ -34,19 +34,17 @@ export function Settings() {
     'general',
   );
   const { t } = useTranslation();
-  const { settings } = useVPNStore();
+  const settingsVersion = useVPNStore((state) => state.settingsVersion);
+  const prevVersionRef = useRef(settingsVersion);
   const [saveState, setSaveState] = useState<'idle' | 'countdown' | 'saving'>('idle');
   const [countdown, setCountdown] = useState(5);
-  const isInitialMount = useRef(true);
 
   useEffect(() => {
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
+    if (prevVersionRef.current === settingsVersion) return;
+    prevVersionRef.current = settingsVersion;
     setSaveState('countdown');
     setCountdown(5);
-  }, [settings]);
+  }, [settingsVersion]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
