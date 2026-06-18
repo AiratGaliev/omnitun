@@ -26,7 +26,9 @@ export function Navigation({ activeTab, onChange }: NavigationProps) {
         {tabs.map(({ id, icon: Icon, label }) => (
           <button
             key={id}
-            onClick={() => onChange(id)}
+            onClick={() => {
+              onChange(id);
+            }}
             title={label}
             className={`relative p-3 rounded-xl transition-colors ${
               activeTab === id ? 'text-emerald-500 bg-white/5' : 'text-zinc-500 hover:text-zinc-200'

@@ -20,14 +20,31 @@ export function Terms() {
         <div className="relative">
           <select
             value={settings.language}
-            onChange={(e) => updateSettings({ language: e.target.value as 'en' | 'ru' })}
+            onChange={(e) => {
+              updateSettings({ language: e.target.value as 'en' | 'ru' });
+            }}
             className="appearance-none bg-black/20 border border-white/10 rounded-lg pl-3 pr-8 py-1.5 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none cursor-pointer transition-colors"
           >
-            <option value="en" className="bg-zinc-900 text-white">English (US)</option>
-            <option value="ru" className="bg-zinc-900 text-white">Русский (RU)</option>
+            <option value="en" className="bg-zinc-900 text-white">
+              English (US)
+            </option>
+            <option value="ru" className="bg-zinc-900 text-white">
+              Русский (RU)
+            </option>
           </select>
           <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-500">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="m6 9 6 6 6-6" />
+            </svg>
           </div>
         </div>
       </div>
@@ -37,9 +54,7 @@ export function Terms() {
       </div>
 
       <h1 className="text-2xl font-bold tracking-tight mb-2">{t('termsTitle')}</h1>
-      <p className="text-zinc-500 mb-8 text-sm max-w-sm">
-        {t('termsDesc')}
-      </p>
+      <p className="text-zinc-500 mb-8 text-sm max-w-sm">{t('termsDesc')}</p>
 
       <div className="w-full max-w-md bg-black/30 border border-white/10 rounded-2xl p-6 mb-8 text-left h-64 overflow-y-auto custom-scrollbar flex flex-col gap-4 text-sm text-zinc-300 leading-relaxed shadow-inner">
         <p>{t('termsText')}</p>

@@ -1,15 +1,17 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useVPNStore } from '../../store';
-import { Globe2, RefreshCw, Trash2, Edit2, Check } from 'lucide-react';
+import { Globe2, RefreshCw, Trash2, Edit2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useTranslation } from '../../hooks/useTranslation';
 import type { Profile } from '../../types';
+import type { TranslationKey } from '../../i18n';
 import * as z from 'zod';
 import { AddProfileOptions } from '../AddProfileOptions';
 
 const profileSchema = z.object({
   name: z.string().min(1, 'Name is required'),
+  // eslint-disable-next-line @typescript-eslint/no-deprecated
   url: z.string().url('Invalid URL format'),
 });
 
@@ -51,7 +53,7 @@ export function Profiles() {
       <div className="mb-6 flex justify-center w-full">
         <AddProfileOptions
           onAdd={(url, name) => {
-            addProfile({ name: name || 'New Profile', url });
+            addProfile({ name: name ?? 'New Profile', url });
             toast.success(t('profileAdded'));
           }}
           horizontal={true}
@@ -61,8 +63,17 @@ export function Profiles() {
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar pb-4">
         <AnimatePresence>
-          {profiles.map(p => (
-            <ProfileItem key={p.id} profile={p} updateProfile={updateProfile} handleRefresh={handleRefresh} t={t} editingId={editingId} setEditingId={setEditingId} handleDelete={handleDelete} />
+          {profiles.map((p) => (
+            <ProfileItem
+              key={p.id}
+              profile={p}
+              updateProfile={updateProfile}
+              handleRefresh={handleRefresh}
+              t={t}
+              editingId={editingId}
+              setEditingId={setEditingId}
+              handleDelete={handleDelete}
+            />
           ))}
         </AnimatePresence>
 
@@ -84,23 +95,36 @@ export function Profiles() {
   );
 }
 
-function ProfileItem({ profile: p, updateProfile, handleRefresh, t, editingId, setEditingId, handleDelete }: any) {
+function ProfileItem({
+  profile: p,
+  updateProfile,
+  handleRefresh,
+  t,
+  editingId,
+  setEditingId,
+  handleDelete,
+}: {
+  profile: Profile;
+  updateProfile: (id: string, data: Partial<Profile>) => void;
+  handleRefresh: (profile: Profile) => void;
+  t: (key: TranslationKey) => string;
+  editingId: string | null;
+  setEditingId: (id: string | null) => void;
+  handleDelete: (id: string, name: string) => void;
+}) {
   const [editName, setEditName] = useState(p.name);
   const [editUrl, setEditUrl] = useState(p.url);
+  // eslint-disable-next-line react-hooks/purity
   const timeAgo = p.lastUpdated ? Math.floor((Date.now() - p.lastUpdated) / 60000) : 0;
 
   const handleSave = () => {
-    try {
-      profileSchema.parse({ name: editName, url: editUrl });
-      updateProfile(p.id, { name: editName, url: editUrl });
-      setEditingId(null);
-    } catch (e: any) {
-      if (e instanceof z.ZodError) {
-        toast.error(e.issues?.[0]?.message || 'Invalid form data');
-      } else {
-        toast.error(e?.message || 'Error occurred');
-      }
+    const result = profileSchema.safeParse({ name: editName, url: editUrl });
+    if (!result.success) {
+      toast.error(result.error.issues[0]?.message || 'Invalid form data');
+      return;
     }
+    updateProfile(p.id, { name: editName, url: editUrl });
+    setEditingId(null);
   };
 
   return (
@@ -111,47 +135,89 @@ function ProfileItem({ profile: p, updateProfile, handleRefresh, t, editingId, s
       {editingId === p.id ? (
         <div className="flex flex-col gap-3 w-full">
           <input
-             type="text"
-             value={editName}
-             onChange={e => setEditName(e.target.value)}
-             className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none w-full transition-all"
-           />
-           <input
-             type="text"
-             value={editUrl}
-             onChange={e => setEditUrl(e.target.value)}
-             className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none w-full transition-all font-mono text-zinc-300"
-           />
-           <div className="flex justify-end gap-2 mt-2">
-             <button onClick={() => { setEditName(p.name); setEditUrl(p.url); setEditingId(null); }} className="px-4 py-1.5 rounded-lg text-sm transition-colors text-zinc-400 hover:text-white">{t('cancel')}</button>
-             <button onClick={handleSave} className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-emerald-500/30 transition-colors">{t('save')}</button>
-           </div>
+            type="text"
+            value={editName}
+            onChange={(e) => {
+              setEditName(e.target.value);
+            }}
+            className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none w-full transition-all"
+          />
+          <input
+            type="text"
+            value={editUrl}
+            onChange={(e) => {
+              setEditUrl(e.target.value);
+            }}
+            className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none w-full transition-all font-mono text-zinc-300"
+          />
+          <div className="flex justify-end gap-2 mt-2">
+            <button
+              onClick={() => {
+                setEditName(p.name);
+                setEditUrl(p.url);
+                setEditingId(null);
+              }}
+              className="px-4 py-1.5 rounded-lg text-sm transition-colors text-zinc-400 hover:text-white"
+            >
+              {t('cancel')}
+            </button>
+            <button
+              onClick={handleSave}
+              className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-emerald-500/30 transition-colors"
+            >
+              {t('save')}
+            </button>
+          </div>
         </div>
       ) : (
         <>
-         <div className="flex justify-between items-start mb-4">
-           <div>
-             <h3 className="font-bold text-lg text-zinc-100 flex items-center gap-2">
-               <Globe2 size={18} className="text-emerald-500" /> {p.name}
-             </h3>
-             <p className="text-xs text-zinc-500 font-mono mt-1 break-all max-w-[400px] truncate">{p.url}</p>
-           </div>
-         </div>
-
-         <div className="flex items-center justify-between border-t border-white/5 pt-4 mt-2">
-            <p className="text-[11px] text-zinc-500 font-medium">{t('updatedMinsAgo')}{timeAgo}{t('minsAgo')}</p>
-            <div className="flex items-center gap-2">
-               <button onClick={() => handleRefresh(p)} title={t('refreshServers')} className="p-2 border border-white/5 bg-black/20 rounded-lg hover:bg-white/10 text-zinc-400 transition-colors">
-                 <RefreshCw size={14} />
-               </button>
-               <button onClick={() => setEditingId(p.id)} title={t('edit')} className="p-2 border border-white/5 bg-black/20 rounded-lg hover:bg-white/10 text-zinc-400 transition-colors">
-                 <Edit2 size={14} />
-               </button>
-               <button onClick={() => handleDelete(p.id, p.name)} title={t('delete')} className="p-2 border border-red-500/20 bg-red-500/10 rounded-lg hover:bg-red-500/20 text-red-400 transition-colors">
-                 <Trash2 size={14} />
-               </button>
+          <div className="flex justify-between items-start mb-4">
+            <div>
+              <h3 className="font-bold text-lg text-zinc-100 flex items-center gap-2">
+                <Globe2 size={18} className="text-emerald-500" /> {p.name}
+              </h3>
+              <p className="text-xs text-zinc-500 font-mono mt-1 break-all max-w-[400px] truncate">
+                {p.url}
+              </p>
             </div>
-         </div>
+          </div>
+
+          <div className="flex items-center justify-between border-t border-white/5 pt-4 mt-2">
+            <p className="text-[11px] text-zinc-500 font-medium">
+              {t('updatedMinsAgo')}
+              {timeAgo}
+              {t('minsAgo')}
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  handleRefresh(p);
+                }}
+                title={t('refreshServers')}
+                className="p-2 border border-white/5 bg-black/20 rounded-lg hover:bg-white/10 text-zinc-400 transition-colors"
+              >
+                <RefreshCw size={14} />
+              </button>
+              <button
+                onClick={() => {
+                  setEditingId(p.id);
+                }}
+                title={t('edit')}
+                className="p-2 border border-white/5 bg-black/20 rounded-lg hover:bg-white/10 text-zinc-400 transition-colors"
+              >
+                <Edit2 size={14} />
+              </button>
+              <button
+                onClick={() => {
+                  handleDelete(p.id, p.name);
+                }}
+                title={t('delete')}
+                className="p-2 border border-red-500/20 bg-red-500/10 rounded-lg hover:bg-red-500/20 text-red-400 transition-colors"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </div>
         </>
       )}
     </motion.div>

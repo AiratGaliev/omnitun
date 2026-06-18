@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen } from '@tauri-apps/api/event';
 import type { ConnectionStatus, Server, Settings, Profile } from './types';
 
 interface VpnStatusPayload {
@@ -79,22 +79,45 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     autoUpdateInterval: 5,
   },
 
-  setStatus: (status) => set({ status }),
-  setActiveServer: (server) => set({ activeServer: server }),
-  setServers: (servers) => set({ servers }),
-  addProfile: (profileData) => set((state) => ({
-    profiles: [...state.profiles, { ...profileData, id: crypto.randomUUID(), lastUpdated: Date.now() }],
-  })),
-  updateProfile: (id, data) => set((state) => ({
-    profiles: state.profiles.map(p => p.id === id ? { ...p, ...data } : p),
-  })),
-  removeProfile: (id) => set((state) => ({
-    profiles: state.profiles.filter(p => p.id !== id),
-  })),
-  updateSettings: (newSettings) => set((state) => ({ settings: { ...state.settings, ...newSettings } })),
-  completeOnboarding: () => set({ hasOnboarded: true }),
-  acceptTerms: () => set({ hasAcceptedTerms: true }),
-  setSpeeds: (speeds) => set({ speeds }),
+  setStatus: (status) => {
+    set({ status });
+  },
+  setActiveServer: (server) => {
+    set({ activeServer: server });
+  },
+  setServers: (servers) => {
+    set({ servers });
+  },
+  addProfile: (profileData) => {
+    set((state) => ({
+      profiles: [
+        ...state.profiles,
+        { ...profileData, id: crypto.randomUUID(), lastUpdated: Date.now() },
+      ],
+    }));
+  },
+  updateProfile: (id, data) => {
+    set((state) => ({
+      profiles: state.profiles.map((p) => (p.id === id ? { ...p, ...data } : p)),
+    }));
+  },
+  removeProfile: (id) => {
+    set((state) => ({
+      profiles: state.profiles.filter((p) => p.id !== id),
+    }));
+  },
+  updateSettings: (newSettings) => {
+    set((state) => ({ settings: { ...state.settings, ...newSettings } }));
+  },
+  completeOnboarding: () => {
+    set({ hasOnboarded: true });
+  },
+  acceptTerms: () => {
+    set({ hasAcceptedTerms: true });
+  },
+  setSpeeds: (speeds) => {
+    set({ speeds });
+  },
 
   toggleConnection: async () => {
     const { status } = get();
@@ -103,7 +126,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         set({ status: 'connecting' });
         const profile = {
           id: 'default',
-          name: get().activeServer?.name || 'Default',
+          name: get().activeServer?.name ?? 'Default',
           protocol: 'vless',
           server: '127.0.0.1',
           port: 443,
@@ -113,7 +136,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         await invoke('stop_vpn');
         set({ status: 'disconnected' });
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       set({ status: 'error' });
       throw e;
     }

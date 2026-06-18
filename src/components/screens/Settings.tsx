@@ -1,6 +1,18 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { useVPNStore } from '../../store';
-import { ShieldAlert, Zap, Rocket, Network, Server, Globe, PowerOff, Languages, Plus, RefreshCw, Lock } from 'lucide-react';
+import {
+  ShieldAlert,
+  Zap,
+  Rocket,
+  Network,
+  Server,
+  Globe,
+  PowerOff,
+  Languages,
+  Plus,
+  RefreshCw,
+  Lock,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { useState, type ReactNode } from 'react';
 import { useTranslation } from '../../hooks/useTranslation';
@@ -14,7 +26,9 @@ const countrySchema = z.object({
 });
 
 export function Settings() {
-  const [activeTab, setActiveTab] = useState<'general' | 'network' | 'filtering' | 'protocols'>('general');
+  const [activeTab, setActiveTab] = useState<'general' | 'network' | 'filtering' | 'protocols'>(
+    'general',
+  );
   const { t } = useTranslation();
 
   return (
@@ -33,7 +47,9 @@ export function Settings() {
             { id: 'protocols', label: t('protocols'), icon: <Lock size={16} /> },
           ]}
           value={activeTab}
-          onChange={(val) => setActiveTab(val as any)}
+          onChange={(val) => {
+            setActiveTab(val);
+          }}
           layoutId="settingsTabIndicator"
         />
       </div>
@@ -66,7 +82,9 @@ function GeneralSettings() {
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-6 bg-white/5 border border-white/5 rounded-2xl p-5 shadow-sm">
         <div className="flex-1 flex gap-4">
-          <div className="mt-1 bg-black/20 p-2 rounded-xl shadow-inner h-fit"><Languages size={20} className="text-purple-400" /></div>
+          <div className="mt-1 bg-black/20 p-2 rounded-xl shadow-inner h-fit">
+            <Languages size={20} className="text-purple-400" />
+          </div>
           <div>
             <h3 className="font-medium text-sm text-zinc-200 tracking-wide">{t('language')}</h3>
             <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed">{t('languageDesc')}</p>
@@ -75,14 +93,31 @@ function GeneralSettings() {
         <div className="relative">
           <select
             value={settings.language}
-            onChange={(e) => updateSettings({ language: e.target.value as 'en' | 'ru' })}
+            onChange={(e) => {
+              updateSettings({ language: e.target.value as 'en' | 'ru' });
+            }}
             className="appearance-none bg-black/20 border border-white/10 rounded-lg pl-3 pr-8 py-1.5 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none cursor-pointer transition-colors"
           >
-            <option value="en" className="bg-zinc-900 text-white">English (US)</option>
-            <option value="ru" className="bg-zinc-900 text-white">Русский (RU)</option>
+            <option value="en" className="bg-zinc-900 text-white">
+              English (US)
+            </option>
+            <option value="ru" className="bg-zinc-900 text-white">
+              Русский (RU)
+            </option>
           </select>
           <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-500">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="m6 9 6 6 6-6" />
+            </svg>
           </div>
         </div>
       </div>
@@ -92,38 +127,71 @@ function GeneralSettings() {
         title={t('launchOnBoot')}
         description={t('launchOnBootDesc')}
         checked={settings.startWithWindows}
-        onChange={(checked) => updateSettings({ startWithWindows: checked })}
+        onChange={(checked) => {
+          updateSettings({ startWithWindows: checked });
+        }}
       />
       <SettingItem
         icon={<Zap size={20} className="text-yellow-400" />}
         title={t('smartNode')}
         description={t('smartNodeDesc')}
         checked={settings.autoConnectFastest}
-        onChange={(checked) => updateSettings({ autoConnectFastest: checked })}
+        onChange={(checked) => {
+          updateSettings({ autoConnectFastest: checked });
+        }}
       />
 
       <div className="bg-white/5 border border-white/5 rounded-2xl p-5 shadow-sm flex items-center justify-between gap-6">
         <div className="flex-1 flex gap-4">
-          <div className="mt-1 bg-black/20 p-2 rounded-xl shadow-inner h-fit"><RefreshCw size={20} className="text-cyan-400" /></div>
+          <div className="mt-1 bg-black/20 p-2 rounded-xl shadow-inner h-fit">
+            <RefreshCw size={20} className="text-cyan-400" />
+          </div>
           <div>
-            <h3 className="font-medium text-sm text-zinc-200 tracking-wide">{t('autoUpdateInterval')}</h3>
-            <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed">{t('autoUpdateIntervalDesc')}</p>
+            <h3 className="font-medium text-sm text-zinc-200 tracking-wide">
+              {t('autoUpdateInterval')}
+            </h3>
+            <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed">
+              {t('autoUpdateIntervalDesc')}
+            </p>
           </div>
         </div>
         <div className="relative">
           <select
             value={settings.autoUpdateInterval}
-            onChange={(e) => updateSettings({ autoUpdateInterval: Number(e.target.value) })}
+            onChange={(e) => {
+              updateSettings({ autoUpdateInterval: Number(e.target.value) });
+            }}
             className="appearance-none bg-black/20 border border-white/10 rounded-lg pl-3 pr-8 py-1.5 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none cursor-pointer transition-colors"
           >
-            <option value={0} className="bg-zinc-900 text-white">{t('disabled')}</option>
-            <option value={5} className="bg-zinc-900 text-white">5 {t('minutes')}</option>
-            <option value={15} className="bg-zinc-900 text-white">15 {t('minutes')}</option>
-            <option value={60} className="bg-zinc-900 text-white">1 {t('hour')}</option>
-            <option value={720} className="bg-zinc-900 text-white">12 {t('hours')}</option>
+            <option value={0} className="bg-zinc-900 text-white">
+              {t('disabled')}
+            </option>
+            <option value={5} className="bg-zinc-900 text-white">
+              5 {t('minutes')}
+            </option>
+            <option value={15} className="bg-zinc-900 text-white">
+              15 {t('minutes')}
+            </option>
+            <option value={60} className="bg-zinc-900 text-white">
+              1 {t('hour')}
+            </option>
+            <option value={720} className="bg-zinc-900 text-white">
+              12 {t('hours')}
+            </option>
           </select>
           <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-500">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="m6 9 6 6 6-6" />
+            </svg>
           </div>
         </div>
       </div>
@@ -141,21 +209,27 @@ function NetworkSettings() {
         title={t('localityBypass')}
         description={t('localityBypassDesc')}
         checked={settings.bypassRu}
-        onChange={(checked) => updateSettings({ bypassRu: checked })}
+        onChange={(checked) => {
+          updateSettings({ bypassRu: checked });
+        }}
       />
       <SettingItem
         icon={<PowerOff size={20} className="text-red-400" />}
         title={t('killSwitch')}
         description={t('killSwitchDesc')}
         checked={settings.killSwitch}
-        onChange={(checked) => updateSettings({ killSwitch: checked })}
+        onChange={(checked) => {
+          updateSettings({ killSwitch: checked });
+        }}
       />
       <SettingItem
         icon={<Server size={20} className="text-purple-400" />}
         title={t('allowLan')}
         description={t('allowLanDesc')}
         checked={settings.allowLan}
-        onChange={(checked) => updateSettings({ allowLan: checked })}
+        onChange={(checked) => {
+          updateSettings({ allowLan: checked });
+        }}
       />
       <div className="bg-white/5 border border-white/5 hover:bg-white/10 transition-colors rounded-2xl p-5 shadow-sm">
         <div className="flex items-center justify-between gap-6 mb-4">
@@ -190,7 +264,9 @@ function NetworkSettings() {
             <input
               type="text"
               value={settings.dnsAddress}
-              onChange={(e) => updateSettings({ dnsAddress: e.target.value })}
+              onChange={(e) => {
+                updateSettings({ dnsAddress: e.target.value });
+              }}
               placeholder="e.g. 1.1.1.1 or 8.8.8.8"
               className="w-full max-w-[250px] bg-black/20 border border-white/10 rounded-lg px-4 py-2 text-sm focus:border-emerald-500 focus:outline-none shadow-inner transition-colors"
             />
@@ -234,14 +310,14 @@ function FilteringSettings() {
     if (listType === 'allow') {
       if (isBlocked) return;
       if (isAllowed) {
-        newAllowed = newAllowed.filter(c => c !== countryCode);
+        newAllowed = newAllowed.filter((c) => c !== countryCode);
       } else {
         newAllowed.push(countryCode);
       }
     } else {
       if (isAllowed) return;
       if (isBlocked) {
-        newBlocked = newBlocked.filter(c => c !== countryCode);
+        newBlocked = newBlocked.filter((c) => c !== countryCode);
       } else {
         newBlocked.push(countryCode);
       }
@@ -259,11 +335,11 @@ function FilteringSettings() {
       setNewName('');
       setNewFlag('');
       toast.success(t('countryAdded'));
-    } catch (e: any) {
+    } catch (e: unknown) {
       if (e instanceof z.ZodError) {
-        toast.error(e.issues?.[0]?.message || 'Invalid form data');
+        toast.error(e.issues[0]?.message || 'Invalid form data');
       } else {
-        toast.error(e?.message || 'Error occurred');
+        toast.error(e instanceof Error ? e.message : 'Error occurred');
       }
     }
   };
@@ -271,64 +347,78 @@ function FilteringSettings() {
   return (
     <div className="space-y-6 pb-12">
       <div className="bg-white/5 border border-white/5 rounded-2xl p-6 shadow-sm">
-        <h3 className="font-medium text-sm text-zinc-200 tracking-wide mb-1">{t('geoNodeRules')}</h3>
+        <h3 className="font-medium text-sm text-zinc-200 tracking-wide mb-1">
+          {t('geoNodeRules')}
+        </h3>
         <p className="text-xs text-zinc-500 mb-6">{t('geoNodeRulesDesc')}</p>
 
         <div className="space-y-8">
           <div>
             <h4 className="font-medium text-emerald-400 text-sm mb-3 flex items-center gap-2">
-               <div className="w-2 h-2 rounded-full bg-emerald-400" /> {t('allowedList')}
+              <div className="w-2 h-2 rounded-full bg-emerald-400" /> {t('allowedList')}
             </h4>
             <div className="flex flex-wrap gap-2">
-              {availableCountries.map(country => {
+              {availableCountries.map((country) => {
                 const isSelected = settings.allowedCountries.includes(country.code);
                 const isBlocked = settings.blockedCountries.includes(country.code);
                 return (
-                   <button
-                     key={country.code}
-                     disabled={isBlocked}
-                     onClick={() => handleToggleCountry(country.code, 'allow')}
-                     className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all
+                  <button
+                    key={country.code}
+                    disabled={isBlocked}
+                    onClick={() => {
+                      handleToggleCountry(country.code, 'allow');
+                    }}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all
                        ${isSelected ? 'bg-emerald-500/20 border-emerald-500/50 text-white shadow-inner' : 'bg-black/30 border-white/5 text-zinc-500 hover:text-zinc-300 hover:bg-black/50'}
                        ${isBlocked ? 'opacity-30 cursor-not-allowed' : ''}
                      `}
-                   >
-                     <span className="text-lg">{country.flag}</span>
-                     {country.name}
-                     {isBlocked && <span className="text-[10px] text-zinc-600 block">{t('alreadyInOther')}</span>}
-                   </button>
-                )
+                  >
+                    <span className="text-lg">{country.flag}</span>
+                    {country.name}
+                    {isBlocked && (
+                      <span className="text-[10px] text-zinc-600 block">{t('alreadyInOther')}</span>
+                    )}
+                  </button>
+                );
               })}
             </div>
-            {settings.allowedCountries.length === 0 && <p className="text-xs text-zinc-600 mt-2 italic">{t('emptyList')}</p>}
+            {settings.allowedCountries.length === 0 && (
+              <p className="text-xs text-zinc-600 mt-2 italic">{t('emptyList')}</p>
+            )}
           </div>
 
           <div>
             <h4 className="font-medium text-red-400 text-sm mb-3 flex items-center gap-2">
-               <div className="w-2 h-2 rounded-full bg-red-400" /> {t('blockedList')}
+              <div className="w-2 h-2 rounded-full bg-red-400" /> {t('blockedList')}
             </h4>
             <div className="flex flex-wrap gap-2">
-              {availableCountries.map(country => {
+              {availableCountries.map((country) => {
                 const isSelected = settings.blockedCountries.includes(country.code);
                 const isAllowed = settings.allowedCountries.includes(country.code);
                 return (
-                   <button
-                     key={country.code}
-                     disabled={isAllowed}
-                     onClick={() => handleToggleCountry(country.code, 'block')}
-                     className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all
+                  <button
+                    key={country.code}
+                    disabled={isAllowed}
+                    onClick={() => {
+                      handleToggleCountry(country.code, 'block');
+                    }}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all
                        ${isSelected ? 'bg-red-500/20 border-red-500/50 text-white shadow-inner' : 'bg-black/30 border-white/5 text-zinc-500 hover:text-zinc-300 hover:bg-black/50'}
                        ${isAllowed ? 'opacity-30 cursor-not-allowed' : ''}
                      `}
-                   >
-                     <span className="text-lg">{country.flag}</span>
-                     {country.name}
-                     {isAllowed && <span className="text-[10px] text-zinc-600 block">{t('alreadyInOther')}</span>}
-                   </button>
-                )
+                  >
+                    <span className="text-lg">{country.flag}</span>
+                    {country.name}
+                    {isAllowed && (
+                      <span className="text-[10px] text-zinc-600 block">{t('alreadyInOther')}</span>
+                    )}
+                  </button>
+                );
               })}
             </div>
-             {settings.blockedCountries.length === 0 && <p className="text-xs text-zinc-600 mt-2 italic">{t('emptyList')}</p>}
+            {settings.blockedCountries.length === 0 && (
+              <p className="text-xs text-zinc-600 mt-2 italic">{t('emptyList')}</p>
+            )}
           </div>
         </div>
 
@@ -336,19 +426,38 @@ function FilteringSettings() {
           <h4 className="font-medium text-zinc-300 text-sm mb-3">{t('addCountry')}</h4>
           <div className="flex gap-2">
             <input
-              type="text" value={newCode} onChange={e => setNewCode(e.target.value)}
-              placeholder={t('countryCode')} className="w-20 bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-sm focus:border-emerald-500 outline-none"
-            />
-             <input
-              type="text" value={newName} onChange={e => setNewName(e.target.value)}
-              placeholder={t('countryName')} className="flex-1 bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-sm focus:border-emerald-500 outline-none"
+              type="text"
+              value={newCode}
+              onChange={(e) => {
+                setNewCode(e.target.value);
+              }}
+              placeholder={t('countryCode')}
+              className="w-20 bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-sm focus:border-emerald-500 outline-none"
             />
             <input
-              type="text" value={newFlag} onChange={e => setNewFlag(e.target.value)}
-              placeholder={t('countryFlag')} className="w-24 bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-sm focus:border-emerald-500 outline-none text-center"
+              type="text"
+              value={newName}
+              onChange={(e) => {
+                setNewName(e.target.value);
+              }}
+              placeholder={t('countryName')}
+              className="flex-1 bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-sm focus:border-emerald-500 outline-none"
             />
-            <button onClick={addCustomCountry} disabled={!newCode || !newName || !newFlag} className="bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:hover:bg-white/10 p-2 rounded-lg border border-white/10 text-white transition-colors">
-               <Plus size={20} />
+            <input
+              type="text"
+              value={newFlag}
+              onChange={(e) => {
+                setNewFlag(e.target.value);
+              }}
+              placeholder={t('countryFlag')}
+              className="w-24 bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-sm focus:border-emerald-500 outline-none text-center"
+            />
+            <button
+              onClick={addCustomCountry}
+              disabled={!newCode || !newName || !newFlag}
+              className="bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:hover:bg-white/10 p-2 rounded-lg border border-white/10 text-white transition-colors"
+            >
+              <Plus size={20} />
             </button>
           </div>
         </div>
@@ -385,14 +494,14 @@ function ProtocolSettings() {
     if (listType === 'allow') {
       if (isBlocked) return;
       if (isAllowed) {
-        newAllowed = newAllowed.filter(p => p !== code);
+        newAllowed = newAllowed.filter((p) => p !== code);
       } else {
         newAllowed.push(code);
       }
     } else {
       if (isAllowed) return;
       if (isBlocked) {
-        newBlocked = newBlocked.filter(p => p !== code);
+        newBlocked = newBlocked.filter((p) => p !== code);
       } else {
         newBlocked.push(code);
       }
@@ -404,62 +513,76 @@ function ProtocolSettings() {
   return (
     <div className="space-y-6 pb-12">
       <div className="bg-white/5 border border-white/5 rounded-2xl p-6 shadow-sm">
-        <h3 className="font-medium text-sm text-zinc-200 tracking-wide mb-1">{t('protocolRules')}</h3>
+        <h3 className="font-medium text-sm text-zinc-200 tracking-wide mb-1">
+          {t('protocolRules')}
+        </h3>
         <p className="text-xs text-zinc-500 mb-6">{t('protocolRulesDesc')}</p>
 
         <div className="space-y-8">
           <div>
             <h4 className="font-medium text-emerald-400 text-sm mb-3 flex items-center gap-2">
-               <div className="w-2 h-2 rounded-full bg-emerald-400" /> {t('protocolAllowedList')}
+              <div className="w-2 h-2 rounded-full bg-emerald-400" /> {t('protocolAllowedList')}
             </h4>
             <div className="flex flex-wrap gap-2">
-              {availableProtocols.map(protocol => {
+              {availableProtocols.map((protocol) => {
                 const isSelected = settings.allowedProtocols.includes(protocol.code);
                 const isBlocked = settings.blockedProtocols.includes(protocol.code);
                 return (
-                   <button
-                     key={protocol.code}
-                     disabled={isBlocked}
-                     onClick={() => handleToggleProtocol(protocol.code, 'allow')}
-                     className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all
+                  <button
+                    key={protocol.code}
+                    disabled={isBlocked}
+                    onClick={() => {
+                      handleToggleProtocol(protocol.code, 'allow');
+                    }}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all
                        ${isSelected ? 'bg-emerald-500/20 border-emerald-500/50 text-white shadow-inner' : 'bg-black/30 border-white/5 text-zinc-500 hover:text-zinc-300 hover:bg-black/50'}
                        ${isBlocked ? 'opacity-30 cursor-not-allowed' : ''}
                      `}
-                   >
-                     {protocol.code}
-                     {isBlocked && <span className="text-[10px] text-zinc-600 block">{t('alreadyInOther')}</span>}
-                   </button>
-                )
+                  >
+                    {protocol.code}
+                    {isBlocked && (
+                      <span className="text-[10px] text-zinc-600 block">{t('alreadyInOther')}</span>
+                    )}
+                  </button>
+                );
               })}
             </div>
-            {settings.allowedProtocols.length === 0 && <p className="text-xs text-zinc-600 mt-2 italic">{t('emptyProtocolList')}</p>}
+            {settings.allowedProtocols.length === 0 && (
+              <p className="text-xs text-zinc-600 mt-2 italic">{t('emptyProtocolList')}</p>
+            )}
           </div>
 
           <div>
             <h4 className="font-medium text-red-400 text-sm mb-3 flex items-center gap-2">
-               <div className="w-2 h-2 rounded-full bg-red-400" /> {t('protocolBlockedList')}
+              <div className="w-2 h-2 rounded-full bg-red-400" /> {t('protocolBlockedList')}
             </h4>
             <div className="flex flex-wrap gap-2">
-              {availableProtocols.map(protocol => {
+              {availableProtocols.map((protocol) => {
                 const isSelected = settings.blockedProtocols.includes(protocol.code);
                 const isAllowed = settings.allowedProtocols.includes(protocol.code);
                 return (
-                   <button
-                     key={protocol.code}
-                     disabled={isAllowed}
-                     onClick={() => handleToggleProtocol(protocol.code, 'block')}
-                     className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all
+                  <button
+                    key={protocol.code}
+                    disabled={isAllowed}
+                    onClick={() => {
+                      handleToggleProtocol(protocol.code, 'block');
+                    }}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all
                        ${isSelected ? 'bg-red-500/20 border-red-500/50 text-white shadow-inner' : 'bg-black/30 border-white/5 text-zinc-500 hover:text-zinc-300 hover:bg-black/50'}
                        ${isAllowed ? 'opacity-30 cursor-not-allowed' : ''}
                      `}
-                   >
-                     {protocol.code}
-                     {isAllowed && <span className="text-[10px] text-zinc-600 block">{t('alreadyInOther')}</span>}
-                   </button>
-                )
+                  >
+                    {protocol.code}
+                    {isAllowed && (
+                      <span className="text-[10px] text-zinc-600 block">{t('alreadyInOther')}</span>
+                    )}
+                  </button>
+                );
               })}
             </div>
-               {settings.blockedProtocols.length === 0 && <p className="text-xs text-zinc-600 mt-2 italic">{t('emptyProtocolList')}</p>}
+            {settings.blockedProtocols.length === 0 && (
+              <p className="text-xs text-zinc-600 mt-2 italic">{t('emptyProtocolList')}</p>
+            )}
           </div>
         </div>
       </div>
@@ -468,9 +591,17 @@ function ProtocolSettings() {
 }
 
 function SettingItem({
-  icon, title, description, checked, onChange,
+  icon,
+  title,
+  description,
+  checked,
+  onChange,
 }: {
-  icon: ReactNode; title: string; description: string; checked: boolean; onChange: (checked: boolean) => void;
+  icon: ReactNode;
+  title: string;
+  description: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
 }) {
   const { t } = useTranslation();
   const handleChange = (v: boolean) => {
@@ -492,7 +623,9 @@ function SettingItem({
         </div>
       </div>
       <button
-        onClick={() => handleChange(!checked)}
+        onClick={() => {
+          handleChange(!checked);
+        }}
         className={`relative inline-flex h-6 w-11 items-center justify-center rounded-full transition-colors flex-shrink-0 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 ${
           checked ? 'bg-emerald-500' : 'bg-zinc-700'
         }`}

@@ -14,7 +14,7 @@ export function Onboarding() {
   const handleConnectImpl = (linkStr: string, customName?: string) => {
     if (linkStr) {
       addProfile({
-        name: customName || 'Initial Profile',
+        name: customName ?? 'Initial Profile',
         url: linkStr,
       });
     }
@@ -34,14 +34,31 @@ export function Onboarding() {
         <div className="relative z-50">
           <select
             value={settings.language}
-            onChange={(e) => updateSettings({ language: e.target.value as 'en' | 'ru' })}
+            onChange={(e) => {
+              updateSettings({ language: e.target.value as 'en' | 'ru' });
+            }}
             className="appearance-none bg-black/20 border border-white/10 rounded-lg pl-3 pr-8 py-1.5 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none cursor-pointer transition-colors"
           >
-            <option value="en" className="bg-zinc-900 text-white">English (US)</option>
-            <option value="ru" className="bg-zinc-900 text-white">Русский (RU)</option>
+            <option value="en" className="bg-zinc-900 text-white">
+              English (US)
+            </option>
+            <option value="ru" className="bg-zinc-900 text-white">
+              Русский (RU)
+            </option>
           </select>
           <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-500">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="m6 9 6 6 6-6" />
+            </svg>
           </div>
         </div>
       </div>
@@ -54,17 +71,19 @@ export function Onboarding() {
       </div>
 
       <h1 className="text-3xl font-bold tracking-tight mb-3">{t('secureTunnelSetup')}</h1>
-      <p className="text-zinc-500 mb-10 text-sm max-w-md">
-        {t('secureTunnelDesc')}
-      </p>
+      <p className="text-zinc-500 mb-10 text-sm max-w-md">{t('secureTunnelDesc')}</p>
 
       <AddProfileOptions
-        onAdd={(url, name) => handleConnectImpl(url, name)}
+        onAdd={(url, name) => {
+          handleConnectImpl(url, name);
+        }}
         horizontal={true}
       />
 
       <button
-        onClick={() => completeOnboarding()}
+        onClick={() => {
+          completeOnboarding();
+        }}
         className="mt-6 px-6 py-2 rounded-full border border-white/10 text-zinc-400 hover:text-white hover:bg-white/5 transition-colors text-sm"
       >
         {t('skip') || 'Skip'}

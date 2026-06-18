@@ -7,6 +7,7 @@ import * as z from 'zod';
 
 const manualSchema = z.object({
   name: z.string().min(1, 'Name is required'),
+  // eslint-disable-next-line @typescript-eslint/no-deprecated
   url: z.string().url('Invalid URL format'),
 });
 
@@ -16,7 +17,11 @@ interface AddProfileOptionsProps {
   horizontal?: boolean;
 }
 
-export function AddProfileOptions({ onAdd, className = '', horizontal = false }: AddProfileOptionsProps) {
+export function AddProfileOptions({
+  onAdd,
+  className = '',
+  horizontal = false,
+}: AddProfileOptionsProps) {
   const { t } = useTranslation();
   const [viewMode, setViewMode] = useState<'initial' | 'manual'>('initial');
 
@@ -25,18 +30,15 @@ export function AddProfileOptions({ onAdd, className = '', horizontal = false }:
 
   const handleClipboardAdd = async () => {
     try {
-      let clipboardText = '';
-      if (navigator.clipboard && navigator.clipboard.readText) {
-        clipboardText = await navigator.clipboard.readText();
-      }
+      const clipboardText = await navigator.clipboard.readText();
 
-      if (clipboardText && (
+      if (
         clipboardText.startsWith('vless://') ||
         clipboardText.startsWith('ss://') ||
         clipboardText.startsWith('vmess://') ||
         clipboardText.startsWith('trojan://') ||
         clipboardText.startsWith('http')
-      )) {
+      ) {
         onAdd(clipboardText);
       } else {
         throw new Error('invalid config');
@@ -50,38 +52,53 @@ export function AddProfileOptions({ onAdd, className = '', horizontal = false }:
   };
 
   const handleManualAdd = () => {
-    try {
-      manualSchema.parse({ name, url });
-      onAdd(url, name);
-      setViewMode('initial');
-      setName('');
-      setUrl('');
-    } catch (e: any) {
-      if (e instanceof z.ZodError) {
-        toast.error(e.issues?.[0]?.message || 'Invalid form data');
-      } else {
-        toast.error(e?.message || 'Error occurred');
-      }
+    const result = manualSchema.safeParse({ name, url });
+    if (!result.success) {
+      const err = result.error.issues[0];
+      toast.error(err.message);
+      return;
     }
+    onAdd(url, name);
+    setViewMode('initial');
+    setName('');
+    setUrl('');
   };
 
   return (
     <div className={`w-full max-w-md ${className}`}>
-      <div className={`flex items-center justify-center gap-4 ${horizontal ? 'flex-row' : 'flex-col sm:flex-row'}`}>
+      <div
+        className={`flex items-center justify-center gap-4 ${horizontal ? 'flex-row' : 'flex-col sm:flex-row'}`}
+      >
         <button
-          onClick={handleClipboardAdd}
+          onClick={() => {
+            void handleClipboardAdd();
+          }}
           className="flex-1 aspect-[4/3] max-h-32 bg-black/20 border border-white/10 hover:border-emerald-500/50 hover:bg-black/40 rounded-2xl flex flex-col items-center justify-center gap-4 transition-all group"
         >
-          <Clipboard size={32} strokeWidth={1.5} className="text-blue-200 group-hover:text-emerald-400 group-hover:scale-110 transition-transform" />
-          <span className="text-sm font-medium text-blue-100 group-hover:text-white transition-colors">{t('fromClipboard')}</span>
+          <Clipboard
+            size={32}
+            strokeWidth={1.5}
+            className="text-blue-200 group-hover:text-emerald-400 group-hover:scale-110 transition-transform"
+          />
+          <span className="text-sm font-medium text-blue-100 group-hover:text-white transition-colors">
+            {t('fromClipboard')}
+          </span>
         </button>
 
         <button
-          onClick={() => setViewMode('manual')}
+          onClick={() => {
+            setViewMode('manual');
+          }}
           className="flex-1 aspect-[4/3] max-h-32 bg-black/20 border border-white/10 hover:border-emerald-500/50 hover:bg-black/40 rounded-2xl flex flex-col items-center justify-center gap-4 transition-all group"
         >
-          <Plus size={32} strokeWidth={1.5} className="text-blue-200 group-hover:text-emerald-400 group-hover:scale-110 transition-transform" />
-          <span className="text-sm font-medium text-blue-100 group-hover:text-white transition-colors">{t('manualAdd')}</span>
+          <Plus
+            size={32}
+            strokeWidth={1.5}
+            className="text-blue-200 group-hover:text-emerald-400 group-hover:scale-110 transition-transform"
+          />
+          <span className="text-sm font-medium text-blue-100 group-hover:text-white transition-colors">
+            {t('manualAdd')}
+          </span>
         </button>
       </div>
 
@@ -96,7 +113,12 @@ export function AddProfileOptions({ onAdd, className = '', horizontal = false }:
             <div className="w-full max-w-md bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col text-left relative z-50">
               <div className="flex justify-between items-center px-6 py-4 border-b border-white/10">
                 <h2 className="text-xl font-medium tracking-tight text-white">{t('manualAdd')}</h2>
-                <button onClick={() => setViewMode('initial')} className="text-zinc-400 hover:text-white transition-colors">
+                <button
+                  onClick={() => {
+                    setViewMode('initial');
+                  }}
+                  className="text-zinc-400 hover:text-white transition-colors"
+                >
                   <X size={20} />
                 </button>
               </div>
@@ -107,7 +129,9 @@ export function AddProfileOptions({ onAdd, className = '', horizontal = false }:
                   <input
                     type="text"
                     value={name}
-                    onChange={(e) => setName(e.target.value)}
+                    onChange={(e) => {
+                      setName(e.target.value);
+                    }}
                     className="w-full bg-zinc-800/50 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/50 transition-colors placeholder:text-zinc-600 focus:bg-zinc-800"
                   />
                 </div>
@@ -117,13 +141,17 @@ export function AddProfileOptions({ onAdd, className = '', horizontal = false }:
                   <input
                     type="text"
                     value={url}
-                    onChange={(e) => setUrl(e.target.value)}
+                    onChange={(e) => {
+                      setUrl(e.target.value);
+                    }}
                     className="w-full bg-zinc-800/50 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/50 transition-colors placeholder:text-zinc-600 focus:bg-zinc-800"
                   />
                 </div>
 
                 <button
-                  onClick={handleManualAdd}
+                  onClick={() => {
+                    handleManualAdd();
+                  }}
                   className="w-full bg-blue-200 hover:bg-blue-300 text-blue-900 font-medium rounded-xl py-3 mt-2 flex items-center justify-center transition-all active:scale-[0.98]"
                 >
                   {t('addBtn')}

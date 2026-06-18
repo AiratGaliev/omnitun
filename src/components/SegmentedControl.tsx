@@ -16,15 +16,20 @@ interface SegmentedControlProps<T extends string> {
 }
 
 export function SegmentedControl<T extends string>({
-  options, value, onChange, disabled,
-  layoutId = "segmentedControlIndicator",
+  options,
+  value,
+  onChange,
+  disabled,
+  layoutId = 'segmentedControlIndicator',
 }: SegmentedControlProps<T>) {
   return (
     <div className="flex w-full bg-black/30 border border-white/5 rounded-xl p-1 relative overflow-x-auto custom-scrollbar">
       {options.map((option) => (
         <button
           key={option.id}
-          onClick={() => onChange(option.id)}
+          onClick={() => {
+            onChange(option.id);
+          }}
           disabled={disabled}
           className={`flex-1 flex items-center justify-center gap-2 py-2 px-2 md:py-2.5 md:px-4 rounded-lg text-sm font-medium transition-colors relative z-10 ${
             value === option.id ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'
