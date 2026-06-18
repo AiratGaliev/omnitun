@@ -1,7 +1,7 @@
-import { create } from 'zustand';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import type { ConnectionStatus, Server, Settings, Profile } from './types';
+import {create} from 'zustand';
+import {invoke} from '@tauri-apps/api/core';
+import {listen} from '@tauri-apps/api/event';
+import type {ConnectionStatus, Profile, Server, Settings} from './types';
 
 interface VpnStatusPayload {
   status: string | { error: string };
@@ -50,10 +50,10 @@ interface VPNStore {
 }
 
 const defaultServers: Server[] = [
-  { id: '1', name: 'Frankfurt', flag: '🇩🇪', ping: 45 },
-  { id: '2', name: 'Amsterdam', flag: '🇳🇱', ping: 52 },
-  { id: '3', name: 'London', flag: '🇬🇧', ping: 68 },
-  { id: '4', name: 'New York', flag: '🇺🇸', ping: 120 },
+  {id: '1', name: 'Frankfurt', flag: '🇩🇪', ping: 45},
+  {id: '2', name: 'Amsterdam', flag: '🇳🇱', ping: 52},
+  {id: '3', name: 'London', flag: '🇬🇧', ping: 68},
+  {id: '4', name: 'New York', flag: '🇺🇸', ping: 120},
 ];
 
 function mapVpnStatus(payload: VpnStatusPayload): ConnectionStatus {
@@ -77,13 +77,13 @@ function mapRustProfile(rust: RustSubscriptionProfile): Profile {
     url: rust.url,
     lastUpdated: Date.parse(rust.updated_at) || Date.now(),
     servers: rust.servers.map(
-      (s: RustServerProfile): Server => ({
-        id: s.id,
-        name: s.name,
-        protocol: s.protocol,
-        host: s.server,
-        port: s.port,
-      }),
+        (s: RustServerProfile): Server => ({
+          id: s.id,
+          name: s.name,
+          protocol: s.protocol,
+          host: s.server,
+          port: s.port,
+        }),
     ),
   };
 }
@@ -95,7 +95,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   profiles: [],
   hasOnboarded: false,
   hasAcceptedTerms: false,
-  speeds: { up: 0, down: 0 },
+  speeds: {up: 0, down: 0},
   settings: {
     routingMode: 'vpn',
     proxyPort: 1080,
@@ -116,13 +116,13 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   },
 
   setStatus: (status) => {
-    set({ status });
+    set({status});
   },
   setActiveServer: (server) => {
-    set({ activeServer: server });
+    set({activeServer: server});
   },
   setServers: (servers) => {
-    set({ servers });
+    set({servers});
   },
 
   addProfile: async (data) => {
@@ -132,7 +132,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         url: data.url,
       });
       const profile = mapRustProfile(result);
-      set((state) => ({ profiles: [...state.profiles, profile] }));
+      set((state) => ({profiles: [...state.profiles, profile]}));
     } catch (e) {
       // Error handled by caller (toast)
       throw e;
@@ -141,14 +141,14 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
 
   updateProfile: (id, data) => {
     set((state) => ({
-      profiles: state.profiles.map((p) => (p.id === id ? { ...p, ...data } : p)),
+      profiles: state.profiles.map((p) => (p.id === id ? {...p, ...data} : p)),
     }));
   },
 
   removeProfile: async (id) => {
     try {
-      await invoke('remove_subscription', { id });
-      set((state) => ({ profiles: state.profiles.filter((p) => p.id !== id) }));
+      await invoke('remove_subscription', {id});
+      set((state) => ({profiles: state.profiles.filter((p) => p.id !== id)}));
     } catch (e) {
       throw e;
     }
@@ -156,10 +156,10 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
 
   refreshProfile: async (id) => {
     try {
-      const result = await invoke<RustSubscriptionProfile>('refresh_subscription', { id });
+      const result = await invoke<RustSubscriptionProfile>('refresh_subscription', {id});
       const updated = mapRustProfile(result);
       set((state) => ({
-        profiles: state.profiles.map((p) => (p.id === id ? { ...p, ...updated } : p)),
+        profiles: state.profiles.map((p) => (p.id === id ? {...p, ...updated} : p)),
       }));
     } catch (e) {
       throw e;
@@ -169,30 +169,31 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   loadProfiles: async () => {
     try {
       const results = await invoke<RustSubscriptionProfile[]>('get_subscriptions');
-      set({ profiles: results.map(mapRustProfile) });
-    } catch {
-      // Failed to load — stay with empty list
+      set({profiles: results.map(mapRustProfile)});
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Unknown error';
+      console.warn('[omnitun] Failed to load profiles:', msg);
     }
   },
 
   updateSettings: (newSettings) => {
-    set((state) => ({ settings: { ...state.settings, ...newSettings } }));
+    set((state) => ({settings: {...state.settings, ...newSettings}}));
   },
   completeOnboarding: () => {
-    set({ hasOnboarded: true });
+    set({hasOnboarded: true});
   },
   acceptTerms: () => {
-    set({ hasAcceptedTerms: true });
+    set({hasAcceptedTerms: true});
   },
   setSpeeds: (speeds) => {
-    set({ speeds });
+    set({speeds});
   },
 
   toggleConnection: async () => {
-    const { status } = get();
+    const {status} = get();
     try {
       if (status === 'disconnected' || status === 'error') {
-        set({ status: 'connecting' });
+        set({status: 'connecting'});
         const profile = {
           id: 'default',
           name: get().activeServer?.name ?? 'Default',
@@ -200,13 +201,13 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
           server: '127.0.0.1',
           port: 443,
         };
-        await invoke('start_vpn', { profile });
+        await invoke('start_vpn', {profile});
       } else {
         await invoke('stop_vpn');
-        set({ status: 'disconnected' });
+        set({status: 'disconnected'});
       }
     } catch (e: unknown) {
-      set({ status: 'error' });
+      set({status: 'error'});
       throw e;
     }
   },
@@ -214,19 +215,23 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   initListener: async () => {
     try {
       const rawStatus = await invoke('get_vpn_status');
-      const mapped = mapVpnStatus(rawStatus as VpnStatusPayload);
-      set({ status: mapped });
-    } catch {
-      // Initial status fetch failed — stay disconnected
+      if (typeof rawStatus === 'string') {
+        set({status: rawStatus as ConnectionStatus});
+      }
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Unknown error';
+      console.warn('[omnitun] Failed to fetch initial VPN status:', msg);
+      // Stay disconnected — it's the default initial state
+      set({status: 'disconnected'});
     }
 
     const unlisten = await listen<VpnStatusPayload>('vpn-status-changed', (event) => {
       const payload = event.payload;
       const errorMsg = extractError(payload);
       if (errorMsg) {
-        set({ status: 'error' });
+        set({status: 'error'});
       } else {
-        set({ status: mapVpnStatus(payload) });
+        set({status: mapVpnStatus(payload)});
       }
     });
 
