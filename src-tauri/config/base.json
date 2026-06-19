@@ -8,8 +8,7 @@
       "type": "http",
       "tag": "proxy-in",
       "listen": "127.0.0.1",
-      "listen_port": 10809,
-      "sniff": true
+      "listen_port": 10809
     }
   ],
   "outbounds": [

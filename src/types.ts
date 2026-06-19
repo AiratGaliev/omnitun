@@ -1,4 +1,4 @@
-export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'disconnecting' | 'error';
 
 export type LogSource = 'system' | 'vpn' | 'installer' | 'process' | 'subscription' | 'settings';
 

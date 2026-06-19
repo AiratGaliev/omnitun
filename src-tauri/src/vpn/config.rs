@@ -4,6 +4,7 @@ use std::path::Path;
 
 pub fn generate_config(
     base_template: &str,
+    cache_dir: &Path,
     server_profile: &ServerProfile,
 ) -> Result<String, VpnError> {
     let mut config: Value =
@@ -17,6 +18,16 @@ pub fn generate_config(
         return Err(VpnError::Config(
             "Missing outbounds array in template".into(),
         ));
+    }
+
+    // Set cache file to absolute path so it doesn't appear in the project root
+    if let Some(cache_file) = config
+        .get_mut("experimental")
+        .and_then(|e| e.get_mut("cache_file"))
+    {
+        if let Some(path) = cache_file.get_mut("path") {
+            *path = json!(cache_dir.join("cache.db").to_string_lossy().to_string());
+        }
     }
 
     let json_string =
@@ -81,8 +92,7 @@ mod tests {
                 "type": "http",
                 "tag": "proxy-in",
                 "listen": "127.0.0.1",
-                "listen_port": 10809,
-                "sniff": true
+                "listen_port": 10809
             }],
             "outbounds": [
                 { "type": "direct", "tag": "direct" },
@@ -128,9 +138,13 @@ mod tests {
         }
     }
 
+    fn cache_dir() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("omnitun-cfg-test-{}", std::process::id()))
+    }
+
     #[test]
     fn test_vless_plain() {
-        let result = generate_config(base_template(), &vless_profile());
+        let result = generate_config(base_template(), &cache_dir(), &vless_profile());
         assert!(
             result.is_ok(),
             "Config generation failed: {:?}",
@@ -156,7 +170,7 @@ mod tests {
 
     #[test]
     fn test_vless_tls() {
-        let result = generate_config(base_template(), &vless_tls_profile());
+        let result = generate_config(base_template(), &cache_dir(), &vless_tls_profile());
         assert!(
             result.is_ok(),
             "Config generation failed: {:?}",
@@ -184,7 +198,7 @@ mod tests {
             ..vless_profile()
         };
 
-        let result = generate_config(base_template(), &profile);
+        let result = generate_config(base_template(), &cache_dir(), &profile);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()

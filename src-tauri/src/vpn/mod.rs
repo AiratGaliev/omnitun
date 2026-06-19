@@ -122,7 +122,7 @@ impl VpnManager {
             "Generating sing-box config...".into(),
         );
         let base_template = include_str!("../../config/base.json");
-        let config_json = config::generate_config(base_template, profile)?;
+        let config_json = config::generate_config(base_template, &self.config_dir, profile)?;
         let config_path = config::write_config(&config_json, &self.config_dir)?;
         log(
             app_handle,
@@ -152,6 +152,10 @@ impl VpnManager {
             "Terminating sing-box process...".into(),
         );
         self.process_mgr.stop().await
+    }
+
+    pub fn process_pid(&self) -> Option<u32> {
+        *self.process_mgr.pid()
     }
 
     pub fn status(&self) -> VpnStatus {

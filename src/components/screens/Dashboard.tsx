@@ -82,7 +82,7 @@ export function Dashboard() {
   };
 
   const isConnected = status === 'connected';
-  const isConnecting = status === 'connecting';
+  const isConnecting = status === 'connecting' || status === 'disconnecting';
 
   return (
     <div className="flex flex-col h-full w-full p-8 flex-1">
@@ -272,9 +272,11 @@ export function Dashboard() {
                   ? t('statusError')
                   : isConnected
                     ? t('connected')
-                    : isConnecting
-                      ? t('connecting')
-                      : t('disconnected')}
+                    : status === 'disconnecting'
+                      ? t('disconnecting')
+                      : status === 'connecting'
+                        ? t('connecting')
+                        : t('disconnected')}
               </span>
             </motion.button>
           </div>

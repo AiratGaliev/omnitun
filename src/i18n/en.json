@@ -20,6 +20,7 @@
   "secureTunnelSubtitle": "A versatile and convenient tunnel",
   "connected": "Connected",
   "connecting": "Connecting...",
+  "disconnecting": "Disconnecting...",
   "disconnected": "Disconnected",
   "activeSession": "Active Session",
   "connectToMonitor": "Connect to monitor",

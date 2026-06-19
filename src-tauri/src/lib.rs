@@ -14,8 +14,17 @@ use crate::vpn::{ServerProfile, VpnManager, VpnStatus};
 use chrono::Local;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::time::Duration;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use tauri::Manager;
 use tokio::sync::Mutex;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+const PROXY_TIMEOUT_SECS: u64 = 15;
+const PROXY_POLL_MS: u64 = 300;
 
 struct VpnState {
     manager: Arc<Mutex<VpnManager>>,
@@ -47,12 +56,42 @@ async fn start_vpn(
             log(
                 &app,
                 &logger,
-                LogLevel::Success,
+                LogLevel::Info,
                 LogSource::Vpn,
-                format!("VPN connected to {}", profile.name),
+                "Verifying proxy connection...".into(),
             );
-            emit_status(&app, VpnStatus::Connected);
-            Ok(())
+
+            let result = match manager.process_pid() {
+                Some(pid) => wait_for_alive(pid).await,
+                None => Err("no PID".into()),
+            };
+            match result {
+                Ok(attempts) => {
+                    log(
+                        &app,
+                        &logger,
+                        LogLevel::Info,
+                        LogSource::Vpn,
+                        format!("Proxy ready after {attempts} attempt(s)"),
+                    );
+                    log(
+                        &app,
+                        &logger,
+                        LogLevel::Success,
+                        LogSource::Vpn,
+                        format!("VPN connected to {}", profile.name),
+                    );
+                    emit_status(&app, VpnStatus::Connected);
+                    Ok(())
+                }
+                Err(e) => {
+                    let _ = manager.stop(&app).await;
+                    let msg = format!("Proxy not reachable: {e}");
+                    log(&app, &logger, LogLevel::Error, LogSource::Vpn, msg.clone());
+                    emit_status(&app, VpnStatus::Error(msg.clone()));
+                    Err(msg)
+                }
+            }
         }
         Err(e) => {
             let msg = e.to_string();
@@ -369,4 +408,71 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Check if a process is alive by PID.
+fn is_process_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("tasklist")
+            .args(["/fi", &format!("PID eq {pid}"), "/nh"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        match output {
+            Ok(o) => {
+                let out = String::from_utf8_lossy(&o.stdout);
+                !out.contains("INFO: No tasks")
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .output()
+            .map_or(false, |o| o.status.success())
+    }
+}
+
+/// Wait until a process PID is alive by polling `is_process_alive`.
+async fn wait_for_alive(pid: u32) -> Result<u32, String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(PROXY_TIMEOUT_SECS);
+    let mut attempts = 0u32;
+
+    loop {
+        attempts += 1;
+        if is_process_alive(pid) {
+            return Ok(attempts);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "timed out after {attempts} attempt(s) waiting for PID {pid}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(PROXY_POLL_MS)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_process_alive_self() {
+        assert!(is_process_alive(std::process::id()));
+    }
+
+    #[test]
+    fn test_is_process_alive_nonexistent() {
+        assert!(!is_process_alive(999_999_999));
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_alive_self() {
+        let result = wait_for_alive(std::process::id()).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap() > 0);
+    }
 }

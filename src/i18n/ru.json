@@ -20,6 +20,7 @@
   "secureTunnelSubtitle": "Универсальный и удобный туннель",
   "connected": "Подключено",
   "connecting": "Подключение...",
+  "disconnecting": "Отключение...",
   "disconnected": "Отключено",
   "activeSession": "Время сеанса",
   "connectToMonitor": "Подключитесь для отображения",

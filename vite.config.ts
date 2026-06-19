@@ -40,6 +40,17 @@ export default defineConfig({
     },
   },
 
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ["react", "react-dom", "framer-motion", "zustand", "sonner"],
+          ui: ["lucide-react", "zod", "@tauri-apps/api", "@tauri-apps/plugin-updater"],
+        },
+      },
+    },
+  },
+
   // Vitest configuration
   test: {
     globals: true,

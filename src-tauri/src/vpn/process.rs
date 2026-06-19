@@ -1,126 +1,130 @@
 use crate::vpn::VpnError;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::sync::Arc;
+use std::time::Duration;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub struct ProcessManager {
     binary_path: PathBuf,
-    running: Arc<AtomicBool>,
+    pid: Arc<Mutex<Option<u32>>>,
 }
 
 impl ProcessManager {
     pub fn new(binary_path: PathBuf) -> Self {
         Self {
             binary_path,
-            running: Arc::new(AtomicBool::new(false)),
+            pid: Arc::new(Mutex::new(None)),
         }
     }
 
+    pub fn pid(&self) -> std::sync::MutexGuard<'_, Option<u32>> {
+        self.pid.lock().unwrap()
+    }
+
     pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
+        self.pid.lock().unwrap().is_some()
     }
 
     pub async fn start(&self, config_path: &PathBuf) -> Result<(), VpnError> {
-        if self.running.load(Ordering::SeqCst) {
-            return Err(VpnError::Process("VPN is already running".into()));
+        {
+            let pid_guard = self.pid.lock().unwrap();
+            if pid_guard.is_some() {
+                return Err(VpnError::Process("VPN is already running".into()));
+            }
         }
 
         let config_str = config_path
             .to_str()
             .ok_or_else(|| VpnError::Process("Invalid config path".into()))?;
 
-        #[cfg(target_os = "windows")]
-        {
-            self.start_windows(config_str).await?;
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            self.start_unix(config_str).await?;
-        }
-
-        self.running.store(true, Ordering::SeqCst);
+        let new_pid = self.launch(config_str).await?;
+        *self.pid.lock().unwrap() = Some(new_pid);
         Ok(())
     }
 
     pub async fn stop(&self) -> Result<(), VpnError> {
-        if !self.running.load(Ordering::SeqCst) {
-            return Ok(());
+        let pid = {
+            let mut guard = self.pid.lock().unwrap();
+            guard.take()
+        };
+
+        if let Some(pid) = pid {
+            #[cfg(target_os = "windows")]
+            {
+                // Graceful shutdown first
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/pid", &pid.to_string()])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+
+                tokio::time::sleep(Duration::from_secs(3)).await;
+
+                // Force kill if still alive
+                std::process::Command::new("taskkill")
+                    .args(["/pid", &pid.to_string(), "/f"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output()
+                    .map_err(|e| VpnError::Process(format!("Failed to stop process: {e}")))?;
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            {
+                // Send SIGTERM
+                let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                // Force kill if still alive
+                std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .output()
+                    .map_err(|e| VpnError::Process(format!("Failed to kill process: {e}")))?;
+            }
         }
+
+        Ok(())
+    }
+
+    async fn launch(&self, config_path: &str) -> Result<u32, VpnError> {
+        let binary = self
+            .binary_path
+            .to_str()
+            .ok_or_else(|| VpnError::Process("Invalid binary path".into()))?;
 
         #[cfg(target_os = "windows")]
         {
-            std::process::Command::new("taskkill")
-                .args(["/f", "/im", "sing-box.exe"])
-                .output()
-                .map_err(|e| VpnError::Process(e.to_string()))?;
+            let child = std::process::Command::new(binary)
+                .args(["run", "-c", config_path])
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;
+
+            Ok(child.id())
         }
 
         #[cfg(not(target_os = "windows"))]
         {
-            std::process::Command::new("pkill")
-                .args(["-f", "sing-box"])
-                .output()
-                .map_err(|e| VpnError::Process(e.to_string()))?;
+            let child = std::process::Command::new("pkexec")
+                .args([binary, "run", "-c", config_path])
+                .spawn()
+                .or_else(|_| {
+                    std::process::Command::new("sudo")
+                        .args(["-n", binary, "run", "-c", config_path])
+                        .spawn()
+                })
+                .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;
+
+            Ok(child.id())
         }
-
-        self.running.store(false, Ordering::SeqCst);
-        Ok(())
-    }
-
-    #[cfg(target_os = "windows")]
-    async fn start_windows(&self, config_path: &str) -> Result<(), VpnError> {
-        let binary = self
-            .binary_path
-            .to_str()
-            .ok_or_else(|| VpnError::Process("Invalid binary path".into()))?;
-
-        let ps_command = format!(
-            "Start-Process -FilePath '{}' -ArgumentList 'run','-c','{}' -Verb RunAs -WindowStyle Hidden",
-            binary.replace("\'", "''"),
-            config_path.replace("\'", "''")
-        );
-
-        let output = std::process::Command::new("powershell")
-            .args(["-Command", &ps_command])
-            .output()
-            .map_err(|e| VpnError::Process(e.to_string()))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(VpnError::Process(format!("UAC elevation failed: {stderr}")));
-        }
-
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    async fn start_unix(&self, config_path: &str) -> Result<(), VpnError> {
-        let binary = self
-            .binary_path
-            .to_str()
-            .ok_or_else(|| VpnError::Process("Invalid binary path".into()))?;
-
-        let status = std::process::Command::new("pkexec")
-            .args([binary, "run", "-c", config_path])
-            .spawn()
-            .or_else(|_| {
-                std::process::Command::new("sudo")
-                    .args(["-n", binary, "run", "-c", config_path])
-                    .spawn()
-            })
-            .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;
-
-        drop(status);
-
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
 
     #[tokio::test]
     async fn test_initial_state_not_running() {
@@ -139,19 +143,21 @@ mod tests {
     #[tokio::test]
     async fn test_double_start_returns_error() {
         let mgr = ProcessManager::new(PathBuf::from("sing-box"));
-        mgr.running.store(true, Ordering::SeqCst);
+        *mgr.pid.lock().unwrap() = Some(1);
         let result = mgr.start(&PathBuf::from("config.json")).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("VPN is already running"));
+        assert!(
+            result.unwrap_err().to_string().contains("VPN is already running")
+        );
     }
 
     #[tokio::test]
-    async fn test_running_flag_persists_after_forced_set() {
+    async fn test_running_flag_is_not_set_by_default() {
         let mgr = ProcessManager::new(PathBuf::from("sing-box"));
         assert!(!mgr.is_running());
-        mgr.running.store(true, Ordering::SeqCst);
+        *mgr.pid.lock().unwrap() = Some(1);
         assert!(mgr.is_running());
-        mgr.running.store(false, Ordering::SeqCst);
+        *mgr.pid.lock().unwrap() = None;
         assert!(!mgr.is_running());
     }
 

@@ -274,8 +274,8 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         await invoke('start_vpn', { profile });
       } else {
         addLog('Disconnecting...', 'info', 'system');
+        set({ status: 'disconnecting' });
         await invoke('stop_vpn');
-        set({ status: 'disconnected' });
       }
     } catch (e: unknown) {
       set({ status: 'error' });
