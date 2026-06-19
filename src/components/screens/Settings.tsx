@@ -71,7 +71,7 @@ export function Settings() {
           disabled={saveState !== 'countdown'}
           className={`shrink-0 flex items-center justify-center gap-2 px-3 py-1.5 md:px-4 md:py-2 rounded-xl text-xs md:text-sm font-medium transition-colors border ${
             saveState === 'countdown'
-              ? 'bg-blue-500/10 text-blue-400 border-blue-500/20 hover:bg-blue-500/20 cursor-pointer shadow-[0_0_15px_rgba(59,130,246,0.15)]'
+              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/20 cursor-pointer shadow-[0_0_15px_rgba(16,185,129,0.15)]'
               : 'bg-black/20 text-zinc-300 border-white/5 cursor-default'
           }`}
         >

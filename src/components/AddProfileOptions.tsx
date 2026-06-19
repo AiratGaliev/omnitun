@@ -78,9 +78,9 @@ export function AddProfileOptions({
           <Clipboard
             size={32}
             strokeWidth={1.5}
-            className="text-blue-200 group-hover:text-emerald-400 group-hover:scale-110 transition-transform"
+            className="text-zinc-400 group-hover:text-emerald-400 group-hover:scale-110 transition-transform"
           />
-          <span className="text-sm font-medium text-blue-100 group-hover:text-white transition-colors">
+          <span className="text-sm font-medium text-zinc-300 group-hover:text-white transition-colors">
             {t('fromClipboard')}
           </span>
         </button>
@@ -94,9 +94,9 @@ export function AddProfileOptions({
           <Plus
             size={32}
             strokeWidth={1.5}
-            className="text-blue-200 group-hover:text-emerald-400 group-hover:scale-110 transition-transform"
+            className="text-zinc-400 group-hover:text-emerald-400 group-hover:scale-110 transition-transform"
           />
-          <span className="text-sm font-medium text-blue-100 group-hover:text-white transition-colors">
+          <span className="text-sm font-medium text-zinc-300 group-hover:text-white transition-colors">
             {t('manualAdd')}
           </span>
         </button>
@@ -110,7 +110,7 @@ export function AddProfileOptions({
             exit={{ opacity: 0, y: 20 }}
             className="fixed inset-0 z-50 flex items-center justify-center p-8 bg-zinc-950/90 backdrop-blur-sm"
           >
-            <div className="w-full max-w-md bg-zinc-900 border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col text-left relative z-50">
+            <div className="w-full max-w-md bg-zinc-900 border border-white/5 rounded-2xl shadow-2xl overflow-hidden flex flex-col text-left relative z-50">
               <div className="flex justify-between items-center px-6 py-4 border-b border-white/10">
                 <h2 className="text-xl font-medium tracking-tight text-white">{t('manualAdd')}</h2>
                 <button
@@ -152,7 +152,7 @@ export function AddProfileOptions({
                   onClick={() => {
                     handleManualAdd();
                   }}
-                  className="w-full bg-blue-200 hover:bg-blue-300 text-blue-900 font-medium rounded-xl py-3 mt-2 flex items-center justify-center transition-all active:scale-[0.98]"
+                  className="w-full bg-emerald-500 hover:bg-emerald-400 text-black font-bold rounded-xl py-3 mt-2 flex items-center justify-center transition-all active:scale-[0.98] shadow-lg shadow-emerald-500/20"
                 >
                   {t('addBtn')}
                 </button>

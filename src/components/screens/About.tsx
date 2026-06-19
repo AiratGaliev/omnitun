@@ -72,7 +72,7 @@ export function About() {
 
         <div className="bg-white/5 border border-white/5 rounded-2xl p-6 shadow-sm flex flex-col gap-4">
           <div className="grid grid-cols-2 gap-3 mt-2 text-xs">
-            <div className="bg-black/20 p-4 flex flex-col gap-2 rounded-xl border border-white/5">
+            <div className="bg-white/5 p-4 flex flex-col gap-2 rounded-2xl border border-white/5">
               <span className="text-zinc-600 font-bold uppercase">{t('version')}</span>
               <span className="text-emerald-400 font-mono text-sm">v0.1.0 (Alpha)</span>
             </div>
@@ -80,7 +80,7 @@ export function About() {
               href="https://github.com/AiratGaliev/omnitun"
               target="_blank"
               rel="noreferrer"
-              className="bg-black/20 hover:bg-black/40 transition-colors p-4 flex flex-col gap-2 rounded-xl border border-white/5 group"
+              className="bg-white/5 hover:bg-white/10 transition-colors p-4 flex flex-col gap-2 rounded-2xl border border-white/5 group"
             >
               <span className="text-zinc-600 font-bold uppercase">{t('sourceCode')}</span>
               <span className="text-zinc-300 gap-2 flex items-center justify-between mt-0.5 group-hover:text-emerald-400 transition-colors">
@@ -92,7 +92,7 @@ export function About() {
             </a>
           </div>
 
-          <div className="bg-black/30 border border-white/5 rounded-xl p-5 mt-2">
+          <div className="bg-white/5 border border-white/5 rounded-2xl p-5 mt-2">
             <h4 className="text-red-400 font-bold uppercase tracking-wider text-xs mb-3 flex items-center gap-2">
               <ShieldAlert size={16} /> {t('disclaimer')}
             </h4>

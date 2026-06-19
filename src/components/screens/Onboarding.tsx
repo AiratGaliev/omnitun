@@ -82,7 +82,7 @@ export function Onboarding() {
         </div>
       </div>
 
-      <h1 className="text-3xl font-bold tracking-tight mb-3">{t('secureTunnelSetup')}</h1>
+      <h1 className="text-2xl font-bold tracking-tight mb-3">{t('secureTunnelSetup')}</h1>
       <p className="text-zinc-500 mb-10 text-sm max-w-md">{t('secureTunnelDesc')}</p>
 
       <AddProfileOptions
@@ -97,7 +97,7 @@ export function Onboarding() {
           addLog('Onboarding skipped', 'info', 'system');
           completeOnboarding();
         }}
-        className="mt-6 px-6 py-2 rounded-full border border-white/10 text-zinc-400 hover:text-white hover:bg-white/5 transition-colors text-sm"
+        className="mt-6 px-6 py-2 rounded-lg border border-white/5 text-zinc-400 hover:text-white hover:bg-white/5 transition-colors text-sm"
       >
         {t('skip') || 'Skip'}
       </button>

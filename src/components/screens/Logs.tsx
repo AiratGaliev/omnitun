@@ -74,7 +74,7 @@ export function Logs() {
         </button>
       </header>
 
-      <div className="flex-1 overflow-hidden bg-black/40 border border-white/5 rounded-xl shadow-inner relative flex flex-col">
+      <div className="flex-1 overflow-hidden bg-black/30 border border-white/5 rounded-2xl shadow-inner relative flex flex-col">
         <div className="bg-white/5 border-b border-white/5 rounded-t-xl px-4 py-2 flex items-center gap-2 text-xs font-mono text-zinc-500 shrink-0">
           <Terminal size={14} />
           <span className="mr-auto" />
@@ -83,7 +83,7 @@ export function Logs() {
             onChange={(e) => {
               setActiveFilter(e.target.value as 'all' | LogSource);
             }}
-            className="bg-black/30 border border-white/10 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500/50 cursor-pointer"
+            className="bg-black/30 border border-white/10 rounded-lg px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500/50 cursor-pointer"
           >
             {SOURCE_OPTIONS.map((opt) => (
               <option key={opt.value} value={opt.value} className="bg-zinc-900 text-zinc-300">

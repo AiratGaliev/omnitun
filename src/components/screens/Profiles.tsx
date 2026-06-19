@@ -48,7 +48,7 @@ export function Profiles() {
     <div className="flex flex-col h-full w-full p-8">
       <header className="flex justify-between items-center mb-8">
         <div className="flex items-center gap-4">
-          <div className="w-12 h-12 bg-white/5 border border-white/10 rounded-xl flex items-center justify-center shadow-lg">
+          <div className="w-12 h-12 bg-white/5 border border-white/5 rounded-xl flex items-center justify-center shadow-lg">
             <Globe2 size={24} className="text-zinc-300" />
           </div>
           <div>
@@ -90,7 +90,7 @@ export function Profiles() {
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="text-center py-16 flex flex-col items-center justify-center border border-dashed border-white/10 rounded-2xl bg-white/[0.02]"
+            className="text-center py-16 flex flex-col items-center justify-center border border-dashed border-white/5 rounded-2xl bg-white/[0.02]"
           >
             <div className="w-16 h-16 bg-white/5 rounded-2xl flex items-center justify-center mb-4">
               <Globe2 size={28} className="text-zinc-600" />
@@ -141,7 +141,7 @@ function ProfileItem({
   return (
     <motion.div
       layout
-      className="bg-white/5 border border-white/10 p-5 rounded-2xl mb-4 flex flex-col justify-between group"
+      className="bg-white/5 border border-white/5 hover:bg-white/10 transition-colors p-5 rounded-2xl mb-4 flex flex-col justify-between group"
     >
       {editingId === p.id ? (
         <div className="flex flex-col gap-3 w-full">
@@ -151,7 +151,7 @@ function ProfileItem({
             onChange={(e) => {
               setEditName(e.target.value);
             }}
-            className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none w-full transition-all"
+            className="bg-black/40 border border-white/5 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none w-full transition-all"
           />
           <input
             type="text"
@@ -159,7 +159,7 @@ function ProfileItem({
             onChange={(e) => {
               setEditUrl(e.target.value);
             }}
-            className="bg-black/40 border border-white/10 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none w-full transition-all font-mono text-zinc-300"
+            className="bg-black/40 border border-white/5 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none w-full transition-all font-mono text-zinc-300"
           />
           <div className="flex justify-end gap-2 mt-2">
             <button
