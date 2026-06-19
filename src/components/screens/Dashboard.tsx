@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Power, ChevronDown, Check } from 'lucide-react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { Check, ChevronDown, Power } from 'lucide-react';
 import { toast } from 'sonner';
-import { useVPNStore } from '../../store';
-import { useTranslation } from '../../hooks/useTranslation';
+import { useVPNStore } from '@/store.ts';
+import { useTranslation } from '@/hooks/useTranslation.ts';
 import { SegmentedControl } from '../SegmentedControl';
 
 export function Dashboard() {
@@ -18,6 +18,7 @@ export function Dashboard() {
     updateSettings,
   } = useVPNStore();
   const toggleConnection = useVPNStore((state) => state.toggleConnection);
+  const addLog = useVPNStore((state) => state.addLog);
   const { t } = useTranslation();
   const [isServerDropdownOpen, setIsServerDropdownOpen] = useState(false);
 
@@ -73,6 +74,7 @@ export function Dashboard() {
       }
     } catch (e: unknown) {
       const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : t('statusError');
+      addLog(`Connection error: ${msg}`, 'error', 'system');
       toast.error(msg, {
         description: t('connectionFailedDesc'),
       });
@@ -139,6 +141,7 @@ export function Dashboard() {
                         onClick={() => {
                           setActiveServer(server);
                           setIsServerDropdownOpen(false);
+                          addLog(`Server changed to ${server.name}`, 'info', 'system');
                           toast.success(`${t('serverStr')}${server.name}${t('selectedStr')}`);
                         }}
                         disabled={status === 'connecting'}
@@ -187,6 +190,7 @@ export function Dashboard() {
               value={settings.routingMode}
               onChange={(val) => {
                 updateSettings({ routingMode: val });
+                addLog(`Routing mode changed to ${val}`, 'info', 'settings');
               }}
               disabled={isConnected || isConnecting}
               layoutId="modeIndicatorDashboard"

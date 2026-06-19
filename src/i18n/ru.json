@@ -131,6 +131,13 @@
   "logsDesc": "Системные события и лог подключений.",
   "clearLogs": "Очистить",
   "noLogs": "Записей пока нет.",
+  "logAllSources": "Все источники",
+  "logSourceSystem": "Система",
+  "logSourceVpn": "VPN",
+  "logSourceInstaller": "Установщик",
+  "logSourceProcess": "Процесс",
+  "logSourceSubscription": "Подписка",
+  "logSourceSettings": "Настройки",
   "saving": "Сохранение",
   "saved": "Сохранено"
 }

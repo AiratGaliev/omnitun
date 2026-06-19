@@ -1,14 +1,38 @@
-import { useTranslation } from '../../hooks/useTranslation';
-import { useVPNStore } from '../../store';
-import { Terminal, Trash2, AlertCircle, Info, CheckCircle2, AlertTriangle, Play } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { useState } from 'react';
+import { useTranslation } from '@/hooks/useTranslation.ts';
+import { useVPNStore } from '@/store.ts';
+import {
+  AlertCircle,
+  AlertTriangle,
+  CheckCircle2,
+  Info,
+  Play,
+  Terminal,
+  Trash2,
+} from 'lucide-react';
+import { AnimatePresence, motion } from 'framer-motion';
+import type { LogSource } from '@/types.ts';
+
+const SOURCE_OPTIONS: { value: 'all' | LogSource; labelKey: string }[] = [
+  { value: 'all', labelKey: 'logAllSources' },
+  { value: 'system', labelKey: 'logSourceSystem' },
+  { value: 'vpn', labelKey: 'logSourceVpn' },
+  { value: 'installer', labelKey: 'logSourceInstaller' },
+  { value: 'process', labelKey: 'logSourceProcess' },
+  { value: 'subscription', labelKey: 'logSourceSubscription' },
+  { value: 'settings', labelKey: 'logSourceSettings' },
+];
 
 export function Logs() {
   const { t } = useTranslation();
   const { logs, clearLogs } = useVPNStore();
+  const [activeFilter, setActiveFilter] = useState<'all' | LogSource>('all');
 
-  const getLogIcon = (type: string) => {
-    switch (type) {
+  const filteredLogs =
+    activeFilter === 'all' ? logs : logs.filter((l) => l.source === activeFilter);
+
+  const getLogIcon = (level: string) => {
+    switch (level) {
       case 'error':
         return <AlertCircle size={14} className="text-red-500 shrink-0" />;
       case 'warning':
@@ -20,8 +44,8 @@ export function Logs() {
     }
   };
 
-  const getLogColor = (type: string) => {
-    switch (type) {
+  const getLogColor = (level: string) => {
+    switch (level) {
       case 'error':
         return 'text-red-400 font-medium';
       case 'warning':
@@ -53,13 +77,26 @@ export function Logs() {
       <div className="flex-1 overflow-hidden bg-black/40 border border-white/5 rounded-xl shadow-inner relative flex flex-col">
         <div className="bg-white/5 border-b border-white/5 rounded-t-xl px-4 py-2 flex items-center gap-2 text-xs font-mono text-zinc-500 shrink-0">
           <Terminal size={14} />
-          System Event Stream
+          <span className="mr-auto" />
+          <select
+            value={activeFilter}
+            onChange={(e) => {
+              setActiveFilter(e.target.value as 'all' | LogSource);
+            }}
+            className="bg-black/30 border border-white/10 rounded px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500/50 cursor-pointer"
+          >
+            {SOURCE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value} className="bg-zinc-900 text-zinc-300">
+                {t(opt.labelKey as unknown as Parameters<typeof t>[0])}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div className="flex-1 overflow-y-auto custom-scrollbar p-4 font-mono text-xs leading-relaxed space-y-1.5">
           <AnimatePresence initial={false}>
-            {logs.length > 0 ? (
-              logs.map((log) => (
+            {filteredLogs.length > 0 ? (
+              filteredLogs.map((log) => (
                 <motion.div
                   key={log.id}
                   initial={{ opacity: 0, x: -10 }}
@@ -72,11 +109,13 @@ export function Logs() {
                       hour: '2-digit',
                       minute: '2-digit',
                       second: '2-digit',
-                    })}.{String(new Date(log.timestamp).getMilliseconds()).padStart(3, '0')}
+                    })}
+                    .{String(new Date(log.timestamp).getMilliseconds()).padStart(3, '0')}
                   </span>
-                  <div className="mt-0.5">{getLogIcon(log.type)}</div>
-                  <span className={`break-all ${getLogColor(log.type)}`}>
-                    {log.message}
+                  <div className="mt-0.5">{getLogIcon(log.level)}</div>
+                  <span className="break-all">
+                    <span className="text-zinc-600 mr-1.5">[{log.source}]</span>
+                    <span className={getLogColor(log.level)}>{log.message}</span>
                   </span>
                 </motion.div>
               ))

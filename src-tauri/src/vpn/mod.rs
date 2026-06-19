@@ -3,12 +3,15 @@ pub mod geoip;
 pub mod installer;
 mod process;
 
+use crate::logging::{log, LogLevel, Logger, LogSource};
 use installer::Installer;
 use process::ProcessManager;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
+use tauri::{AppHandle, Manager};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -32,6 +35,7 @@ impl From<VpnError> for String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct ServerProfile {
     pub id: String,
     pub name: String,
@@ -47,24 +51,6 @@ pub struct ServerProfile {
     pub private_key: Option<String>,
 }
 
-impl Default for ServerProfile {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            protocol: String::new(),
-            server: String::new(),
-            port: 0,
-            uuid: None,
-            password: None,
-            method: None,
-            sni: None,
-            flow: None,
-            public_key: None,
-            private_key: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -96,30 +82,75 @@ impl VpnManager {
         }
     }
 
-    pub async fn ensure_installed(&self) -> Result<PathBuf, VpnError> {
+    pub async fn ensure_installed(&self, app_handle: &AppHandle) -> Result<PathBuf, VpnError> {
         if self.installed.load(Ordering::SeqCst) || Installer::is_installed(&self.bin_dir) {
             self.installed.store(true, Ordering::SeqCst);
             return Ok(self.bin_dir.join(Installer::binary_name()));
         }
 
-        // Download and install the latest version
-        let version = Installer::latest_version().await?;
-        let binary_path = Installer::install(&self.bin_dir, &version).await?;
+        let logger = app_handle.state::<Mutex<Logger>>();
+        log(
+            app_handle,
+            &logger,
+            LogLevel::Info,
+            LogSource::Installer,
+            "Looking for sing-box updates...".into(),
+        );
+
+        let version = Installer::latest_version(app_handle).await?;
+        let binary_path = Installer::install(app_handle, &self.bin_dir, &version).await?;
         self.installed.store(true, Ordering::SeqCst);
         Ok(binary_path)
     }
 
-    pub async fn start(&self, profile: &ServerProfile) -> Result<(), VpnError> {
-        self.ensure_installed().await?;
+    pub async fn start(&self, app_handle: &AppHandle, profile: &ServerProfile) -> Result<(), VpnError> {
+        let logger = app_handle.state::<Mutex<Logger>>();
+        log(
+            app_handle,
+            &logger,
+            LogLevel::Info,
+            LogSource::Vpn,
+            "Checking sing-box installation...".into(),
+        );
+        self.ensure_installed(app_handle).await?;
 
+        log(
+            app_handle,
+            &logger,
+            LogLevel::Info,
+            LogSource::Vpn,
+            "Generating sing-box config...".into(),
+        );
         let base_template = include_str!("../../config/base.json");
         let config_json = config::generate_config(base_template, profile)?;
         let config_path = config::write_config(&config_json, &self.config_dir)?;
+        log(
+            app_handle,
+            &logger,
+            LogLevel::Info,
+            LogSource::Vpn,
+            format!("Config written to {}", config_path.display()),
+        );
 
+        log(
+            app_handle,
+            &logger,
+            LogLevel::Info,
+            LogSource::Process,
+            "Starting sing-box process...".into(),
+        );
         self.process_mgr.start(&config_path).await
     }
 
-    pub async fn stop(&self) -> Result<(), VpnError> {
+    pub async fn stop(&self, app_handle: &AppHandle) -> Result<(), VpnError> {
+        let logger = app_handle.state::<Mutex<Logger>>();
+        log(
+            app_handle,
+            &logger,
+            LogLevel::Info,
+            LogSource::Process,
+            "Terminating sing-box process...".into(),
+        );
         self.process_mgr.stop().await
     }
 

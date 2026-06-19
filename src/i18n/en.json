@@ -131,6 +131,13 @@
   "logsDesc": "System events and connection log stream.",
   "clearLogs": "Clear",
   "noLogs": "No log entries yet.",
+  "logAllSources": "All sources",
+  "logSourceSystem": "System",
+  "logSourceVpn": "VPN",
+  "logSourceInstaller": "Installer",
+  "logSourceProcess": "Process",
+  "logSourceSubscription": "Subscription",
+  "logSourceSettings": "Settings",
   "saving": "Saving",
   "saved": "Saved"
 }

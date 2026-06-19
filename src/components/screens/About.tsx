@@ -1,28 +1,35 @@
 import { useState } from 'react';
-import { useTranslation } from '../../hooks/useTranslation';
+import { useTranslation } from '@/hooks/useTranslation.ts';
 import { RefreshCw, ShieldAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import { check } from '@tauri-apps/plugin-updater';
+import { useVPNStore } from '@/store.ts';
 
 export function About() {
   const { t } = useTranslation();
-  const [checkingForUpdates, setChecking] = useState(false);
+  const addLog = useVPNStore((s) => s.addLog);
+  const [checkingForUpdates, setCheckingForUpdates] = useState(false);
 
   const handleUpdateCheck = async () => {
     try {
-      setChecking(true);
+      setCheckingForUpdates(true);
+      addLog('Checking for updates...', 'info', 'system');
       const update = await check();
       if (update) {
+        addLog(`Update v${update.version} available, installing...`, 'info', 'system');
         toast(`v${update.version} ${t('updateAvailable')}`);
         await update.downloadAndInstall();
+        addLog(`Update v${update.version} installed`, 'success', 'system');
         toast.success(t('updateInstalled'));
       } else {
+        addLog('App is up-to-date', 'success', 'system');
         toast.success(t('upToDate'));
       }
     } catch {
+      addLog('Update check failed', 'error', 'system');
       toast.error(t('updateCheckFailed'));
     } finally {
-      setChecking(false);
+      setCheckingForUpdates(false);
     }
   };
 

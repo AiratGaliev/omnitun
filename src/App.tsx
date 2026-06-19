@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Toaster } from 'sonner';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 import { useVPNStore } from './store';
 import { i18n } from './i18n';
 import { Onboarding } from './components/screens/Onboarding';
@@ -23,6 +23,7 @@ export default function App() {
   const loadProfiles = useVPNStore((state) => state.loadProfiles);
   const loadSettings = useVPNStore((state) => state.loadSettings);
   const refreshProfile = useVPNStore((state) => state.refreshProfile);
+  const addLog = useVPNStore((state) => state.addLog);
 
   // Init Tauri event listener on mount
   useEffect(() => {
@@ -46,8 +47,14 @@ export default function App() {
       loadSettings().catch(() => undefined),
     ]).then(() => {
       setIsInitialized(true);
+      const { profiles: loadedProfiles, settings: loadedSettings } = useVPNStore.getState();
+      addLog(
+        `App initialized: ${String(loadedProfiles.length)} profile(s), language: ${loadedSettings.language}`,
+        'info',
+        'system',
+      );
     });
-  }, [loadProfiles, loadSettings]);
+  }, [loadProfiles, loadSettings, addLog]);
 
   // Apply persisted language to i18n when settings load
   useEffect(() => {
@@ -60,6 +67,7 @@ export default function App() {
 
     const intervalMs = settings.autoUpdateInterval * 60 * 1000;
     const timer = setInterval(() => {
+      addLog(`Auto-refreshing ${String(profiles.length)} subscription(s)`, 'info', 'subscription');
       profiles.forEach((p) => {
         refreshProfile(p.id).catch(() => undefined);
       });
@@ -68,7 +76,7 @@ export default function App() {
     return () => {
       clearInterval(timer);
     };
-  }, [profiles, settings.autoUpdateInterval, refreshProfile]);
+  }, [profiles, settings.autoUpdateInterval, refreshProfile, addLog]);
 
   return (
     <div className="w-full h-screen bg-zinc-950 text-zinc-100 font-sans flex overflow-hidden relative">
@@ -85,87 +93,87 @@ export default function App() {
       />
 
       {!isInitialized ? null : (
-      <AnimatePresence mode="wait">
-        {!settings.acceptTerms ? (
-          <Terms key="terms" />
-        ) : !hasOnboarded ? (
-          <Onboarding key="onboarding" />
-        ) : (
-          <motion.div
-            key="main"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="flex-1 flex flex-row w-full h-full"
-          >
-            <Navigation activeTab={activeTab} onChange={setActiveTab} />
-            <div className="flex-1 relative overflow-hidden">
-              <AnimatePresence mode="wait">
-                {activeTab === 'home' && (
-                  <motion.div
-                    key="home"
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: 20 }}
-                    transition={{ duration: 0.2 }}
-                    className="absolute inset-0"
-                  >
-                    <Dashboard />
-                  </motion.div>
-                )}
-                {activeTab === 'profiles' && (
-                  <motion.div
-                    key="profiles"
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -20 }}
-                    transition={{ duration: 0.2 }}
-                    className="absolute inset-0"
-                  >
-                    <Profiles />
-                  </motion.div>
-                )}
-                {activeTab === 'settings' && (
-                  <motion.div
-                    key="settings"
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -20 }}
-                    transition={{ duration: 0.2 }}
-                    className="absolute inset-0"
-                  >
-                    <Settings />
-                  </motion.div>
-                )}
-                {activeTab === 'logs' && (
-                  <motion.div
-                    key="logs"
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -20 }}
-                    transition={{ duration: 0.2 }}
-                    className="absolute inset-0"
-                  >
-                    <Logs />
-                  </motion.div>
-                )}
-                {activeTab === 'about' && (
-                  <motion.div
-                    key="about"
-                    initial={{ opacity: 0, x: 20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, x: -20 }}
-                    transition={{ duration: 0.2 }}
-                    className="absolute inset-0"
-                  >
-                    <About />
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+        <AnimatePresence mode="wait">
+          {!settings.acceptTerms ? (
+            <Terms key="terms" />
+          ) : !hasOnboarded ? (
+            <Onboarding key="onboarding" />
+          ) : (
+            <motion.div
+              key="main"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="flex-1 flex flex-row w-full h-full"
+            >
+              <Navigation activeTab={activeTab} onChange={setActiveTab} />
+              <div className="flex-1 relative overflow-hidden">
+                <AnimatePresence mode="wait">
+                  {activeTab === 'home' && (
+                    <motion.div
+                      key="home"
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: 20 }}
+                      transition={{ duration: 0.2 }}
+                      className="absolute inset-0"
+                    >
+                      <Dashboard />
+                    </motion.div>
+                  )}
+                  {activeTab === 'profiles' && (
+                    <motion.div
+                      key="profiles"
+                      initial={{ opacity: 0, x: 20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: -20 }}
+                      transition={{ duration: 0.2 }}
+                      className="absolute inset-0"
+                    >
+                      <Profiles />
+                    </motion.div>
+                  )}
+                  {activeTab === 'settings' && (
+                    <motion.div
+                      key="settings"
+                      initial={{ opacity: 0, x: 20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: -20 }}
+                      transition={{ duration: 0.2 }}
+                      className="absolute inset-0"
+                    >
+                      <Settings />
+                    </motion.div>
+                  )}
+                  {activeTab === 'logs' && (
+                    <motion.div
+                      key="logs"
+                      initial={{ opacity: 0, x: 20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: -20 }}
+                      transition={{ duration: 0.2 }}
+                      className="absolute inset-0"
+                    >
+                      <Logs />
+                    </motion.div>
+                  )}
+                  {activeTab === 'about' && (
+                    <motion.div
+                      key="about"
+                      initial={{ opacity: 0, x: 20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: -20 }}
+                      transition={{ duration: 0.2 }}
+                      className="absolute inset-0"
+                    >
+                      <About />
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       )}
     </div>
   );

@@ -1,5 +1,8 @@
+use crate::logging::{log, LogLevel, Logger, LogSource};
 use crate::vpn::VpnError;
 use std::path::PathBuf;
+use std::sync::Mutex;
+use tauri::{AppHandle, Manager};
 
 pub struct Installer;
 
@@ -20,13 +23,25 @@ impl Installer {
         binary_path.exists()
     }
 
-    pub async fn install(bin_dir: &PathBuf, version: &str) -> Result<PathBuf, VpnError> {
+    pub async fn install(
+        app_handle: &AppHandle,
+        bin_dir: &PathBuf,
+        version: &str,
+    ) -> Result<PathBuf, VpnError> {
+        let logger = app_handle.state::<Mutex<Logger>>();
         let url = Self::download_url(version);
         let suffix = Self::platform_suffix();
         let binary_name = Self::binary_name();
 
         std::fs::create_dir_all(bin_dir)?;
 
+        log(
+            app_handle,
+            &logger,
+            LogLevel::Info,
+            LogSource::Installer,
+            format!("Downloading sing-box {version}..."),
+        );
         let response = reqwest::get(&url)
             .await
             .map_err(|e| VpnError::Install(format!("Failed to download sing-box: {e}")))?;
@@ -35,6 +50,14 @@ impl Installer {
             .bytes()
             .await
             .map_err(|e| VpnError::Install(format!("Failed to read response: {e}")))?;
+
+        log(
+            app_handle,
+            &logger,
+            LogLevel::Info,
+            LogSource::Installer,
+            format!("Downloaded {size} bytes, extracting...", size = bytes.len()),
+        );
 
         if suffix.ends_with(".zip") {
             Self::extract_zip(&bytes, bin_dir, binary_name)?;
@@ -50,10 +73,27 @@ impl Installer {
             std::fs::set_permissions(&binary_path, std::fs::Permissions::from_mode(0o755))?;
         }
 
+        log(
+            app_handle,
+            &logger,
+            LogLevel::Success,
+            LogSource::Installer,
+            format!("sing-box {version} installed"),
+        );
+
         Ok(binary_path)
     }
 
-    pub async fn latest_version() -> Result<String, VpnError> {
+    pub async fn latest_version(app_handle: &AppHandle) -> Result<String, VpnError> {
+        let logger = app_handle.state::<Mutex<Logger>>();
+        log(
+            app_handle,
+            &logger,
+            LogLevel::Info,
+            LogSource::Installer,
+            "Checking latest sing-box version...".into(),
+        );
+
         let client = reqwest::Client::new();
         let resp = client
             .get("https://api.github.com/repos/SagerNet/sing-box/releases/latest")
@@ -72,8 +112,17 @@ impl Installer {
             .as_str()
             .ok_or_else(|| VpnError::Install("Missing tag_name in response".into()))?;
 
-        // Strip leading 'v' from tag
-        Ok(tag.trim_start_matches('v').to_string())
+        let version = tag.trim_start_matches('v').to_string();
+
+        log(
+            app_handle,
+            &logger,
+            LogLevel::Info,
+            LogSource::Installer,
+            format!("Latest version: {version}"),
+        );
+
+        Ok(version)
     }
 
     fn extract_zip(bytes: &[u8], bin_dir: &PathBuf, binary_name: &str) -> Result<(), VpnError> {

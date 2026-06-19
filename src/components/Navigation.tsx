@@ -1,10 +1,10 @@
-import { Home, List, Settings, Info, Terminal } from 'lucide-react';
+import { Home, Info, List, Settings, Terminal } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { useTranslation } from '../hooks/useTranslation';
 
 interface NavigationProps {
-  activeTab: 'home' | 'profiles' | 'settings' | 'logs' | 'about';
-  onChange: (tab: 'home' | 'profiles' | 'settings' | 'logs' | 'about') => void;
+  readonly activeTab: 'home' | 'profiles' | 'settings' | 'logs' | 'about';
+  readonly onChange: (tab: 'home' | 'profiles' | 'settings' | 'logs' | 'about') => void;
 }
 
 export function Navigation({ activeTab, onChange }: NavigationProps) {

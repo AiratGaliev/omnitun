@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { AnimatePresence, motion } from 'framer-motion';
 import { Clipboard, Plus, X } from 'lucide-react';
 import { toast } from 'sonner';
-import { useTranslation } from '../hooks/useTranslation';
+import { useTranslation } from '@/hooks/useTranslation';
 import * as z from 'zod';
 
 const manualSchema = z.object({
@@ -12,9 +12,9 @@ const manualSchema = z.object({
 });
 
 interface AddProfileOptionsProps {
-  onAdd: (url: string, name?: string) => void;
-  className?: string;
-  horizontal?: boolean;
+  readonly onAdd: (url: string, name?: string) => void;
+  readonly className?: string;
+  readonly horizontal?: boolean;
 }
 
 export function AddProfileOptions({

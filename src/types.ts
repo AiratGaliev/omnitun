@@ -1,10 +1,13 @@
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
+export type LogSource = 'system' | 'vpn' | 'installer' | 'process' | 'subscription' | 'settings';
+
 export interface LogEntry {
   id: string;
   timestamp: number;
   message: string;
-  type: 'info' | 'error' | 'warning' | 'success';
+  level: 'info' | 'error' | 'warning' | 'success';
+  source: LogSource;
 }
 
 export interface Server {

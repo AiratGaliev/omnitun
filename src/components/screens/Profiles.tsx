@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { useVPNStore } from '../../store';
+import { useVPNStore } from '@/store.ts';
 import { Edit2, Globe2, RefreshCw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { useTranslation } from '../../hooks/useTranslation';
-import type { Profile } from '../../types';
-import type { TranslationKey } from '../../i18n';
+import { useTranslation } from '@/hooks/useTranslation.ts';
+import type { Profile } from '@/types.ts';
+import type { TranslationKey } from '@/i18n.ts';
 import * as z from 'zod';
 import { AddProfileOptions } from '../AddProfileOptions';
 
@@ -192,7 +192,8 @@ function ProfileItem({
               </p>
               {p.servers.length > 0 && (
                 <span className="inline-block mt-1.5 text-[10px] text-emerald-400/80 bg-emerald-500/10 px-2 py-0.5 rounded-full">
-                  {p.servers.length} {p.servers.length === 1 ? t('serverSingular') : t('serverPlural')}
+                  {p.servers.length}{' '}
+                  {p.servers.length === 1 ? t('serverSingular') : t('serverPlural')}
                 </span>
               )}
             </div>

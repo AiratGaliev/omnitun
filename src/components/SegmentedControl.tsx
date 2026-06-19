@@ -8,11 +8,11 @@ export interface SegmentedControlOption<T extends string> {
 }
 
 interface SegmentedControlProps<T extends string> {
-  options: readonly SegmentedControlOption<T>[];
-  value: T;
-  onChange: (value: T) => void;
-  disabled?: boolean;
-  layoutId?: string;
+  readonly options: SegmentedControlOption<T>[];
+  readonly value: T;
+  readonly onChange: (value: T) => void;
+  readonly disabled?: boolean;
+  readonly layoutId?: string;
 }
 
 export function SegmentedControl<T extends string>({
