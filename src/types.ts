@@ -1,4 +1,9 @@
-export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'disconnecting' | 'error';
+export type ConnectionStatus =
+  | 'disconnected'
+  | 'connecting'
+  | 'connected'
+  | 'disconnecting'
+  | 'error';
 
 export type LogSource = 'system' | 'vpn' | 'installer' | 'process' | 'subscription' | 'settings';
 
@@ -16,8 +21,15 @@ export interface Server {
   flag?: string;
   ping?: number;
   protocol?: string;
-  host?: string;
+  server?: string;
   port?: number;
+  uuid?: string;
+  password?: string;
+  method?: string;
+  sni?: string;
+  flow?: string;
+  publicKey?: string;
+  privateKey?: string;
 }
 
 export interface Profile {

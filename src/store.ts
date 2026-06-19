@@ -13,6 +13,13 @@ interface RustServerProfile {
   protocol: string;
   server: string;
   port: number;
+  uuid?: string;
+  password?: string;
+  method?: string;
+  sni?: string;
+  flow?: string;
+  public_key?: string;
+  private_key?: string;
 }
 
 interface RustSubscriptionProfile {
@@ -55,12 +62,7 @@ interface VPNStore {
   initListener: () => Promise<() => void>;
 }
 
-const defaultServers: Server[] = [
-  { id: '1', name: 'Frankfurt', flag: '🇩🇪', ping: 45 },
-  { id: '2', name: 'Amsterdam', flag: '🇳🇱', ping: 52 },
-  { id: '3', name: 'London', flag: '🇬🇧', ping: 68 },
-  { id: '4', name: 'New York', flag: '🇺🇸', ping: 120 },
-];
+const defaultServers: Server[] = [];
 
 function mapVpnStatus(payload: VpnStatusPayload): ConnectionStatus {
   if (typeof payload.status === 'string') {
@@ -87,8 +89,15 @@ function mapRustProfile(rust: RustSubscriptionProfile): Profile {
         id: s.id,
         name: s.name,
         protocol: s.protocol,
-        host: s.server,
+        server: s.server,
         port: s.port,
+        uuid: s.uuid,
+        password: s.password,
+        method: s.method,
+        sni: s.sni,
+        flow: s.flow,
+        publicKey: s.public_key,
+        privateKey: s.private_key,
       }),
     ),
   };
@@ -96,7 +105,7 @@ function mapRustProfile(rust: RustSubscriptionProfile): Profile {
 
 export const useVPNStore = create<VPNStore>((set, get) => ({
   status: 'disconnected',
-  activeServer: defaultServers[0],
+  activeServer: null,
   servers: defaultServers,
   profiles: [],
   hasOnboarded: false,
@@ -141,7 +150,11 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         url: data.url,
       });
       const profile = mapRustProfile(result);
-      set((state) => ({ profiles: [...state.profiles, profile] }));
+      set((state) => ({
+        profiles: [...state.profiles, profile],
+        servers: [...state.servers, ...profile.servers],
+        activeServer: state.activeServer ?? profile.servers[0] ?? null,
+      }));
       get().addLog(
         `Profile "${data.name}" added (${String(profile.servers.length)} server(s))`,
         'success',
@@ -163,7 +176,18 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   removeProfile: async (id) => {
     try {
       await invoke('remove_subscription', { id });
-      set((state) => ({ profiles: state.profiles.filter((p) => p.id !== id) }));
+      set((state) => {
+        const removed = state.profiles.find((p) => p.id === id);
+        const removedIds = new Set(removed?.servers.map((s) => s.id) ?? []);
+        const remaining = state.servers.filter((s) => !removedIds.has(s.id));
+        return {
+          profiles: state.profiles.filter((p) => p.id !== id),
+          servers: remaining,
+          activeServer: removedIds.has(state.activeServer?.id ?? '')
+            ? (remaining[0] ?? undefined)
+            : state.activeServer,
+        };
+      });
       get().addLog('Profile removed', 'success', 'subscription');
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -194,7 +218,14 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   loadProfiles: async () => {
     try {
       const results = await invoke<RustSubscriptionProfile[]>('get_subscriptions');
-      set({ profiles: results.map(mapRustProfile) });
+      const profiles = results.map(mapRustProfile);
+      const allServers = profiles.flatMap((p) => p.servers);
+      const state = get();
+      set({
+        profiles,
+        servers: allServers,
+        activeServer: state.activeServer ?? allServers[0] ?? null,
+      });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Unknown error';
       get().addLog(`Failed to load profiles: ${msg}`, 'warning', 'subscription');
@@ -265,11 +296,18 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         addLog(`Connecting to ${activeServer?.name ?? 'Default'}...`, 'info', 'system');
         set({ status: 'connecting' });
         const profile = {
-          id: 'default',
+          id: activeServer?.id ?? 'default',
           name: activeServer?.name ?? 'Default',
-          protocol: 'vless',
-          server: '127.0.0.1',
-          port: 443,
+          protocol: activeServer?.protocol ?? 'vless',
+          server: activeServer?.server ?? '127.0.0.1',
+          port: activeServer?.port ?? 0,
+          uuid: activeServer?.uuid ?? null,
+          password: activeServer?.password ?? null,
+          method: activeServer?.method ?? null,
+          sni: activeServer?.sni ?? null,
+          flow: activeServer?.flow ?? null,
+          public_key: activeServer?.publicKey ?? null,
+          private_key: activeServer?.privateKey ?? null,
         };
         await invoke('start_vpn', { profile });
       } else {

@@ -118,7 +118,7 @@ export default function App() {
                       transition={{ duration: 0.2 }}
                       className="absolute inset-0"
                     >
-                      <Dashboard />
+                      <Dashboard onNavigate={setActiveTab} />
                     </motion.div>
                   )}
                   {activeTab === 'profiles' && (
