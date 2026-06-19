@@ -5,6 +5,7 @@ use std::path::Path;
 pub fn generate_config(
     base_template: &str,
     cache_dir: &Path,
+    proxy_port: u16,
     server_profile: &ServerProfile,
 ) -> Result<String, VpnError> {
     let mut config: Value =
@@ -18,6 +19,11 @@ pub fn generate_config(
         return Err(VpnError::Config(
             "Missing outbounds array in template".into(),
         ));
+    }
+
+    // Set proxy listen port from user settings
+    if let Some(inbound) = config["inbounds"].get_mut(0) {
+        inbound["listen_port"] = json!(proxy_port);
     }
 
     // Set cache file to absolute path so it doesn't appear in the project root
@@ -46,6 +52,12 @@ pub fn write_config(json: &str, config_dir: &Path) -> Result<std::path::PathBuf,
 fn build_outbound(server_profile: &ServerProfile) -> Result<Value, VpnError> {
     match server_profile.protocol.as_str() {
         "vless" => Ok(build_vless(server_profile)),
+        "vmess" => Ok(build_vmess(server_profile)),
+        "trojan" => Ok(build_trojan(server_profile)),
+        "shadowsocks" => Ok(build_shadowsocks(server_profile)),
+        "wireguard" => Ok(build_wireguard(server_profile)),
+        "hysteria2" => Ok(build_hysteria2(server_profile)),
+        "tuic" => Ok(build_tuic(server_profile)),
         _ => Err(VpnError::Config(format!(
             "Unsupported protocol: {}",
             server_profile.protocol
@@ -66,6 +78,103 @@ fn build_vless(server_profile: &ServerProfile) -> Value {
         outbound["flow"] = json!(flow);
     }
     if let Some(sni) = &server_profile.sni {
+        set_tls(&mut outbound, sni);
+    }
+
+    outbound
+}
+
+fn build_vmess(profile: &ServerProfile) -> Value {
+    let mut outbound = json!({
+        "type": "vmess",
+        "tag": "proxy",
+        "server": profile.server,
+        "server_port": profile.port,
+        "uuid": profile.uuid,
+    });
+
+    if let Some(method) = &profile.method {
+        outbound["security"] = json!(method);
+    }
+    if let Some(sni) = &profile.sni {
+        set_tls(&mut outbound, sni);
+    }
+
+    outbound
+}
+
+fn build_trojan(profile: &ServerProfile) -> Value {
+    let mut outbound = json!({
+        "type": "trojan",
+        "tag": "proxy",
+        "server": profile.server,
+        "server_port": profile.port,
+        "password": profile.password,
+    });
+
+    if let Some(sni) = &profile.sni {
+        set_tls(&mut outbound, sni);
+    }
+
+    outbound
+}
+
+fn build_shadowsocks(profile: &ServerProfile) -> Value {
+    json!({
+        "type": "shadowsocks",
+        "tag": "proxy",
+        "server": profile.server,
+        "server_port": profile.port,
+        "method": profile.method,
+        "password": profile.password,
+    })
+}
+
+fn build_wireguard(profile: &ServerProfile) -> Value {
+    json!({
+        "type": "wireguard",
+        "tag": "proxy",
+        "server": profile.server,
+        "server_port": profile.port,
+        "system_interface": false,
+        "local_address": ["172.16.0.2/32"],
+        "private_key": profile.private_key,
+        "peers": [{
+            "address": profile.server,
+            "port": profile.port,
+            "public_key": profile.public_key,
+            "allowed_ips": ["0.0.0.0/0"]
+        }]
+    })
+}
+
+fn build_hysteria2(profile: &ServerProfile) -> Value {
+    let mut outbound = json!({
+        "type": "hysteria2",
+        "tag": "proxy",
+        "server": profile.server,
+        "server_port": profile.port,
+        "password": profile.password,
+    });
+
+    if let Some(sni) = &profile.sni {
+        set_tls(&mut outbound, sni);
+    }
+
+    outbound
+}
+
+fn build_tuic(profile: &ServerProfile) -> Value {
+    let mut outbound = json!({
+        "type": "tuic",
+        "tag": "proxy",
+        "server": profile.server,
+        "server_port": profile.port,
+        "uuid": profile.uuid,
+        "password": profile.password,
+    });
+
+    if let Some(sni) = &profile.sni {
         set_tls(&mut outbound, sni);
     }
 
@@ -144,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_vless_plain() {
-        let result = generate_config(base_template(), &cache_dir(), &vless_profile());
+        let result = generate_config(base_template(), &cache_dir(), 10809, &vless_profile());
         assert!(
             result.is_ok(),
             "Config generation failed: {:?}",
@@ -170,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_vless_tls() {
-        let result = generate_config(base_template(), &cache_dir(), &vless_tls_profile());
+        let result = generate_config(base_template(), &cache_dir(), 10809, &vless_tls_profile());
         assert!(
             result.is_ok(),
             "Config generation failed: {:?}",
@@ -198,7 +307,7 @@ mod tests {
             ..vless_profile()
         };
 
-        let result = generate_config(base_template(), &cache_dir(), &profile);
+        let result = generate_config(base_template(), &cache_dir(), 10809, &profile);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -218,5 +327,86 @@ mod tests {
         assert_eq!(content, r#"{"test": true}"#);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn proto_profile(protocol: &str) -> ServerProfile {
+        ServerProfile {
+            protocol: protocol.into(),
+            server: "server.example.com".into(),
+            port: 443,
+            uuid: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            password: Some("pass123".into()),
+            method: Some("chacha20-ietf-poly1305".into()),
+            sni: Some("example.com".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_vmess() {
+        let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("vmess"));
+        assert!(result.is_ok());
+        let proxy = &serde_json::from_str::<Value>(&result.unwrap()).unwrap()["outbounds"][2];
+        assert_eq!(proxy["type"], "vmess");
+        assert_eq!(proxy["uuid"], "550e8400-e29b-41d4-a716-446655440000");
+        assert!(proxy["tls"]["enabled"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_trojan() {
+        let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("trojan"));
+        assert!(result.is_ok());
+        let proxy = &serde_json::from_str::<Value>(&result.unwrap()).unwrap()["outbounds"][2];
+        assert_eq!(proxy["type"], "trojan");
+        assert_eq!(proxy["password"], "pass123");
+        assert!(proxy["tls"]["enabled"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_shadowsocks() {
+        let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("shadowsocks"));
+        assert!(result.is_ok());
+        let proxy = &serde_json::from_str::<Value>(&result.unwrap()).unwrap()["outbounds"][2];
+        assert_eq!(proxy["type"], "shadowsocks");
+        assert_eq!(proxy["method"], "chacha20-ietf-poly1305");
+        assert_eq!(proxy["password"], "pass123");
+    }
+
+    #[test]
+    fn test_wireguard() {
+        let profile = ServerProfile {
+            protocol: "wireguard".into(),
+            server: "10.0.0.1".into(),
+            port: 51820,
+            private_key: Some("some-private-key".into()),
+            public_key: Some("some-public-key".into()),
+            ..Default::default()
+        };
+        let result = generate_config(base_template(), &cache_dir(), 10809, &profile);
+        assert!(result.is_ok());
+        let proxy = &serde_json::from_str::<Value>(&result.unwrap()).unwrap()["outbounds"][2];
+        assert_eq!(proxy["type"], "wireguard");
+        assert_eq!(proxy["peers"][0]["public_key"], "some-public-key");
+    }
+
+    #[test]
+    fn test_hysteria2() {
+        let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("hysteria2"));
+        assert!(result.is_ok());
+        let proxy = &serde_json::from_str::<Value>(&result.unwrap()).unwrap()["outbounds"][2];
+        assert_eq!(proxy["type"], "hysteria2");
+        assert_eq!(proxy["password"], "pass123");
+        assert!(proxy["tls"]["enabled"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn test_tuic() {
+        let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("tuic"));
+        assert!(result.is_ok());
+        let proxy = &serde_json::from_str::<Value>(&result.unwrap()).unwrap()["outbounds"][2];
+        assert_eq!(proxy["type"], "tuic");
+        assert_eq!(proxy["uuid"], "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(proxy["password"], "pass123");
+        assert!(proxy["tls"]["enabled"].as_bool().unwrap());
     }
 }

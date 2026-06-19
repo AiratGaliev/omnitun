@@ -50,8 +50,10 @@ async fn start_vpn(
     );
     emit_status(&app, VpnStatus::Connecting);
 
+    let settings_state = app.state::<Mutex<AppSettings>>();
+    let proxy_port = settings_state.lock().await.proxy_port;
     let manager = state.manager.lock().await;
-    match manager.start(&app, &profile).await {
+    match manager.start(&app, proxy_port, &profile).await {
         Ok(_) => {
             log(
                 &app,

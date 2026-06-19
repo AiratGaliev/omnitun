@@ -103,7 +103,7 @@ impl VpnManager {
         Ok(binary_path)
     }
 
-    pub async fn start(&self, app_handle: &AppHandle, profile: &ServerProfile) -> Result<(), VpnError> {
+    pub async fn start(&self, app_handle: &AppHandle, proxy_port: u16, profile: &ServerProfile) -> Result<(), VpnError> {
         let logger = app_handle.state::<Mutex<Logger>>();
         log(
             app_handle,
@@ -122,7 +122,7 @@ impl VpnManager {
             "Generating sing-box config...".into(),
         );
         let base_template = include_str!("../../config/base.json");
-        let config_json = config::generate_config(base_template, &self.config_dir, profile)?;
+        let config_json = config::generate_config(base_template, &self.config_dir, proxy_port, profile)?;
         let config_path = config::write_config(&config_json, &self.config_dir)?;
         log(
             app_handle,
