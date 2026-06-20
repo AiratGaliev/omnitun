@@ -24,79 +24,56 @@ export function Profiles() {
   const handleRefresh = (profile: Profile) => {
     toast(`${t('updatingProfile')}${profile.name}...`);
     refreshProfile(profile.id)
-      .then(() => {
-        toast.success(`${t('profileStr')}${profile.name}${t('profileUpdated')}`);
-      })
-      .catch(() => {
-        toast.error(t('refreshFailed'));
-      });
+      .then(() => { toast.success(`${t('profileStr')}${profile.name}${t('profileUpdated')}`); })
+      .catch(() => { toast.error(t('refreshFailed')); });
   };
 
   const handleDelete = (id: string, name: string) => {
     if (confirm(`${t('deleteProfileConfirm')}${name}?`)) {
       removeProfile(id)
-        .then(() => {
-          toast.success(t('profileDeleted'));
-        })
-        .catch(() => {
-          toast.error(t('deleteFailed'));
-        });
+        .then(() => { toast.success(t('profileDeleted')); })
+        .catch(() => { toast.error(t('deleteFailed')); });
     }
   };
 
   return (
-    <div className="flex flex-col h-full w-full p-8">
-      <header className="flex justify-between items-center mb-8">
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 bg-white/5 border border-white/5 rounded-xl flex items-center justify-center shadow-lg">
-            <Globe2 size={24} className="text-zinc-300" />
+    <div className="flex flex-col h-full w-full p-10 pt-8">
+      <header className="flex justify-between items-center mb-10">
+        <div className="flex items-center gap-5">
+          <div className="w-14 h-14 bg-zinc-900/80 border border-white/10 rounded-2xl flex items-center justify-center shadow-lg backdrop-blur-md">
+            <Globe2 size={28} className="text-emerald-400" strokeWidth={1.5} />
           </div>
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">{t('navProfiles')}</h1>
-            <p className="text-zinc-500 text-sm">{t('configManagement')}</p>
+            <h1 className="text-3xl font-bold tracking-tight text-white">{t('navProfiles')}</h1>
+            <p className="text-zinc-400 text-sm mt-1">{t('configManagement')}</p>
           </div>
         </div>
       </header>
 
-      <div className="mb-6 flex justify-center w-full">
+      <div className="mb-8 flex justify-center w-full">
         <AddProfileOptions
           onAdd={(url, name) => {
-            void addProfile({ name: name ?? 'New Profile', url }).then(() => {
-              toast.success(t('profileAdded'));
-            });
+            void addProfile({ name: name ?? 'New Profile', url }).then(() => toast.success(t('profileAdded')));
           }}
           horizontal={true}
           className="max-w-full"
         />
       </div>
 
-      <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar pb-4">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar pb-8">
         <AnimatePresence>
           {profiles.map((p) => (
-            <ProfileItem
-              key={p.id}
-              profile={p}
-              updateProfile={updateProfile}
-              handleRefresh={handleRefresh}
-              t={t}
-              editingId={editingId}
-              setEditingId={setEditingId}
-              handleDelete={handleDelete}
-            />
+            <ProfileItem key={p.id} profile={p} updateProfile={updateProfile} handleRefresh={handleRefresh} t={t} editingId={editingId} setEditingId={setEditingId} handleDelete={handleDelete} />
           ))}
         </AnimatePresence>
 
         {profiles.length === 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="text-center py-16 flex flex-col items-center justify-center border border-dashed border-white/5 rounded-2xl bg-white/[0.02]"
-          >
-            <div className="w-16 h-16 bg-white/5 rounded-2xl flex items-center justify-center mb-4">
-              <Globe2 size={28} className="text-zinc-600" />
+          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="text-center py-20 flex flex-col items-center justify-center border-2 border-dashed border-white/5 rounded-3xl bg-zinc-900/20 backdrop-blur-sm">
+            <div className="w-20 h-20 bg-zinc-800/50 rounded-3xl flex items-center justify-center mb-5 shadow-inner">
+              <Globe2 size={36} className="text-zinc-600" strokeWidth={1.5} />
             </div>
-            <h3 className="text-zinc-300 font-medium mb-1">{t('noProfiles')}</h3>
-            <p className="text-zinc-500 text-sm max-w-[250px]">{t('noProfilesDesc')}</p>
+            <h3 className="text-zinc-200 font-semibold text-lg mb-2">{t('noProfiles')}</h3>
+            <p className="text-zinc-500 text-sm max-w-xs leading-relaxed">{t('noProfilesDesc')}</p>
           </motion.div>
         )}
       </div>
@@ -141,97 +118,63 @@ function ProfileItem({
   return (
     <motion.div
       layout
-      className="bg-white/5 border border-white/5 hover:bg-white/10 transition-colors p-5 rounded-2xl mb-4 flex flex-col justify-between group"
+      className="bg-zinc-900/40 backdrop-blur-md border border-white/5 hover:bg-zinc-900/60 hover:border-white/10 transition-all duration-300 p-6 rounded-3xl mb-5 flex flex-col justify-between group shadow-sm"
     >
       {editingId === p.id ? (
-        <div className="flex flex-col gap-3 w-full">
+        <div className="flex flex-col gap-4 w-full">
           <input
             type="text"
             value={editName}
-            onChange={(e) => {
-              setEditName(e.target.value);
-            }}
-            className="bg-black/40 border border-white/5 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none w-full transition-all"
+            onChange={(e) => { setEditName(e.target.value); }}
+            className="bg-zinc-950/50 border border-white/10 rounded-xl px-4 py-3 text-sm font-medium focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none w-full transition-all shadow-inner"
           />
           <input
             type="text"
             value={editUrl}
-            onChange={(e) => {
-              setEditUrl(e.target.value);
-            }}
-            className="bg-black/40 border border-white/5 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none w-full transition-all font-mono text-zinc-300"
+            onChange={(e) => { setEditUrl(e.target.value); }}
+            className="bg-zinc-950/50 border border-white/10 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none w-full transition-all font-mono text-zinc-400 shadow-inner"
           />
-          <div className="flex justify-end gap-2 mt-2">
-            <button
-              onClick={() => {
-                setEditName(p.name);
-                setEditUrl(p.url);
-                setEditingId(null);
-              }}
-              className="px-4 py-1.5 rounded-lg text-sm transition-colors text-zinc-400 hover:text-white"
-            >
+          <div className="flex justify-end gap-3 mt-2">
+            <button onClick={() => { setEditName(p.name); setEditUrl(p.url); setEditingId(null); }} className="px-5 py-2 rounded-xl text-sm font-medium transition-colors text-zinc-400 hover:text-white hover:bg-white/5">
               {t('cancel')}
             </button>
-            <button
-              onClick={handleSave}
-              className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-4 py-1.5 rounded-lg text-sm font-medium hover:bg-emerald-500/30 transition-colors"
-            >
+            <button onClick={handleSave} className="bg-emerald-500 hover:bg-emerald-400 text-zinc-950 px-6 py-2 rounded-xl text-sm font-bold transition-all shadow-[0_0_15px_rgba(16,185,129,0.2)]">
               {t('save')}
             </button>
           </div>
         </div>
       ) : (
         <>
-          <div className="flex justify-between items-start mb-4">
+          <div className="flex justify-between items-start mb-5">
             <div>
-              <h3 className="font-bold text-lg text-zinc-100 flex items-center gap-2">
-                <Globe2 size={18} className="text-emerald-500" /> {p.name}
+              <h3 className="font-bold text-xl text-zinc-100 flex items-center gap-3">
+                <Globe2 size={20} className="text-emerald-500" strokeWidth={2.5} /> {p.name}
               </h3>
-              <p className="text-xs text-zinc-500 font-mono mt-1 break-all max-w-[400px] truncate">
+              <p className="text-xs text-zinc-500 font-mono mt-2 break-all max-w-2xl truncate bg-black/20 inline-block px-2 py-1 rounded-md border border-white/5">
                 {p.url}
               </p>
               {p.servers.length > 0 && (
-                <span className="inline-block mt-1.5 text-[10px] text-emerald-400/80 bg-emerald-500/10 px-2 py-0.5 rounded-full">
-                  {p.servers.length}{' '}
-                  {p.servers.length === 1 ? t('serverSingular') : t('serverPlural')}
+                <span className="inline-block mt-3 text-xs font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-lg">
+                  {p.servers.length} {p.servers.length === 1 ? t('serverSingular') : t('serverPlural')}
                 </span>
               )}
             </div>
           </div>
 
-          <div className="flex items-center justify-between border-t border-white/5 pt-4 mt-2">
-            <p className="text-[11px] text-zinc-500 font-medium">
-              {t('updatedMinsAgo')}
-              {timeAgo}
-              {t('minsAgo')}
+          <div className="flex items-center justify-between border-t border-white/5 pt-5 mt-2">
+            <p className="text-xs text-zinc-500 font-medium flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-zinc-600" />
+              {t('updatedMinsAgo')}{timeAgo}{t('minsAgo')}
             </p>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => {
-                  handleRefresh(p);
-                }}
-                title={t('refreshServers')}
-                className="p-2 border border-white/5 bg-black/20 rounded-lg hover:bg-white/10 text-zinc-400 transition-colors"
-              >
-                <RefreshCw size={14} />
+            <div className="flex items-center gap-2.5 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+              <button onClick={() => { handleRefresh(p); }} title={t('refreshServers')} className="p-2.5 border border-white/5 bg-zinc-800/50 rounded-xl hover:bg-zinc-700 hover:text-white text-zinc-400 transition-all shadow-sm">
+                <RefreshCw size={16} />
               </button>
-              <button
-                onClick={() => {
-                  setEditingId(p.id);
-                }}
-                title={t('edit')}
-                className="p-2 border border-white/5 bg-black/20 rounded-lg hover:bg-white/10 text-zinc-400 transition-colors"
-              >
-                <Edit2 size={14} />
+              <button onClick={() => { setEditingId(p.id); }} title={t('edit')} className="p-2.5 border border-white/5 bg-zinc-800/50 rounded-xl hover:bg-zinc-700 hover:text-white text-zinc-400 transition-all shadow-sm">
+                <Edit2 size={16} />
               </button>
-              <button
-                onClick={() => {
-                  handleDelete(p.id, p.name);
-                }}
-                title={t('delete')}
-                className="p-2 border border-red-500/20 bg-red-500/10 rounded-lg hover:bg-red-500/20 text-red-400 transition-colors"
-              >
-                <Trash2 size={14} />
+              <button onClick={() => { handleDelete(p.id, p.name); }} title={t('delete')} className="p-2.5 border border-red-500/20 bg-red-500/10 rounded-xl hover:bg-red-500/20 text-red-400 transition-all shadow-sm">
+                <Trash2 size={16} />
               </button>
             </div>
           </div>

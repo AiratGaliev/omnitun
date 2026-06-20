@@ -34,7 +34,7 @@ export function SettingItem({ icon, title, description, checked, onChange }: Set
         </div>
       </div>
       <button
-        onClick={() => handleChange(!checked)}
+        onClick={() => { handleChange(!checked); }}
         className={`relative inline-flex h-7 w-12 items-center justify-center rounded-full transition-colors duration-300 flex-shrink-0 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:ring-offset-2 focus:ring-offset-zinc-950 ${
           checked ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.4)]' : 'bg-zinc-700'
         }`}

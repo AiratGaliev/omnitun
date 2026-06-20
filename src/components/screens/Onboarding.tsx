@@ -16,12 +16,7 @@ export function Onboarding() {
   const handleConnectImpl = async (linkStr: string, customName?: string) => {
     try {
       addLog('Adding initial subscription...', 'info', 'system');
-      if (linkStr) {
-        await addProfile({
-          name: customName ?? 'Initial Profile',
-          url: linkStr,
-        });
-      }
+      if (linkStr) await addProfile({ name: customName ?? 'Initial Profile', url: linkStr });
       toast.success(t('addedSuccess'));
       completeOnboarding();
     } catch {
@@ -32,14 +27,17 @@ export function Onboarding() {
 
   return (
     <motion.div
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, scale: 1 }}
+      initial={{ opacity: 0, scale: 0.98, filter: 'blur(4px)' }}
+      animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
       exit={{ opacity: 0, scale: 0.95 }}
-      className="flex flex-col items-center justify-center w-full h-full p-8 text-center relative"
+      transition={{ duration: 0.5, ease: 'easeOut' }}
+      className="flex flex-col items-center justify-center w-full h-full p-8 text-center relative bg-gradient-to-br from-zinc-950 to-zinc-900"
     >
-      <div className="absolute top-6 right-6 flex items-center gap-2">
-        <Languages size={16} className="text-zinc-500" />
-        <div className="relative z-50">
+      <div className="absolute top-8 right-8 flex items-center gap-3 bg-zinc-900/50 p-1.5 pr-3 rounded-2xl border border-white/5 backdrop-blur-md">
+        <div className="p-2 bg-zinc-800/80 rounded-xl">
+          <Languages size={16} className="text-zinc-400" />
+        </div>
+        <div className="relative">
           <select
             value={lang}
             onChange={(e) => {
@@ -49,55 +47,32 @@ export function Onboarding() {
               addLog(`Language changed to ${language} (onboarding)`, 'info', 'settings');
               void useVPNStore.getState().saveSettings();
             }}
-            className="appearance-none bg-black/20 border border-white/10 rounded-lg pl-3 pr-8 py-1.5 text-sm focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500/50 outline-none cursor-pointer transition-colors"
+            className="appearance-none bg-transparent text-sm font-medium focus:outline-none cursor-pointer text-zinc-200 pr-4"
           >
-            <option value="en" className="bg-zinc-900 text-white">
-              English (US)
-            </option>
-            <option value="ru" className="bg-zinc-900 text-white">
-              Русский (RU)
-            </option>
+            <option value="en" className="bg-zinc-900 text-white">English</option>
+            <option value="ru" className="bg-zinc-900 text-white">Русский</option>
           </select>
-          <div className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-500">
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="m6 9 6 6 6-6" />
-            </svg>
-          </div>
         </div>
       </div>
 
-      <div className="relative">
-        <div className="absolute inset-0 scale-[1.5] rounded-full border border-emerald-500/20 bg-emerald-500/5 pointer-events-none" />
-        <div className="w-24 h-24 bg-zinc-900 border border-white/10 text-emerald-500 rounded-3xl flex items-center justify-center mb-10 shadow-2xl relative z-10">
+      <div className="relative mb-10">
+        <div className="absolute inset-0 scale-[1.8] rounded-full border border-emerald-500/20 bg-emerald-500/5 pointer-events-none animate-pulse" />
+        <div className="w-24 h-24 bg-zinc-900/80 border border-white/10 text-emerald-400 rounded-[2rem] flex items-center justify-center shadow-2xl relative z-10 backdrop-blur-md">
           <ShieldCheck size={48} strokeWidth={1.5} />
         </div>
       </div>
 
-      <h1 className="text-2xl font-bold tracking-tight mb-3">{t('secureTunnelSetup')}</h1>
-      <p className="text-zinc-500 mb-10 text-sm max-w-md">{t('secureTunnelDesc')}</p>
+      <h1 className="text-3xl font-bold tracking-tight mb-3 text-white">{t('secureTunnelSetup')}</h1>
+      <p className="text-zinc-400 mb-12 text-sm max-w-md leading-relaxed">{t('secureTunnelDesc')}</p>
 
-      <AddProfileOptions
-        onAdd={(url, name) => {
-          void handleConnectImpl(url, name);
-        }}
-        horizontal={true}
-      />
+      <AddProfileOptions onAdd={(url, name) => void handleConnectImpl(url, name)} horizontal={true} />
 
       <button
         onClick={() => {
           addLog('Onboarding skipped', 'info', 'system');
           completeOnboarding();
         }}
-        className="mt-6 px-6 py-2 rounded-lg border border-white/5 text-zinc-400 hover:text-white hover:bg-white/5 transition-colors text-sm"
+        className="mt-8 px-6 py-2.5 rounded-xl border border-transparent text-zinc-500 hover:text-zinc-300 hover:bg-white/5 transition-all text-sm font-medium"
       >
         {t('skip') || 'Skip'}
       </button>

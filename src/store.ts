@@ -153,6 +153,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       set((state) => ({
         profiles: [...state.profiles, profile],
         servers: [...state.servers, ...profile.servers],
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         activeServer: state.activeServer ?? profile.servers[0] ?? null,
       }));
       get().addLog(
@@ -224,6 +225,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       set({
         profiles,
         servers: allServers,
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
         activeServer: state.activeServer ?? allServers[0] ?? null,
       });
     } catch (e: unknown) {
