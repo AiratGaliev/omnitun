@@ -2,12 +2,19 @@ use crate::vpn::{ServerProfile, VpnError};
 use serde_json::{json, Value};
 use std::path::Path;
 
+fn find_available_port() -> Option<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+    let port = listener.local_addr().ok()?.port();
+    drop(listener);
+    Some(port)
+}
+
 pub fn generate_config(
     base_template: &str,
     cache_dir: &Path,
     proxy_port: u16,
     server_profile: &ServerProfile,
-) -> Result<String, VpnError> {
+) -> Result<(String, u16), VpnError> {
     let mut config: Value =
         serde_json::from_str(base_template).map_err(|e| VpnError::Config(e.to_string()))?;
 
@@ -36,10 +43,18 @@ pub fn generate_config(
         }
     }
 
+    // Find an available port and enable the clash_api for traffic stats
+    let stats_port = find_available_port().unwrap_or(20000);
+    config["experimental"]["clash_api"] = json!({
+        "external_controller": format!("127.0.0.1:{}", stats_port),
+        "external_ui": "",
+        "secret": ""
+    });
+
     let json_string =
         serde_json::to_string_pretty(&config).map_err(|e| VpnError::Config(e.to_string()))?;
 
-    Ok(json_string)
+    Ok((json_string, stats_port))
 }
 
 pub fn write_config(json: &str, config_dir: &Path) -> Result<std::path::PathBuf, VpnError> {
@@ -260,7 +275,7 @@ mod tests {
             result.err()
         );
 
-        let config: Value = serde_json::from_str(&result.unwrap()).unwrap();
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
         let outbounds = config["outbounds"].as_array().unwrap();
         let proxy = &outbounds[2];
 
@@ -286,7 +301,7 @@ mod tests {
             result.err()
         );
 
-        let config: Value = serde_json::from_str(&result.unwrap()).unwrap();
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
         let outbounds = config["outbounds"].as_array().unwrap();
         let proxy = &outbounds[2];
 
@@ -346,7 +361,7 @@ mod tests {
     fn test_vmess() {
         let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("vmess"));
         assert!(result.is_ok());
-        let proxy = &serde_json::from_str::<Value>(&result.unwrap()).unwrap()["outbounds"][2];
+        let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "vmess");
         assert_eq!(proxy["uuid"], "550e8400-e29b-41d4-a716-446655440000");
         assert!(proxy["tls"]["enabled"].as_bool().unwrap());
@@ -356,7 +371,7 @@ mod tests {
     fn test_trojan() {
         let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("trojan"));
         assert!(result.is_ok());
-        let proxy = &serde_json::from_str::<Value>(&result.unwrap()).unwrap()["outbounds"][2];
+        let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "trojan");
         assert_eq!(proxy["password"], "pass123");
         assert!(proxy["tls"]["enabled"].as_bool().unwrap());
@@ -366,7 +381,7 @@ mod tests {
     fn test_shadowsocks() {
         let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("shadowsocks"));
         assert!(result.is_ok());
-        let proxy = &serde_json::from_str::<Value>(&result.unwrap()).unwrap()["outbounds"][2];
+        let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "shadowsocks");
         assert_eq!(proxy["method"], "chacha20-ietf-poly1305");
         assert_eq!(proxy["password"], "pass123");
@@ -384,7 +399,7 @@ mod tests {
         };
         let result = generate_config(base_template(), &cache_dir(), 10809, &profile);
         assert!(result.is_ok());
-        let proxy = &serde_json::from_str::<Value>(&result.unwrap()).unwrap()["outbounds"][2];
+        let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "wireguard");
         assert_eq!(proxy["peers"][0]["public_key"], "some-public-key");
     }
@@ -393,7 +408,7 @@ mod tests {
     fn test_hysteria2() {
         let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("hysteria2"));
         assert!(result.is_ok());
-        let proxy = &serde_json::from_str::<Value>(&result.unwrap()).unwrap()["outbounds"][2];
+        let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "hysteria2");
         assert_eq!(proxy["password"], "pass123");
         assert!(proxy["tls"]["enabled"].as_bool().unwrap());
@@ -403,7 +418,7 @@ mod tests {
     fn test_tuic() {
         let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("tuic"));
         assert!(result.is_ok());
-        let proxy = &serde_json::from_str::<Value>(&result.unwrap()).unwrap()["outbounds"][2];
+        let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "tuic");
         assert_eq!(proxy["uuid"], "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(proxy["password"], "pass123");

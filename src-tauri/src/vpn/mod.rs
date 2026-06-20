@@ -3,6 +3,7 @@ pub mod geoip;
 pub mod installer;
 mod process;
 
+use crate::events::emit_traffic;
 use crate::logging::{log, LogLevel, Logger, LogSource};
 use installer::Installer;
 use process::ProcessManager;
@@ -11,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use thiserror::Error;
 
@@ -122,7 +124,7 @@ impl VpnManager {
             "Generating sing-box config...".into(),
         );
         let base_template = include_str!("../../config/base.json");
-        let config_json = config::generate_config(base_template, &self.config_dir, proxy_port, profile)?;
+        let (config_json, stats_port) = config::generate_config(base_template, &self.config_dir, proxy_port, profile)?;
         let config_path = config::write_config(&config_json, &self.config_dir)?;
         log(
             app_handle,
@@ -139,7 +141,64 @@ impl VpnManager {
             LogSource::Process,
             "Starting sing-box process...".into(),
         );
-        self.process_mgr.start(&config_path).await
+        self.process_mgr.start(&config_path).await?;
+
+        log(
+            app_handle,
+            &logger,
+            LogLevel::Info,
+            LogSource::Vpn,
+            "sing-box process started, spawning traffic monitor...".into(),
+        );
+
+        // Spawn background task to poll sing-box clash_api for traffic stats
+        let app_handle = app_handle.clone();
+        let api_url = format!("http://127.0.0.1:{}/connections", stats_port);
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+
+            // Retry connecting — API starts slightly after sing-box
+            for delay_ms in [200u64, 400, 800, 1500, 3000] {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                if client.get(&api_url).send().await.is_ok() {
+                    break;
+                }
+            }
+
+            let mut prev_up = 0u64;
+            let mut prev_down = 0u64;
+            let mut first = true;
+
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+
+                match client.get(&api_url).send().await {
+                    Ok(resp) => match resp.json::<serde_json::Value>().await {
+                        Ok(data) => {
+                            let up = data["upload_total"].as_u64().unwrap_or(0);
+                            let down = data["download_total"].as_u64().unwrap_or(0);
+
+                            if !first && (up != prev_up || down != prev_down) {
+                                let up_speed = up.saturating_sub(prev_up) as f64;
+                                let down_speed = down.saturating_sub(prev_down) as f64;
+                                emit_traffic(
+                                    &app_handle,
+                                    up_speed / 1_048_576.0,
+                                    down_speed / 1_048_576.0,
+                                );
+                            }
+                            first = false;
+                            prev_up = up;
+                            prev_down = down;
+                        }
+                        Err(_) => break, // JSON parse failed → sing-box stopped
+                    },
+                    Err(_) => break, // Connection refused → sing-box stopped
+                }
+            }
+        });
+
+        Ok(())
     }
 
     pub async fn stop(&self, app_handle: &AppHandle) -> Result<(), VpnError> {

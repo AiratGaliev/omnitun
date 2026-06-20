@@ -7,6 +7,11 @@ interface VpnStatusPayload {
   status: string | { error: string };
 }
 
+interface TrafficPayload {
+  up: number;
+  down: number;
+}
+
 interface RustServerProfile {
   id: string;
   name: string;
@@ -39,12 +44,14 @@ interface VPNStore {
   hasOnboarded: boolean;
   hasAcceptedTerms: boolean;
   speeds: { up: number; down: number };
+  connectedAt: number | null;
   logs: LogEntry[];
   settingsVersion: number;
 
   setStatus: (status: ConnectionStatus) => void;
   setActiveServer: (server: Server) => void;
   setServers: (servers: Server[]) => void;
+  setConnectedAt: (timestamp: number | null) => void;
   addProfile: (data: { name: string; url: string }) => Promise<void>;
   updateProfile: (id: string, data: Partial<Profile>) => void;
   removeProfile: (id: string) => Promise<void>;
@@ -111,6 +118,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   hasOnboarded: false,
   hasAcceptedTerms: false,
   speeds: { up: 0, down: 0 },
+  connectedAt: null,
   logs: [],
   settingsVersion: 0,
   settings: {
@@ -141,6 +149,9 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   },
   setServers: (servers) => {
     set({ servers });
+  },
+  setConnectedAt: (timestamp) => {
+    set({ connectedAt: timestamp });
   },
 
   addProfile: async (data) => {
@@ -352,9 +363,13 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       const payload = event.payload;
       const errorMsg = extractError(payload);
       if (errorMsg) {
-        set({ status: 'error' });
+        set({ status: 'error', connectedAt: null });
       } else {
-        set({ status: mapVpnStatus(payload) });
+        const newStatus = mapVpnStatus(payload);
+        set({
+          status: newStatus,
+          connectedAt: newStatus === 'connected' ? Date.now() : null,
+        });
       }
     });
 
@@ -364,9 +379,15 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       get().addLog(entry.message, entry.level, entry.source);
     });
 
+    // Listen for real-time traffic stats from sing-box
+    const unlistenTraffic = await listen<TrafficPayload>('traffic-update', (event) => {
+      set({ speeds: { up: event.payload.up, down: event.payload.down } });
+    });
+
     return () => {
       unlisten();
       unlistenLogs();
+      unlistenTraffic();
     };
   },
 }));

@@ -6,6 +6,19 @@ import { useVPNStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { SegmentedControl } from '../SegmentedControl';
 
+function formatProtocol(protocol: string): string {
+  const map: Record<string, string> = {
+    vless: 'VLESS',
+    vmess: 'VMess',
+    shadowsocks: 'Shadowsocks',
+    trojan: 'Trojan',
+    hysteria2: 'Hysteria 2',
+    tuic: 'TUIC',
+    wireguard: 'WireGuard',
+  };
+  return map[protocol] ?? protocol.charAt(0).toUpperCase() + protocol.slice(1);
+}
+
 type Tab = 'home' | 'profiles' | 'settings' | 'logs' | 'about';
 
 export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => void }) {
@@ -14,6 +27,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     activeServer,
     servers,
     speeds,
+    connectedAt,
     setSpeeds,
     setActiveServer,
     settings,
@@ -22,39 +36,25 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   const toggleConnection = useVPNStore((state) => state.toggleConnection);
   const addLog = useVPNStore((state) => state.addLog);
   const { t } = useTranslation();
+  const formatElapsed = (since: number): string => {
+    const diff = Math.floor((Date.now() - since) / 1000);
+    const h = Math.floor(diff / 3600).toString().padStart(2, '0');
+    const m = Math.floor((diff % 3600) / 60).toString().padStart(2, '0');
+    const s = (diff % 60).toString().padStart(2, '0');
+    return `${h}:${m}:${s}`;
+  };
+
   const [isServerDropdownOpen, setIsServerDropdownOpen] = useState(false);
 
-  const [sessionStart, setSessionStart] = useState<number | null>(null);
-  const [sessionDuration, setSessionDuration] = useState<string>('00:00:00');
-
-  useEffect(() => {
-    if (status === 'connected') {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setSessionStart(Date.now());
-    } else {
-      setSessionStart(null);
-      setSessionDuration('00:00:00');
-    }
-  }, [status]);
+  const [sessionDuration, setSessionDuration] = useState<string>(() =>
+    connectedAt ? formatElapsed(connectedAt) : '00:00:00',
+  );
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
-    if (status === 'connected' && sessionStart) {
+    if (status === 'connected' && connectedAt) {
       interval = setInterval(() => {
-        setSpeeds({
-          down: Math.random() * 8 + 1,
-          up: Math.random() * 2 + 0.1,
-        });
-
-        const diff = Math.floor((Date.now() - sessionStart) / 1000);
-        const h = Math.floor(diff / 3600)
-          .toString()
-          .padStart(2, '0');
-        const m = Math.floor((diff % 3600) / 60)
-          .toString()
-          .padStart(2, '0');
-        const s = (diff % 60).toString().padStart(2, '0');
-        setSessionDuration(`${h}:${m}:${s}`);
+        setSessionDuration(formatElapsed(connectedAt));
       }, 1000);
     } else {
       setSpeeds({ up: 0, down: 0 });
@@ -62,7 +62,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     return () => {
       clearInterval(interval);
     };
-  }, [status, setSpeeds, sessionStart]);
+  }, [status, connectedAt, setSpeeds]);
 
   const handleToggleConnection = async () => {
     try {
@@ -333,7 +333,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 </p>
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-semibold text-zinc-200">
-                    {isConnected ? 'VLESS + Reality' : t('standby')}
+                    {isConnected ? (activeServer?.protocol ? formatProtocol(activeServer.protocol) : 'Unknown') : t('standby')}
                   </span>
                   <span
                     className={`text-xs font-mono px-2 py-1 rounded-md ${isConnected ? 'bg-emerald-500/10 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}
