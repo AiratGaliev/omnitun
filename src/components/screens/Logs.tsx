@@ -1,14 +1,7 @@
 import { useState } from 'react';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { useVPNStore } from '@/store.ts';
-import {
-  AlertCircle,
-  AlertTriangle,
-  CheckCircle2,
-  Info,
-  Terminal,
-  Trash2,
-} from 'lucide-react';
+import { AlertCircle, AlertTriangle, CheckCircle2, Info, Terminal, Trash2 } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import type { LogSource } from '@/types.ts';
 
@@ -84,7 +77,9 @@ export function Logs() {
           <span className="mr-auto font-semibold tracking-wider">omnitun-core.log</span>
           <select
             value={activeFilter}
-            onChange={(e) => { setActiveFilter(e.target.value as 'all' | LogSource); }}
+            onChange={(e) => {
+              setActiveFilter(e.target.value as 'all' | LogSource);
+            }}
             className="bg-zinc-950/50 border border-white/10 rounded-lg px-3 py-1.5 text-xs font-sans font-medium text-zinc-300 focus:outline-none focus:border-emerald-500/50 cursor-pointer transition-colors"
           >
             {SOURCE_OPTIONS.map((opt) => (
@@ -107,8 +102,14 @@ export function Logs() {
                   className="flex gap-4 hover:bg-white/5 p-1.5 rounded-lg transition-colors group"
                 >
                   <span className="text-zinc-600 shrink-0 select-none">
-                    {new Date(log.timestamp).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                    <span className="text-zinc-700">.{String(new Date(log.timestamp).getMilliseconds()).padStart(3, '0')}</span>
+                    {new Date(log.timestamp).toLocaleTimeString('en-GB', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit',
+                    })}
+                    <span className="text-zinc-700">
+                      .{String(new Date(log.timestamp).getMilliseconds()).padStart(3, '0')}
+                    </span>
                   </span>
                   <div className="mt-0.5">{getLogIcon(log.level)}</div>
                   <span className="break-all">

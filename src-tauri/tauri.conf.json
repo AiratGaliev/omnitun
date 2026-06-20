@@ -13,9 +13,12 @@
     "windows": [
       {
         "title": "omnitun",
-        "width": 900,
+        "width": 1024,
         "height": 650,
-        "center": true
+        "center": true,
+        "resizable": false,
+        "maximizable": false,
+        "fullscreen": false
       }
     ],
     "security": {

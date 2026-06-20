@@ -10,7 +10,9 @@ import { FilteringSettings } from '../settings/FilteringSettings';
 import { ProtocolSettings } from '../settings/ProtocolSettings';
 
 export function Settings() {
-  const [activeTab, setActiveTab] = useState<'general' | 'network' | 'filtering' | 'protocols'>('general');
+  const [activeTab, setActiveTab] = useState<'general' | 'network' | 'filtering' | 'protocols'>(
+    'general',
+  );
   const { t } = useTranslation();
   const settingsVersion = useVPNStore((state) => state.settingsVersion);
   const prevVersionRef = useRef(settingsVersion);
@@ -28,7 +30,9 @@ export function Settings() {
     let timer: ReturnType<typeof setTimeout>;
     if (saveState === 'countdown') {
       if (countdown > 0) {
-        timer = setTimeout(() => { setCountdown((c) => c - 1); }, 1000);
+        timer = setTimeout(() => {
+          setCountdown((c) => c - 1);
+        }, 1000);
       } else {
         timer = setTimeout(() => {
           setSaveState('saving');
@@ -36,9 +40,13 @@ export function Settings() {
         }, 0);
       }
     } else if (saveState === 'saving') {
-      timer = setTimeout(() => { setSaveState('idle'); }, 500);
+      timer = setTimeout(() => {
+        setSaveState('idle');
+      }, 500);
     }
-    return () => { clearTimeout(timer); };
+    return () => {
+      clearTimeout(timer);
+    };
   }, [saveState, countdown]);
 
   const handleManualSave = () => {
@@ -73,7 +81,11 @@ export function Settings() {
             <Check size={18} className="text-emerald-500" />
           )}
           <span className="hidden sm:inline">
-            {saveState === 'saving' ? t('saving') : saveState === 'countdown' ? `${t('savingIn')} ${String(countdown)}s` : t('saved')}
+            {saveState === 'saving'
+              ? t('saving')
+              : saveState === 'countdown'
+                ? `${t('savingIn')} ${String(countdown)}s`
+                : t('saved')}
           </span>
         </button>
       </header>
@@ -87,7 +99,9 @@ export function Settings() {
             { id: 'protocols', label: t('protocols'), icon: <Lock size={18} /> },
           ]}
           value={activeTab}
-          onChange={(val) => { setActiveTab(val); }}
+          onChange={(val) => {
+            setActiveTab(val);
+          }}
           layoutId="settingsTabIndicator"
         />
       </div>

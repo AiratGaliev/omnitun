@@ -22,7 +22,7 @@ const pageVariants = {
 
 const pageTransition = {
   duration: 0.4,
-  ease: [0.22, 1, 0.36, 1],
+  ease: [0.22, 1, 0.36, 1] as const,
 };
 
 export default function App() {
@@ -39,9 +39,13 @@ export default function App() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     initListener()
-      .then((fn) => { unlisten = fn; })
+      .then((fn) => {
+        unlisten = fn;
+      })
       .catch(() => undefined);
-    return () => { unlisten?.(); };
+    return () => {
+      unlisten?.();
+    };
   }, [initListener]);
 
   useEffect(() => {
@@ -72,7 +76,9 @@ export default function App() {
         refreshProfile(p.id).catch(() => undefined);
       });
     }, intervalMs);
-    return () => { clearInterval(timer); };
+    return () => {
+      clearInterval(timer);
+    };
   }, [profiles, settings.autoUpdateInterval, refreshProfile, addLog]);
 
   return (
@@ -106,30 +112,70 @@ export default function App() {
               className="flex-1 flex flex-row w-full h-full"
             >
               <Navigation activeTab={activeTab} onChange={setActiveTab} />
-              <div className="flex-1 relative overflow-hidden bg-gradient-to-br from-zinc-950 to-zinc-900/50">
+              <div className="flex-1 relative overflow-hidden from-zinc-950">
                 <AnimatePresence mode="wait">
                   {activeTab === 'home' && (
-                    <motion.div key="home" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition} className="absolute inset-0">
+                    <motion.div
+                      key="home"
+                      variants={pageVariants}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      transition={pageTransition}
+                      className="absolute inset-0"
+                    >
                       <Dashboard onNavigate={setActiveTab} />
                     </motion.div>
                   )}
                   {activeTab === 'profiles' && (
-                    <motion.div key="profiles" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition} className="absolute inset-0">
+                    <motion.div
+                      key="profiles"
+                      variants={pageVariants}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      transition={pageTransition}
+                      className="absolute inset-0"
+                    >
                       <Profiles />
                     </motion.div>
                   )}
                   {activeTab === 'settings' && (
-                    <motion.div key="settings" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition} className="absolute inset-0">
+                    <motion.div
+                      key="settings"
+                      variants={pageVariants}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      transition={pageTransition}
+                      className="absolute inset-0"
+                    >
                       <Settings />
                     </motion.div>
                   )}
                   {activeTab === 'logs' && (
-                    <motion.div key="logs" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition} className="absolute inset-0">
+                    <motion.div
+                      key="logs"
+                      variants={pageVariants}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      transition={pageTransition}
+                      className="absolute inset-0"
+                    >
                       <Logs />
                     </motion.div>
                   )}
                   {activeTab === 'about' && (
-                    <motion.div key="about" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition} className="absolute inset-0">
+                    <motion.div
+                      key="about"
+                      variants={pageVariants}
+                      initial="initial"
+                      animate="animate"
+                      exit="exit"
+                      transition={pageTransition}
+                      className="absolute inset-0"
+                    >
                       <About />
                     </motion.div>
                   )}

@@ -8,6 +8,17 @@
 
 body {
   @apply bg-zinc-950 text-zinc-50 antialiased;
+  /* Disable text selection throughout the entire application */
+  user-select: none;
+  -webkit-user-select: none; /* Для Safari / macOS */
+}
+
+/* Allow text selection inside input fields */
+input,
+textarea,
+[contenteditable='true'] {
+  user-select: auto;
+  -webkit-user-select: auto;
 }
 
 /* Custom Scrollbar */
@@ -26,4 +37,27 @@ body {
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   @apply bg-white/20;
+}
+
+/* Global styles for interactive elements */
+button,
+a,
+select,
+label,
+[role='button'],
+input[type='checkbox'],
+input[type='radio'],
+input[type='submit'],
+input[type='button'] {
+  cursor: pointer;
+  /* Removing the standard outline in favor of custom Tailwind focuses */
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Correct cursor for disabled items */
+button:disabled,
+select:disabled,
+input:disabled,
+[aria-disabled='true'] {
+  cursor: not-allowed !important;
 }

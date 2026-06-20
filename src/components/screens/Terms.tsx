@@ -15,7 +15,7 @@ export function Terms() {
       animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
       exit={{ opacity: 0, scale: 0.95 }}
       transition={{ duration: 0.5, ease: 'easeOut' }}
-      className="flex flex-col items-center justify-center w-full h-full p-8 text-center relative bg-gradient-to-br from-zinc-950 to-zinc-900"
+      className="flex flex-col items-center justify-center w-full h-full p-8 text-center relative from-zinc-950"
     >
       <div className="absolute top-8 right-8 flex items-center gap-3 bg-zinc-900/50 p-1.5 pr-3 rounded-2xl border border-white/5 backdrop-blur-md">
         <div className="p-2 bg-zinc-800/80 rounded-xl">
@@ -33,8 +33,12 @@ export function Terms() {
             }}
             className="appearance-none bg-transparent text-sm font-medium focus:outline-none cursor-pointer text-zinc-200 pr-4"
           >
-            <option value="en" className="bg-zinc-900 text-white">English</option>
-            <option value="ru" className="bg-zinc-900 text-white">Русский</option>
+            <option value="en" className="bg-zinc-900 text-white">
+              English
+            </option>
+            <option value="ru" className="bg-zinc-900 text-white">
+              Русский
+            </option>
           </select>
         </div>
       </div>

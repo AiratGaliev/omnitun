@@ -27,7 +27,9 @@ export function SegmentedControl<T extends string>({
       {options.map((option) => (
         <button
           key={option.id}
-          onClick={() => { onChange(option.id); }}
+          onClick={() => {
+            onChange(option.id);
+          }}
           disabled={disabled}
           className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-sm font-semibold transition-colors relative z-10 ${
             value === option.id ? 'text-white drop-shadow-sm' : 'text-zinc-500 hover:text-zinc-300'

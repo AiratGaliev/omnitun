@@ -31,7 +31,7 @@ export function Onboarding() {
       animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
       exit={{ opacity: 0, scale: 0.95 }}
       transition={{ duration: 0.5, ease: 'easeOut' }}
-      className="flex flex-col items-center justify-center w-full h-full p-8 text-center relative bg-gradient-to-br from-zinc-950 to-zinc-900"
+      className="flex flex-col items-center justify-center w-full h-full p-8 text-center relative from-zinc-950"
     >
       <div className="absolute top-8 right-8 flex items-center gap-3 bg-zinc-900/50 p-1.5 pr-3 rounded-2xl border border-white/5 backdrop-blur-md">
         <div className="p-2 bg-zinc-800/80 rounded-xl">
@@ -49,23 +49,34 @@ export function Onboarding() {
             }}
             className="appearance-none bg-transparent text-sm font-medium focus:outline-none cursor-pointer text-zinc-200 pr-4"
           >
-            <option value="en" className="bg-zinc-900 text-white">English</option>
-            <option value="ru" className="bg-zinc-900 text-white">Русский</option>
+            <option value="en" className="bg-zinc-900 text-white">
+              English
+            </option>
+            <option value="ru" className="bg-zinc-900 text-white">
+              Русский
+            </option>
           </select>
         </div>
       </div>
 
       <div className="relative mb-10">
         <div className="absolute inset-0 scale-[1.8] rounded-full border border-emerald-500/20 bg-emerald-500/5 pointer-events-none animate-pulse" />
-        <div className="w-24 h-24 bg-zinc-900/80 border border-white/10 text-emerald-400 rounded-[2rem] flex items-center justify-center shadow-2xl relative z-10 backdrop-blur-md">
+        <div className="w-24 h-24 bg-zinc-900/80 border border-white/10 text-emerald-400 rounded-4xl flex items-center justify-center shadow-2xl relative z-10 backdrop-blur-md">
           <ShieldCheck size={48} strokeWidth={1.5} />
         </div>
       </div>
 
-      <h1 className="text-3xl font-bold tracking-tight mb-3 text-white">{t('secureTunnelSetup')}</h1>
-      <p className="text-zinc-400 mb-12 text-sm max-w-md leading-relaxed">{t('secureTunnelDesc')}</p>
+      <h1 className="text-3xl font-bold tracking-tight mb-3 text-white">
+        {t('secureTunnelSetup')}
+      </h1>
+      <p className="text-zinc-400 mb-12 text-sm max-w-md leading-relaxed">
+        {t('secureTunnelDesc')}
+      </p>
 
-      <AddProfileOptions onAdd={(url, name) => void handleConnectImpl(url, name)} horizontal={true} />
+      <AddProfileOptions
+        onAdd={(url, name) => void handleConnectImpl(url, name)}
+        horizontal={true}
+      />
 
       <button
         onClick={() => {

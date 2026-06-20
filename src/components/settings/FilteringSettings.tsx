@@ -70,7 +70,9 @@ export function FilteringSettings() {
 
   return (
     <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-8 shadow-lg">
-      <h3 className="font-semibold text-sm text-zinc-100 tracking-wide mb-1">{t('geoNodeRules')}</h3>
+      <h3 className="font-semibold text-sm text-zinc-100 tracking-wide mb-1">
+        {t('geoNodeRules')}
+      </h3>
       <p className="text-xs text-zinc-500 mb-8">{t('geoNodeRulesDesc')}</p>
 
       <div className="space-y-8">
@@ -87,7 +89,9 @@ export function FilteringSettings() {
                 <button
                   key={country.code}
                   disabled={isBlocked}
-                  onClick={() => { handleToggleCountry(country.code, 'allow'); }}
+                  onClick={() => {
+                    handleToggleCountry(country.code, 'allow');
+                  }}
                   className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all duration-300
                     ${isSelected ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300 shadow-inner' : 'bg-zinc-950/50 border-white/5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/80'}
                     ${isBlocked ? 'opacity-30 cursor-not-allowed' : ''}`}
@@ -113,7 +117,9 @@ export function FilteringSettings() {
                 <button
                   key={country.code}
                   disabled={isAllowed}
-                  onClick={() => { handleToggleCountry(country.code, 'block'); }}
+                  onClick={() => {
+                    handleToggleCountry(country.code, 'block');
+                  }}
                   className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all duration-300
                     ${isSelected ? 'bg-red-500/20 border-red-500/40 text-red-300 shadow-inner' : 'bg-zinc-950/50 border-white/5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/80'}
                     ${isAllowed ? 'opacity-30 cursor-not-allowed' : ''}`}
@@ -131,19 +137,35 @@ export function FilteringSettings() {
         <h4 className="font-semibold text-zinc-300 text-sm mb-4">{t('addCountry')}</h4>
         <div className="flex gap-3">
           <input
-            type="text" value={newCode} onChange={(e) => { setNewCode(e.target.value); }} placeholder={t('countryCode')}
+            type="text"
+            value={newCode}
+            onChange={(e) => {
+              setNewCode(e.target.value);
+            }}
+            placeholder={t('countryCode')}
             className="w-24 bg-zinc-950/50 border border-white/10 rounded-xl px-4 py-2.5 text-sm font-medium focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none transition-all shadow-inner"
           />
           <input
-            type="text" value={newName} onChange={(e) => { setNewName(e.target.value); }} placeholder={t('countryName')}
+            type="text"
+            value={newName}
+            onChange={(e) => {
+              setNewName(e.target.value);
+            }}
+            placeholder={t('countryName')}
             className="flex-1 bg-zinc-950/50 border border-white/10 rounded-xl px-4 py-2.5 text-sm font-medium focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none transition-all shadow-inner"
           />
           <input
-            type="text" value={newFlag} onChange={(e) => { setNewFlag(e.target.value); }} placeholder={t('countryFlag')}
+            type="text"
+            value={newFlag}
+            onChange={(e) => {
+              setNewFlag(e.target.value);
+            }}
+            placeholder={t('countryFlag')}
             className="w-24 bg-zinc-950/50 border border-white/10 rounded-xl px-4 py-2.5 text-sm font-medium focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none text-center transition-all shadow-inner"
           />
           <button
-            onClick={addCustomCountry} disabled={!newCode || !newName || !newFlag}
+            onClick={addCustomCountry}
+            disabled={!newCode || !newName || !newFlag}
             className="bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:hover:bg-zinc-800 px-4 rounded-xl border border-white/10 text-white transition-all shadow-sm"
           >
             <Plus size={20} />
