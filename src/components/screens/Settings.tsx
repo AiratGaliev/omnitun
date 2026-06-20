@@ -90,7 +90,7 @@ export function Settings() {
         </button>
       </header>
 
-      <div className="mb-8 max-w-3xl">
+      <div className="mb-8 w-full">
         <SegmentedControl
           options={[
             { id: 'general', label: t('general'), icon: <Rocket size={18} /> },
@@ -106,7 +106,7 @@ export function Settings() {
         />
       </div>
 
-      <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar pb-8 max-w-4xl">
+      <div className="flex-1 overflow-y-auto custom-scrollbar pb-8 w-full">
         <AnimatePresence mode="wait" initial={false}>
           <motion.div
             key={activeTab}

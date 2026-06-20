@@ -88,7 +88,7 @@ export function Profiles() {
           <motion.div
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
-            className="text-center py-20 flex flex-col items-center justify-center border-2 border-dashed border-white/5 rounded-3xl bg-zinc-900/20 backdrop-blur-sm"
+            className="text-center py-12 flex flex-col items-center justify-center border-2 border-dashed border-white/5 rounded-3xl bg-zinc-900/20 backdrop-blur-sm"
           >
             <div className="w-20 h-20 bg-zinc-800/50 rounded-3xl flex items-center justify-center mb-5 shadow-inner">
               <Globe2 size={36} className="text-zinc-600" strokeWidth={1.5} />
