@@ -14,6 +14,14 @@ const manualSchema = z.object({
   url: z.string().url('Invalid URL format'),
 });
 
+function extractDomain(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return url;
+  }
+}
+
 interface AddProfileOptionsProps {
   readonly onAdd: (url: string, name?: string) => void;
   readonly className?: string;
@@ -44,18 +52,19 @@ export function AddProfileOptions({
       }
       // Strip leading/trailing whitespace and invisible Unicode characters
       // (BOM U+FEFF, zero-width spaces, directional marks, etc.)
-      const cleanText = clipboardText.trim().replace(/^[\p{Cf} ]+/u, '');
+      const cleanText = clipboardText.trim().replace(/^[\p{Cf}\p{Zs}]+/u, '');
 
-      if (
+      if (cleanText.startsWith('http://') || cleanText.startsWith('https://')) {
+        const name = extractDomain(cleanText);
+        onAdd(cleanText, name);
+      } else if (
         cleanText.startsWith('vless://') ||
         cleanText.startsWith('ss://') ||
         cleanText.startsWith('vmess://') ||
         cleanText.startsWith('trojan://') ||
         cleanText.startsWith('hysteria2://') ||
         cleanText.startsWith('hy2://') ||
-        cleanText.startsWith('tuic://') ||
-        cleanText.startsWith('http://') ||
-        cleanText.startsWith('https://')
+        cleanText.startsWith('tuic://')
       ) {
         onAdd(cleanText);
       } else {

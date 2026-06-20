@@ -49,6 +49,13 @@ impl ProfileManager {
     pub async fn add(&mut self, name: String, url: String) -> Result<SubscriptionProfile, VpnError> {
         let clean_url = url.trim().to_string();
 
+        if self.profiles.iter().any(|p| p.url == clean_url) {
+            return Err(VpnError::Subscription(format!(
+                "Subscription with URL '{}' already exists",
+                clean_url
+            )));
+        }
+
         let servers = if clean_url.starts_with("http://") || clean_url.starts_with("https://") {
             crate::subscription::fetch_subscription(&clean_url).await?
         } else {
