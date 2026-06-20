@@ -14,6 +14,17 @@ import { Navigation } from './components/Navigation';
 
 type Tab = 'home' | 'profiles' | 'settings' | 'logs' | 'about';
 
+const pageVariants = {
+  initial: { opacity: 0, y: 15, scale: 0.99 },
+  animate: { opacity: 1, y: 0, scale: 1 },
+  exit: { opacity: 0, y: -15, scale: 0.99 },
+};
+
+const pageTransition = {
+  duration: 0.4,
+  ease: [0.22, 1, 0.36, 1],
+};
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('home');
   const [isInitialized, setIsInitialized] = useState(false);
@@ -25,22 +36,14 @@ export default function App() {
   const refreshProfile = useVPNStore((state) => state.refreshProfile);
   const addLog = useVPNStore((state) => state.addLog);
 
-  // Init Tauri event listener on mount
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-
     initListener()
-      .then((fn) => {
-        unlisten = fn;
-      })
+      .then((fn) => { unlisten = fn; })
       .catch(() => undefined);
-
-    return () => {
-      unlisten?.();
-    };
+    return () => { unlisten?.(); };
   }, [initListener]);
 
-  // Load saved profiles and settings on mount, mark initialized when done
   useEffect(() => {
     void Promise.all([
       loadProfiles().catch(() => undefined),
@@ -56,15 +59,12 @@ export default function App() {
     });
   }, [loadProfiles, loadSettings, addLog]);
 
-  // Apply persisted language to i18n when settings load
   useEffect(() => {
     void i18n.changeLanguage(settings.language);
   }, [settings.language]);
 
-  // Auto-refresh subscriptions at interval
   useEffect(() => {
     if (!settings.autoUpdateInterval || settings.autoUpdateInterval <= 0) return;
-
     const intervalMs = settings.autoUpdateInterval * 60 * 1000;
     const timer = setInterval(() => {
       addLog(`Auto-refreshing ${String(profiles.length)} subscription(s)`, 'info', 'subscription');
@@ -72,22 +72,21 @@ export default function App() {
         refreshProfile(p.id).catch(() => undefined);
       });
     }, intervalMs);
-
-    return () => {
-      clearInterval(timer);
-    };
+    return () => { clearInterval(timer); };
   }, [profiles, settings.autoUpdateInterval, refreshProfile, addLog]);
 
   return (
-    <div className="w-full h-screen bg-zinc-950 text-zinc-100 font-sans flex overflow-hidden relative">
+    <div className="w-full h-screen bg-zinc-950 text-zinc-100 font-sans flex overflow-hidden relative selection:bg-emerald-500/30">
       <Toaster
         theme="dark"
         position="bottom-center"
         toastOptions={{
           style: {
-            background: '#18181b',
-            border: '1px solid rgba(255,255,255,0.1)',
+            background: 'rgba(24, 24, 27, 0.8)',
+            backdropFilter: 'blur(12px)',
+            border: '1px solid rgba(255,255,255,0.05)',
             color: '#f4f4f5',
+            borderRadius: '1rem',
           },
         }}
       />
@@ -107,65 +106,30 @@ export default function App() {
               className="flex-1 flex flex-row w-full h-full"
             >
               <Navigation activeTab={activeTab} onChange={setActiveTab} />
-              <div className="flex-1 relative overflow-hidden">
+              <div className="flex-1 relative overflow-hidden bg-gradient-to-br from-zinc-950 to-zinc-900/50">
                 <AnimatePresence mode="wait">
                   {activeTab === 'home' && (
-                    <motion.div
-                      key="home"
-                      initial={{ opacity: 0, x: -20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: 20 }}
-                      transition={{ duration: 0.2 }}
-                      className="absolute inset-0"
-                    >
+                    <motion.div key="home" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition} className="absolute inset-0">
                       <Dashboard onNavigate={setActiveTab} />
                     </motion.div>
                   )}
                   {activeTab === 'profiles' && (
-                    <motion.div
-                      key="profiles"
-                      initial={{ opacity: 0, x: 20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: -20 }}
-                      transition={{ duration: 0.2 }}
-                      className="absolute inset-0"
-                    >
+                    <motion.div key="profiles" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition} className="absolute inset-0">
                       <Profiles />
                     </motion.div>
                   )}
                   {activeTab === 'settings' && (
-                    <motion.div
-                      key="settings"
-                      initial={{ opacity: 0, x: 20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: -20 }}
-                      transition={{ duration: 0.2 }}
-                      className="absolute inset-0"
-                    >
+                    <motion.div key="settings" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition} className="absolute inset-0">
                       <Settings />
                     </motion.div>
                   )}
                   {activeTab === 'logs' && (
-                    <motion.div
-                      key="logs"
-                      initial={{ opacity: 0, x: 20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: -20 }}
-                      transition={{ duration: 0.2 }}
-                      className="absolute inset-0"
-                    >
+                    <motion.div key="logs" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition} className="absolute inset-0">
                       <Logs />
                     </motion.div>
                   )}
                   {activeTab === 'about' && (
-                    <motion.div
-                      key="about"
-                      initial={{ opacity: 0, x: 20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      exit={{ opacity: 0, x: -20 }}
-                      transition={{ duration: 0.2 }}
-                      className="absolute inset-0"
-                    >
+                    <motion.div key="about" variants={pageVariants} initial="initial" animate="animate" exit="exit" transition={pageTransition} className="absolute inset-0">
                       <About />
                     </motion.div>
                   )}

@@ -19,35 +19,33 @@ export function Navigation({ activeTab, onChange }: NavigationProps) {
   ] as const;
 
   return (
-    <div className="w-20 border-r border-white/5 flex flex-col items-center py-8 gap-8 bg-zinc-950/50 backdrop-blur-xl z-20">
-      <div className="w-10 h-10 bg-emerald-500 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-500/20 mb-4">
-        <List className="w-6 h-6 text-zinc-950" />
+    <div className="w-20 border-r border-white/5 flex flex-col items-center py-8 gap-8 bg-zinc-950/80 backdrop-blur-2xl z-20 shadow-[4px_0_24px_rgba(0,0,0,0.2)]">
+      <div className="w-11 h-11 bg-gradient-to-br from-emerald-400 to-emerald-600 rounded-xl flex items-center justify-center shadow-[0_0_20px_rgba(16,185,129,0.3)] mb-4">
+        <List className="w-6 h-6 text-zinc-950" strokeWidth={2.5} />
       </div>
-      <div className="flex flex-col gap-6 w-full items-center">
+      <div className="flex flex-col gap-4 w-full items-center">
         {tabs.map(({ id, icon: Icon, label }) => (
           <button
             key={id}
-            onClick={() => {
-              onChange(id);
-            }}
+            onClick={() => onChange(id)}
             title={label}
-            className={`relative p-3 rounded-xl transition-colors ${
-              activeTab === id ? 'text-emerald-500 bg-white/5' : 'text-zinc-500 hover:text-zinc-200'
+            className={`relative p-3.5 rounded-xl transition-all duration-300 group ${
+              activeTab === id ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'
             }`}
           >
             {activeTab === id && (
               <motion.div
                 layoutId="nav-bg"
-                className="absolute inset-0 bg-white/5 rounded-xl border border-white/10"
+                className="absolute inset-0 bg-emerald-500/10 rounded-xl border border-emerald-500/20"
                 transition={{ type: 'spring', bounce: 0.2, duration: 0.6 }}
               />
             )}
-            <Icon size={24} className="relative z-10" />
+            <Icon size={22} className="relative z-10 group-hover:scale-110 transition-transform duration-300" />
           </button>
         ))}
       </div>
       <div className="mt-auto mb-4">
-        <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_10px_rgba(16,185,129,0.5)]"></div>
+        <div className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.8)]" />
       </div>
     </div>
   );
