@@ -73,7 +73,7 @@ export function AddProfileOptions({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       useVPNStore.getState().addLog(`Clipboard error: ${msg}`, 'error', 'subscription');
-      invoke('log_message', {level: 'error', source: 'subscription', message: `Clipboard error: ${msg}`}).catch(() => {});
+      invoke('log_message', {level: 'error', source: 'subscription', message: `Clipboard error: ${msg}`}).catch(() => undefined);
       toast.error(t('clipboardErrMsg'), { description: msg, duration: 4000 });
     }
   };

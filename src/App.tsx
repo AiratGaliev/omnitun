@@ -29,11 +29,10 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('home');
   const [isInitialized, setIsInitialized] = useState(false);
   const hasOnboarded = useVPNStore((state) => state.hasOnboarded);
-  const { profiles, settings } = useVPNStore();
+  const settings = useVPNStore((state) => state.settings);
   const initListener = useVPNStore((state) => state.initListener);
   const loadProfiles = useVPNStore((state) => state.loadProfiles);
   const loadSettings = useVPNStore((state) => state.loadSettings);
-  const refreshProfile = useVPNStore((state) => state.refreshProfile);
   const addLog = useVPNStore((state) => state.addLog);
 
   useEffect(() => {
@@ -68,18 +67,37 @@ export default function App() {
   }, [settings.language]);
 
   useEffect(() => {
-    if (!settings.autoUpdateInterval || settings.autoUpdateInterval <= 0) return;
-    const intervalMs = settings.autoUpdateInterval * 60 * 1000;
-    const timer = setInterval(() => {
-      addLog(`Auto-refreshing ${String(profiles.length)} subscription(s)`, 'info', 'subscription');
+    if (!isInitialized || !settings.autoUpdateInterval || settings.autoUpdateInterval <= 0) return;
+
+    const checkAndUpdate = () => {
+      const { profiles, refreshProfile, addLog, settings } = useVPNStore.getState();
+      if (!settings.autoUpdateInterval || settings.autoUpdateInterval <= 0) return;
+
+      const intervalMs = settings.autoUpdateInterval * 60 * 1000;
+      const now = Date.now();
+
+      let updatedCount = 0;
       profiles.forEach((p) => {
-        refreshProfile(p.id).catch(() => undefined);
+        const lastUpdated = p.lastUpdated ?? 0;
+        if (now - lastUpdated >= intervalMs) {
+          updatedCount++;
+          refreshProfile(p.id).catch(() => undefined);
+        }
       });
-    }, intervalMs);
+
+      if (updatedCount > 0) {
+        addLog(`Auto-refreshing ${String(updatedCount)} subscription(s)`, 'info', 'subscription');
+      }
+    };
+
+    const initialTimer = setTimeout(checkAndUpdate, 3000);
+    const timer = setInterval(checkAndUpdate, 60 * 1000);
+
     return () => {
+      clearTimeout(initialTimer);
       clearInterval(timer);
     };
-  }, [profiles, settings.autoUpdateInterval, refreshProfile, addLog]);
+  }, [isInitialized, settings.autoUpdateInterval]);
 
   return (
     <div className="w-full h-screen bg-zinc-950 text-zinc-100 font-sans flex overflow-hidden relative selection:bg-emerald-500/30">

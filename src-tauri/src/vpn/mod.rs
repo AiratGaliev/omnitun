@@ -51,6 +51,10 @@ pub struct ServerProfile {
     pub flow: Option<String>,
     pub public_key: Option<String>,
     pub private_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ping_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flag: Option<String>,
 }
 
 
@@ -105,14 +109,20 @@ impl VpnManager {
         Ok(binary_path)
     }
 
-    pub async fn start(&self, app_handle: &AppHandle, proxy_port: u16, profile: &ServerProfile) -> Result<(), VpnError> {
+    pub async fn start(
+        &self,
+        app_handle: &AppHandle,
+        proxy_port: u16,
+        routing_mode: &str,
+        profile: &ServerProfile,
+    ) -> Result<(), VpnError> {
         let logger = app_handle.state::<Mutex<Logger>>();
         log(
             app_handle,
             &logger,
             LogLevel::Info,
             LogSource::Vpn,
-            "Checking sing-box installation...".into(),
+            format!("Starting in {routing_mode} mode..."),
         );
         self.ensure_installed(app_handle).await?;
 
@@ -123,8 +133,13 @@ impl VpnManager {
             LogSource::Vpn,
             "Generating sing-box config...".into(),
         );
-        let base_template = include_str!("../../config/base.json");
-        let (config_json, stats_port) = config::generate_config(base_template, &self.config_dir, proxy_port, profile)?;
+        let base_template = if routing_mode == "vpn" {
+            include_str!("../../config/base-vpn.json")
+        } else {
+            include_str!("../../config/base.json")
+        };
+        let (config_json, stats_port) =
+            config::generate_config(base_template, &self.config_dir, proxy_port, routing_mode, profile)?;
         let config_path = config::write_config(&config_json, &self.config_dir)?;
         log(
             app_handle,
@@ -141,7 +156,8 @@ impl VpnManager {
             LogSource::Process,
             "Starting sing-box process...".into(),
         );
-        self.process_mgr.start(&config_path).await?;
+        let elevated = routing_mode == "vpn";
+        self.process_mgr.start(&config_path, elevated).await?;
 
         log(
             app_handle,

@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 /// При подключении к тестовому стенду (Docker) клиент использует эти IP,
 /// и GeoIP резолвер возвращает нужную страну для проверки интерфейса.
 #[allow(dead_code)]
-const MOCK_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
+static MOCK_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     HashMap::from([
         ("127.0.0.2", "US"),
         ("127.0.0.3", "DE"),

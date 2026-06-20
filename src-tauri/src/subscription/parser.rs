@@ -86,6 +86,8 @@ fn parse_vless(data: &str) -> Option<ServerProfile> {
         flow: params.get("flow").cloned(),
         public_key: None,
         private_key: None,
+            ping_ms: None,
+            flag: None,
     })
 }
 
@@ -130,6 +132,8 @@ fn parse_vmess(data: &str) -> Option<ServerProfile> {
         flow: None,
         public_key: None,
         private_key: None,
+            ping_ms: None,
+            flag: None,
     })
 }
 
@@ -164,6 +168,8 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
                                 flow: None,
                                 public_key: None,
                                 private_key: None,
+                                ping_ms: None,
+                                flag: None,
                             });
                         }
                     }
@@ -197,6 +203,8 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
         flow: None,
         public_key: None,
         private_key: None,
+            ping_ms: None,
+            flag: None,
     })
 }
 
@@ -226,6 +234,8 @@ fn parse_trojan(data: &str) -> Option<ServerProfile> {
         flow: None,
         public_key: None,
         private_key: None,
+            ping_ms: None,
+            flag: None,
     })
 }
 
@@ -255,6 +265,8 @@ fn parse_hysteria2(data: &str) -> Option<ServerProfile> {
         flow: None,
         public_key: None,
         private_key: None,
+            ping_ms: None,
+            flag: None,
     })
 }
 
@@ -286,6 +298,8 @@ fn parse_tuic(data: &str) -> Option<ServerProfile> {
         flow: None,
         public_key: None,
         private_key: None,
+            ping_ms: None,
+            flag: None,
     })
 }
 

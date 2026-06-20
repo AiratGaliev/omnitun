@@ -25,6 +25,8 @@ interface RustServerProfile {
   flow?: string;
   public_key?: string;
   private_key?: string;
+  ping_ms?: number;
+  flag?: string;
 }
 
 interface RustSubscriptionProfile {
@@ -85,6 +87,17 @@ function extractError(payload: VpnStatusPayload): string | undefined {
   return undefined;
 }
 
+/** Convert two-letter country code (US, DE) to emoji flag (🇺🇸, 🇩🇪). */
+function countryToFlagEmoji(code: string): string {
+  if (code.length !== 2) return code;
+  const offset = 0x1F1E6 - 65; // 'A' → 🇦
+  const upper = code.toUpperCase();
+  return String.fromCodePoint(
+    upper.charCodeAt(0) + offset,
+    upper.charCodeAt(1) + offset,
+  );
+}
+
 function mapRustProfile(rust: RustSubscriptionProfile): Profile {
   return {
     id: rust.id,
@@ -105,6 +118,8 @@ function mapRustProfile(rust: RustSubscriptionProfile): Profile {
         flow: s.flow,
         publicKey: s.public_key,
         privateKey: s.private_key,
+        ping: s.ping_ms,
+        flag: s.flag ? countryToFlagEmoji(s.flag) : undefined,
       }),
     ),
   };
@@ -212,9 +227,22 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     try {
       const result = await invoke<RustSubscriptionProfile>('refresh_subscription', { id });
       const updated = mapRustProfile(result);
-      set((state) => ({
-        profiles: state.profiles.map((p) => (p.id === id ? { ...p, ...updated } : p)),
-      }));
+      set((state) => {
+        const newProfiles = state.profiles.map((p) =>
+          p.id === id ? { ...p, ...updated } : p,
+        );
+        const allServers = newProfiles.flatMap((p) => p.servers);
+        const activeServerStillExists = allServers.some(
+          (s) => s.id === state.activeServer?.id,
+        );
+        return {
+          profiles: newProfiles,
+          servers: allServers,
+          activeServer: activeServerStillExists
+            ? state.activeServer
+            : (allServers[0] ?? null),
+        };
+      });
       get().addLog(
         `Profile "${updated.name}" refreshed (${String(updated.servers.length)} server(s))`,
         'success',
@@ -303,11 +331,13 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   },
 
   toggleConnection: async () => {
-    const { status, activeServer, addLog } = get();
+    const { status, activeServer, addLog, settings } = get();
     try {
       if (status === 'disconnected' || status === 'error') {
         addLog(`Connecting to ${activeServer?.name ?? 'Default'}...`, 'info', 'system');
         set({ status: 'connecting' });
+        // Persist settings before connecting (routingMode, proxyPort from Dashboard)
+        await get().saveSettings().catch(() => undefined);
         const profile = {
           id: activeServer?.id ?? 'default',
           name: activeServer?.name ?? 'Default',
@@ -322,7 +352,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
           public_key: activeServer?.publicKey ?? null,
           private_key: activeServer?.privateKey ?? null,
         };
-        await invoke('start_vpn', { profile });
+        await invoke('start_vpn', { profile, routingMode: settings.routingMode, proxyPort: settings.proxyPort });
       } else {
         addLog('Disconnecting...', 'info', 'system');
         set({ status: 'disconnecting' });

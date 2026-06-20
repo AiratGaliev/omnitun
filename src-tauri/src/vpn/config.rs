@@ -13,6 +13,7 @@ pub fn generate_config(
     base_template: &str,
     cache_dir: &Path,
     proxy_port: u16,
+    routing_mode: &str,
     server_profile: &ServerProfile,
 ) -> Result<(String, u16), VpnError> {
     let mut config: Value =
@@ -28,9 +29,11 @@ pub fn generate_config(
         ));
     }
 
-    // Set proxy listen port from user settings
-    if let Some(inbound) = config["inbounds"].get_mut(0) {
-        inbound["listen_port"] = json!(proxy_port);
+    // Set proxy listen port from user settings (HTTP proxy only — TUN doesn't use listen_port)
+    if routing_mode == "proxy" {
+        if let Some(inbound) = config["inbounds"].get_mut(0) {
+            inbound["listen_port"] = json!(proxy_port);
+        }
     }
 
     // Set cache file to absolute path so it doesn't appear in the project root
@@ -232,6 +235,38 @@ mod tests {
         }"#
     }
 
+    /// Шаблон TUN-конфига для VPN-режима — создаёт сетевой интерфейс,
+    /// outbounds direct + block, требует прав администратора.
+    fn vpn_template() -> &'static str {
+        r#"{
+            "log": { "level": "info", "timestamp": true },
+            "inbounds": [{
+                "type": "tun",
+                "tag": "tun-in",
+                "interface_name": "omnitun",
+                "address": "172.19.0.1/30",
+                "mtu": 1500,
+                "auto_route": true,
+                "strict_route": true,
+                "stack": "system"
+            }],
+            "outbounds": [
+                { "type": "direct", "tag": "direct" },
+                { "type": "block", "tag": "block" }
+            ],
+            "route": {
+                "rules": [
+                    { "ip_is_private": true, "outbound": "direct" }
+                ],
+                "final": "proxy",
+                "auto_detect_interface": true
+            },
+            "experimental": {
+                "cache_file": { "enabled": true, "path": "cache.db" }
+            }
+        }"#
+    }
+
     /// VLESS без TLS — порт 8443 тестового стенда
     fn vless_profile() -> ServerProfile {
         ServerProfile {
@@ -268,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_vless_plain() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, &vless_profile());
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &vless_profile());
         assert!(
             result.is_ok(),
             "Config generation failed: {:?}",
@@ -294,7 +329,7 @@ mod tests {
 
     #[test]
     fn test_vless_tls() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, &vless_tls_profile());
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &vless_tls_profile());
         assert!(
             result.is_ok(),
             "Config generation failed: {:?}",
@@ -315,6 +350,118 @@ mod tests {
         assert_eq!(tls["server_name"], "localhost");
     }
 
+    // ── VPN mode (TUN) tests ─────────────────────────────────────────────────
+
+    /// VPN-режим: генерирует TUN inbound, а не HTTP.
+    #[test]
+    fn test_vpn_tun_inbound() {
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile());
+        assert!(result.is_ok(), "VPN config generation failed: {:?}", result.err());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let inbounds = config["inbounds"].as_array().unwrap();
+
+        assert_eq!(inbounds.len(), 1, "VPN mode: exactly one inbound");
+        assert_eq!(inbounds[0]["type"], "tun", "VPN mode: inbound type is tun");
+        assert_eq!(inbounds[0]["tag"], "tun-in");
+        assert_eq!(inbounds[0]["interface_name"], "omnitun");
+        assert_eq!(inbounds[0]["address"], "172.19.0.1/30");
+        assert_eq!(inbounds[0]["auto_route"], true);
+
+        // TUN inbound does NOT get a listen_port — that's only for HTTP proxy
+        assert!(
+            inbounds[0].get("listen_port").is_none(),
+            "VPN mode: TUN inbound must NOT have listen_port"
+        );
+    }
+
+    /// VPN-режим: outbound server добавляется с tag "proxy", final маршрут совпадает.
+    #[test]
+    fn test_vpn_outbound_added() {
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_tls_profile());
+        assert!(result.is_ok());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let outbounds = config["outbounds"].as_array().unwrap();
+
+        assert_eq!(outbounds.len(), 3, "VPN mode: direct + block + proxy");
+        assert_eq!(outbounds[0]["tag"], "direct");
+        assert_eq!(outbounds[1]["tag"], "block");
+        assert_eq!(outbounds[2]["tag"], "proxy");
+        assert_eq!(outbounds[2]["type"], "vless");
+
+        // Route final должен указывать на tag "proxy"
+        assert_eq!(config["route"]["final"], "proxy");
+    }
+
+    /// VPN-режим: clash_api добавляется для сбора статистики трафика.
+    #[test]
+    fn test_vpn_clash_api_enabled() {
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile());
+        assert!(result.is_ok());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let clash_api = &config["experimental"]["clash_api"];
+
+        assert!(clash_api.get("external_controller").is_some());
+        let addr = clash_api["external_controller"].as_str().unwrap();
+        assert!(addr.starts_with("127.0.0.1:"), "clash_api binds to 127.0.0.1:<port>");
+    }
+
+    /// VPN-режим: cache_file path превращается в абсолютный.
+    #[test]
+    fn test_vpn_absolute_cache_path() {
+        let cache = cache_dir();
+        let result = generate_config(vpn_template(), &cache, 1080, "vpn", &vless_profile());
+        assert!(result.is_ok());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let cache_path = config["experimental"]["cache_file"]["path"].as_str().unwrap();
+
+        // Должен быть абсолютным
+        let path = std::path::Path::new(cache_path);
+        assert!(path.is_absolute(), "Cache path must be absolute: {cache_path}");
+        assert!(cache_path.contains("cache.db"), "Cache path must end with cache.db");
+    }
+
+    // ── Proxy mode regression tests ──────────────────────────────────────────
+
+    /// Regression: proxy-режим ДОЛЖЕН устанавливать listen_port на inbound.
+    #[test]
+    fn test_proxy_listen_port_set() {
+        let result = generate_config(base_template(), &cache_dir(), 9999, "proxy", &vless_profile());
+        assert!(result.is_ok());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let inbounds = config["inbounds"].as_array().unwrap();
+
+        assert_eq!(inbounds[0]["type"], "http");
+        assert_eq!(inbounds[0]["listen_port"], 9999, "Proxy mode: listen_port must be set");
+    }
+
+    /// Regression: proxy-режим с портом по умолчанию (1080).
+    #[test]
+    fn test_proxy_default_port() {
+        let result = generate_config(base_template(), &cache_dir(), 1080, "proxy", &vless_profile());
+        assert!(result.is_ok());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        assert_eq!(config["inbounds"][0]["listen_port"], 1080);
+    }
+
+    /// Regression: proxy-режим — clash_api тоже добавляется.
+    #[test]
+    fn test_proxy_clash_api_enabled() {
+        let result = generate_config(base_template(), &cache_dir(), 1080, "proxy", &vless_profile());
+        assert!(result.is_ok());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        assert!(
+            config["experimental"]["clash_api"].is_object(),
+            "Proxy mode must have clash_api"
+        );
+    }
+
     #[test]
     fn test_unsupported_protocol() {
         let profile = ServerProfile {
@@ -322,7 +469,7 @@ mod tests {
             ..vless_profile()
         };
 
-        let result = generate_config(base_template(), &cache_dir(), 10809, &profile);
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &profile);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -359,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_vmess() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("vmess"));
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("vmess"));
         assert!(result.is_ok());
         let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "vmess");
@@ -369,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_trojan() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("trojan"));
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("trojan"));
         assert!(result.is_ok());
         let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "trojan");
@@ -379,7 +526,7 @@ mod tests {
 
     #[test]
     fn test_shadowsocks() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("shadowsocks"));
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("shadowsocks"));
         assert!(result.is_ok());
         let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "shadowsocks");
@@ -397,7 +544,7 @@ mod tests {
             public_key: Some("some-public-key".into()),
             ..Default::default()
         };
-        let result = generate_config(base_template(), &cache_dir(), 10809, &profile);
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &profile);
         assert!(result.is_ok());
         let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "wireguard");
@@ -406,7 +553,7 @@ mod tests {
 
     #[test]
     fn test_hysteria2() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("hysteria2"));
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("hysteria2"));
         assert!(result.is_ok());
         let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "hysteria2");
@@ -416,7 +563,7 @@ mod tests {
 
     #[test]
     fn test_tuic() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, &proto_profile("tuic"));
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("tuic"));
         assert!(result.is_ok());
         let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "tuic");

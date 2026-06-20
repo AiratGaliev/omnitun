@@ -39,6 +39,8 @@ async fn start_vpn(
     app: tauri::AppHandle,
     state: tauri::State<'_, VpnState>,
     profile: ServerProfile,
+    routing_mode: String,
+    proxy_port: u16,
 ) -> Result<(), String> {
     let logger = app.state::<StdMutex<Logger>>();
     log(
@@ -46,14 +48,13 @@ async fn start_vpn(
         &logger,
         LogLevel::Info,
         LogSource::System,
-        format!("Starting VPN connection to {}...", profile.name),
+        format!("Starting VPN connection to {} ({routing_mode} mode, {} port)...", profile.name, proxy_port),
     );
     emit_status(&app, VpnStatus::Connecting);
 
-    let settings_state = app.state::<Mutex<AppSettings>>();
-    let proxy_port = settings_state.lock().await.proxy_port;
-    let manager = state.manager.lock().await;
-    match manager.start(&app, proxy_port, &profile).await {
+    let manager_arc = state.manager.clone();
+    let manager = manager_arc.lock().await;
+    match manager.start(&app, proxy_port, &routing_mode, &profile).await {
         Ok(_) => {
             log(
                 &app,
@@ -84,6 +85,32 @@ async fn start_vpn(
                         format!("VPN connected to {}", profile.name),
                     );
                     emit_status(&app, VpnStatus::Connected);
+
+                    // Watchdog: detect unexpected process exit and clear PID
+                    let watch_pid = manager.process_pid();
+                    if let Some(pid) = watch_pid {
+                        let app_clone = app.clone();
+                        let mgr_arc = manager_arc.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                if !is_process_alive(pid) {
+                                    log(
+                                        &app_clone,
+                                        &app_clone.state::<StdMutex<Logger>>(),
+                                        LogLevel::Warning,
+                                        LogSource::Process,
+                                        "VPN process exited unexpectedly".into(),
+                                    );
+                                    // Clear stale PID so reconnect works
+                                    let _ = mgr_arc.lock().await.stop(&app_clone).await;
+                                    emit_status(&app_clone, VpnStatus::Disconnected);
+                                    break;
+                                }
+                            }
+                        });
+                    }
+
                     Ok(())
                 }
                 Err(e) => {
@@ -175,7 +202,7 @@ async fn add_subscription(
     );
 
     let mut mgr = state.manager.lock().await;
-    match mgr.add(name.clone(), url).await {
+    match mgr.add(&app, name.clone(), url).await {
         Ok(profile) => {
             let count = profile.servers.len();
             log(
@@ -259,7 +286,7 @@ async fn refresh_subscription(
     );
 
     let mut mgr = state.manager.lock().await;
-    match mgr.refresh(&id).await {
+    match mgr.refresh(&app, &id).await {
         Ok(profile) => {
             let count = profile.servers.len();
             log(
@@ -426,7 +453,7 @@ fn read_clipboard_text() -> Result<String, String> {
 }
 
 /// Check if a process is alive by PID.
-fn is_process_alive(pid: u32) -> bool {
+pub(crate) fn is_process_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
         let output = std::process::Command::new("tasklist")
