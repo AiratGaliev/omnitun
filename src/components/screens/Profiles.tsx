@@ -8,6 +8,7 @@ import type { Profile } from '@/types.ts';
 import type { TranslationKey } from '@/i18n.ts';
 import * as z from 'zod';
 import { AddProfileOptions } from '../AddProfileOptions';
+import { ConfirmDialog } from '../ConfirmDialog';
 
 const profileSchema = z.object({
   name: z.string().min(1, 'Name is required'),
@@ -20,6 +21,24 @@ export function Profiles() {
   const { t } = useTranslation();
 
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+
+  const handleDelete = (id: string, _name: string) => {
+    setDeleteConfirmId(id);
+  };
+
+  const confirmDelete = () => {
+    if (!deleteConfirmId) return;
+    const id = deleteConfirmId;
+    setDeleteConfirmId(null);
+    removeProfile(id)
+      .then(() => {
+        toast.success(t('profileDeleted'));
+      })
+      .catch(() => {
+        toast.error(t('deleteFailed'));
+      });
+  };
 
   const handleRefresh = (profile: Profile) => {
     toast(`${t('updatingProfile')}${profile.name}...`);
@@ -30,18 +49,6 @@ export function Profiles() {
       .catch(() => {
         toast.error(t('refreshFailed'));
       });
-  };
-
-  const handleDelete = (id: string, name: string) => {
-    if (confirm(`${t('deleteProfileConfirm')}${name}?`)) {
-      removeProfile(id)
-        .then(() => {
-          toast.success(t('profileDeleted'));
-        })
-        .catch(() => {
-          toast.error(t('deleteFailed'));
-        });
-    }
   };
 
   return (
@@ -103,6 +110,18 @@ export function Profiles() {
           </motion.div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={deleteConfirmId !== null}
+        title={t('deleteProfileConfirm')}
+        description={profiles.find((p) => p.id === deleteConfirmId)?.name ?? ''}
+        confirmLabel={t('delete')}
+        cancelLabel={t('cancel')}
+        onConfirm={confirmDelete}
+        onCancel={() => {
+          setDeleteConfirmId(null);
+        }}
+      />
     </div>
   );
 }
