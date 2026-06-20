@@ -117,6 +117,18 @@ pub fn log(
     let _ = app_handle.emit("log-entry", &entry);
 }
 
+/// Tauri command: log a message from the frontend to the Rust Logger (ring buffer + file).
+#[tauri::command]
+pub fn log_message(
+    app: tauri::AppHandle,
+    logger: tauri::State<'_, Mutex<Logger>>,
+    level: LogLevel,
+    source: LogSource,
+    message: String,
+) {
+    log(&app, &logger, level, source, message);
+}
+
 /// Tauri command: return all current log entries from ring buffer.
 #[tauri::command]
 pub fn get_logs(logger: tauri::State<'_, Mutex<Logger>>) -> Vec<LogEntry> {

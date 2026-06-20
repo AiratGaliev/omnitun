@@ -1,3 +1,5 @@
+// src-tauri/src/subscription/parser.rs
+
 use crate::vpn::{ServerProfile, VpnError};
 use std::collections::HashMap;
 
@@ -26,7 +28,8 @@ fn try_base64_decode(data: &str) -> Result<String, anyhow::Error> {
 
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&clean)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&clean))?;
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(&clean))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&clean))?;
 
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
@@ -38,25 +41,41 @@ fn parse_uri(uri: &str) -> Option<ServerProfile> {
         parse_vmess(remainder)
     } else if let Some(remainder) = uri.strip_prefix("ss://") {
         parse_ss(remainder)
+    } else if let Some(remainder) = uri.strip_prefix("trojan://") {
+        parse_trojan(remainder)
+    } else if let Some(remainder) = uri.strip_prefix("hysteria2://") {
+        parse_hysteria2(remainder)
+    } else if let Some(remainder) = uri.strip_prefix("hy2://") {
+        parse_hysteria2(remainder)
+    } else if let Some(remainder) = uri.strip_prefix("tuic://") {
+        parse_tuic(remainder)
     } else {
         None
     }
 }
 
+fn split_uri(data: &str) -> (&str, &str, &str) {
+    let (rest, fragment) = data.split_once('#').unwrap_or((data, ""));
+    let (main, query) = rest.split_once('?').unwrap_or((rest, ""));
+    (main, query, fragment)
+}
+
 fn parse_vless(data: &str) -> Option<ServerProfile> {
-    let (uuid, rest) = data.split_once('@')?;
-    let (server_port, params_part) = rest.split_once('?').unwrap_or((rest, ""));
+    let (main, query, fragment) = split_uri(data);
+    let name = urlencoding_decode(fragment);
+
+    let (uuid, server_port) = main.split_once('@')?;
     let (server, port_str) = server_port.rsplit_once(':')?;
     let port: u16 = port_str.parse().ok()?;
-    let params = parse_query(params_part);
+    let params = parse_query(query);
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
-        name: params
-            .get("remark")
-            .or(params.get("#"))
-            .cloned()
-            .unwrap_or_default(),
+        name: if name.is_empty() {
+            params.get("remark").cloned().unwrap_or_default()
+        } else {
+            name
+        },
         protocol: "vless".into(),
         server: server.to_string(),
         port,
@@ -76,6 +95,8 @@ fn parse_vmess(data: &str) -> Option<ServerProfile> {
     let json_str = String::from_utf8(
         base64::engine::general_purpose::STANDARD
             .decode(data.trim())
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(data.trim()))
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(data.trim()))
             .ok()?,
     )
     .ok()?;
@@ -83,7 +104,7 @@ fn parse_vmess(data: &str) -> Option<ServerProfile> {
     let v: serde_json::Value = serde_json::from_str(&json_str).ok()?;
 
     let server = v.get("add")?.as_str()?.to_string();
-    let port: u16 = v.get("port")?.as_u64()? as u16;
+    let port: u16 = v.get("port")?.as_u64().or_else(|| v.get("port")?.as_str()?.parse().ok())? as u16;
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
@@ -115,35 +136,59 @@ fn parse_vmess(data: &str) -> Option<ServerProfile> {
 fn parse_ss(data: &str) -> Option<ServerProfile> {
     use base64::Engine as _;
 
-    let (userinfo_b64, host_part) = data.split_once('@')?;
+    let (main, _query, fragment) = split_uri(data);
+    let name = urlencoding_decode(fragment);
 
-    let decoded = String::from_utf8(
-        base64::engine::general_purpose::STANDARD
+    if let Some((userinfo_b64, server_port)) = main.split_once('@') {
+        let decoded_bytes = base64::engine::general_purpose::STANDARD
             .decode(userinfo_b64.trim())
-            .ok()?,
-    )
-    .ok()?;
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(userinfo_b64.trim()))
+            .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(userinfo_b64.trim()))
+            .ok();
 
-    let (method, password) = decoded.split_once(':')?;
+        if let Some(bytes) = decoded_bytes {
+            if let Ok(decoded) = String::from_utf8(bytes) {
+                if let Some((method, password)) = decoded.split_once(':') {
+                    if let Some((server, port_str)) = server_port.rsplit_once(':') {
+                        if let Ok(port) = port_str.parse::<u16>() {
+                            return Some(ServerProfile {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                name,
+                                protocol: "shadowsocks".into(),
+                                server: server.to_string(),
+                                port,
+                                uuid: None,
+                                password: Some(password.to_string()),
+                                method: Some(method.to_string()),
+                                sni: None,
+                                flow: None,
+                                public_key: None,
+                                private_key: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-    let (host, rest) = host_part.rsplit_once(':')?;
-    let (port_str, name) = if let Some((p, n)) = rest.split_once('#') {
-        (p, Some(n.to_string()))
-    } else {
-        (rest, None)
-    };
+    let decoded_bytes = base64::engine::general_purpose::STANDARD
+        .decode(main.trim())
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(main.trim()))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(main.trim()))
+        .ok()?;
+
+    let decoded = String::from_utf8(decoded_bytes).ok()?;
+    let (userinfo, server_port) = decoded.split_once('@')?;
+    let (method, password) = userinfo.split_once(':')?;
+    let (server, port_str) = server_port.rsplit_once(':')?;
     let port: u16 = port_str.parse().ok()?;
-
-    let server = host.to_string();
-    let name = name
-        .map(|n| urlencoding_decode(&n))
-        .unwrap_or_default();
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
         name,
-        protocol: "ss".into(),
-        server,
+        protocol: "shadowsocks".into(),
+        server: server.to_string(),
         port,
         uuid: None,
         password: Some(password.to_string()),
@@ -155,8 +200,100 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
     })
 }
 
+fn parse_trojan(data: &str) -> Option<ServerProfile> {
+    let (main, query, fragment) = split_uri(data);
+    let name = urlencoding_decode(fragment);
+
+    let (password, server_port) = main.split_once('@')?;
+    let (server, port_str) = server_port.rsplit_once(':')?;
+    let port: u16 = port_str.parse().ok()?;
+    let params = parse_query(query);
+
+    Some(ServerProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: if name.is_empty() {
+            params.get("remark").cloned().unwrap_or_default()
+        } else {
+            name
+        },
+        protocol: "trojan".into(),
+        server: server.to_string(),
+        port,
+        uuid: None,
+        password: Some(urlencoding_decode(password)),
+        method: None,
+        sni: params.get("sni").cloned(),
+        flow: None,
+        public_key: None,
+        private_key: None,
+    })
+}
+
+fn parse_hysteria2(data: &str) -> Option<ServerProfile> {
+    let (main, query, fragment) = split_uri(data);
+    let name = urlencoding_decode(fragment);
+
+    let (password, server_port) = main.split_once('@')?;
+    let (server, port_str) = server_port.rsplit_once(':')?;
+    let port: u16 = port_str.parse().ok()?;
+    let params = parse_query(query);
+
+    Some(ServerProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: if name.is_empty() {
+            params.get("remark").cloned().unwrap_or_default()
+        } else {
+            name
+        },
+        protocol: "hysteria2".into(),
+        server: server.to_string(),
+        port,
+        uuid: None,
+        password: Some(urlencoding_decode(password)),
+        method: None,
+        sni: params.get("sni").cloned(),
+        flow: None,
+        public_key: None,
+        private_key: None,
+    })
+}
+
+fn parse_tuic(data: &str) -> Option<ServerProfile> {
+    let (main, query, fragment) = split_uri(data);
+    let name = urlencoding_decode(fragment);
+
+    let (userinfo, server_port) = main.split_once('@')?;
+    let (uuid, password) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+
+    let (server, port_str) = server_port.rsplit_once(':')?;
+    let port: u16 = port_str.parse().ok()?;
+    let params = parse_query(query);
+
+    Some(ServerProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: if name.is_empty() {
+            params.get("remark").cloned().unwrap_or_default()
+        } else {
+            name
+        },
+        protocol: "tuic".into(),
+        server: server.to_string(),
+        port,
+        uuid: Some(uuid.to_string()),
+        password: if password.is_empty() { None } else { Some(urlencoding_decode(password)) },
+        method: None,
+        sni: params.get("sni").cloned(),
+        flow: None,
+        public_key: None,
+        private_key: None,
+    })
+}
+
 fn parse_query(query: &str) -> HashMap<String, String> {
     let mut params = HashMap::new();
+    if query.is_empty() {
+        return params;
+    }
     for pair in query.split('&') {
         if let Some((key, value)) = pair.split_once('=') {
             params.insert(
@@ -175,8 +312,13 @@ fn urlencoding_decode(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
-            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                result.push(byte as char);
+            if hex.len() == 2 {
+                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
+                    result.push(byte as char);
+                } else {
+                    result.push('%');
+                    result.push_str(&hex);
+                }
             } else {
                 result.push('%');
                 result.push_str(&hex);
@@ -258,7 +400,7 @@ mod tests {
         let result = parse_uri(&uri);
         assert!(result.is_some(), "Shadowsocks URI should parse");
         let p = result.unwrap();
-        assert_eq!(p.protocol, "ss");
+        assert_eq!(p.protocol, "shadowsocks");
         assert_eq!(p.server, "127.0.0.4");
         assert_eq!(p.port, 8446);
         assert_eq!(p.method.unwrap(), "aes-256-gcm");
@@ -277,6 +419,42 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_trojan_uri() {
+        let uri = "trojan://omnitun-test-password@127.0.0.3:8445?security=none&type=tcp#Trojan+127.0.0.3";
+        let p = parse_uri(uri).unwrap();
+        assert_eq!(p.protocol, "trojan");
+        assert_eq!(p.server, "127.0.0.3");
+        assert_eq!(p.port, 8445);
+        assert_eq!(p.password.unwrap(), "omnitun-test-password");
+        assert_eq!(p.name, "Trojan 127.0.0.3");
+    }
+
+    #[test]
+    fn test_parse_hysteria2_uri() {
+        let uri = "hysteria2://omnitun-test-password@127.0.0.4:8447?insecure=1&sni=localhost#Hysteria2+127.0.0.4";
+        let p = parse_uri(uri).unwrap();
+        assert_eq!(p.protocol, "hysteria2");
+        assert_eq!(p.server, "127.0.0.4");
+        assert_eq!(p.port, 8447);
+        assert_eq!(p.password.unwrap(), "omnitun-test-password");
+        assert_eq!(p.sni.unwrap(), "localhost");
+        assert_eq!(p.name, "Hysteria2 127.0.0.4");
+    }
+
+    #[test]
+    fn test_parse_tuic_uri() {
+        let uri = "tuic://b831381d-6324-4d53-ad4f-8cda48b30811:omnitun-test-password@127.0.0.5:8448?congestion_control=bbr&alpn=h3&sni=localhost&insecure=1#TUIC+127.0.0.5";
+        let p = parse_uri(uri).unwrap();
+        assert_eq!(p.protocol, "tuic");
+        assert_eq!(p.server, "127.0.0.5");
+        assert_eq!(p.port, 8448);
+        assert_eq!(p.uuid.unwrap(), "b831381d-6324-4d53-ad4f-8cda48b30811");
+        assert_eq!(p.password.unwrap(), "omnitun-test-password");
+        assert_eq!(p.sni.unwrap(), "localhost");
+        assert_eq!(p.name, "TUIC 127.0.0.5");
+    }
+
+    #[test]
     fn test_parse_subscription_multiple_protocols() {
         let vless = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.2:8443?remark=VLESS+Test";
         let vmess_json = r#"{"v":"2","ps":"VMess Test","add":"127.0.0.3","port":8444,"id":"b831381d-6324-4d53-ad4f-8cda48b30811","aid":0,"scy":"auto","net":"tcp","type":"none","tls":""}"#;
@@ -289,6 +467,6 @@ mod tests {
         assert_eq!(servers.len(), 3);
         assert_eq!(servers[0].protocol, "vless");
         assert_eq!(servers[1].protocol, "vmess");
-        assert_eq!(servers[2].protocol, "ss");
+        assert_eq!(servers[2].protocol, "shadowsocks");
     }
 }

@@ -47,12 +47,18 @@ impl ProfileManager {
     }
 
     pub async fn add(&mut self, name: String, url: String) -> Result<SubscriptionProfile, VpnError> {
-        let servers = crate::subscription::fetch_subscription(&url).await?;
+        let clean_url = url.trim().to_string();
+
+        let servers = if clean_url.starts_with("http://") || clean_url.starts_with("https://") {
+            crate::subscription::fetch_subscription(&clean_url).await?
+        } else {
+            crate::subscription::parser::parse_subscription(&clean_url)?
+        };
 
         let profile = SubscriptionProfile {
             id: uuid::Uuid::new_v4().to_string(),
             name,
-            url,
+            url: clean_url,
             servers,
             updated_at: chrono::Utc::now().to_rfc3339(),
         };

@@ -13,9 +13,12 @@ pub struct HttpFetcher {
 
 impl HttpFetcher {
     pub fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-        }
+        let client = reqwest::Client::builder()
+            .user_agent("omnitun/0.1.0")
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        Self { client }
     }
 }
 

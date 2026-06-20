@@ -1,8 +1,11 @@
-import { useState } from 'react';
-import { AnimatePresence, motion } from 'framer-motion';
-import { Clipboard, Plus, X } from 'lucide-react';
-import { toast } from 'sonner';
-import { useTranslation } from '@/hooks/useTranslation';
+import {useState} from 'react';
+import {AnimatePresence, motion} from 'framer-motion';
+import {Clipboard, Plus, X} from 'lucide-react';
+import {toast} from 'sonner';
+import {invoke} from '@tauri-apps/api/core';
+import {readText} from '@tauri-apps/plugin-clipboard-manager';
+import {useTranslation} from '@/hooks/useTranslation';
+import {useVPNStore} from '@/store';
 import * as z from 'zod';
 
 const manualSchema = z.object({
@@ -29,20 +32,40 @@ export function AddProfileOptions({
 
   const handleClipboardAdd = async () => {
     try {
-      const clipboardText = await navigator.clipboard.readText();
+      let clipboardText: string;
+      try {
+        clipboardText = await invoke('read_clipboard_text');
+      } catch {
+        try {
+          clipboardText = await readText();
+        } catch {
+          clipboardText = await navigator.clipboard.readText();
+        }
+      }
+      // Strip leading/trailing whitespace and invisible Unicode characters
+      // (BOM U+FEFF, zero-width spaces, directional marks, etc.)
+      const cleanText = clipboardText.trim().replace(/^[\p{Cf} ]+/u, '');
+
       if (
-        clipboardText.startsWith('vless://') ||
-        clipboardText.startsWith('ss://') ||
-        clipboardText.startsWith('vmess://') ||
-        clipboardText.startsWith('trojan://') ||
-        clipboardText.startsWith('http')
+        cleanText.startsWith('vless://') ||
+        cleanText.startsWith('ss://') ||
+        cleanText.startsWith('vmess://') ||
+        cleanText.startsWith('trojan://') ||
+        cleanText.startsWith('hysteria2://') ||
+        cleanText.startsWith('hy2://') ||
+        cleanText.startsWith('tuic://') ||
+        cleanText.startsWith('http://') ||
+        cleanText.startsWith('https://')
       ) {
-        onAdd(clipboardText);
+        onAdd(cleanText);
       } else {
         throw new Error('invalid config');
       }
-    } catch {
-      toast.error(t('clipboardErrMsg'), { description: t('clipboardErrDesc'), duration: 4000 });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      useVPNStore.getState().addLog(`Clipboard error: ${msg}`, 'error', 'subscription');
+      invoke('log_message', {level: 'error', source: 'subscription', message: `Clipboard error: ${msg}`}).catch(() => {});
+      toast.error(t('clipboardErrMsg'), { description: msg, duration: 4000 });
     }
   };
 
@@ -52,7 +75,7 @@ export function AddProfileOptions({
       toast.error(result.error.issues[0].message);
       return;
     }
-    onAdd(url, name);
+    onAdd(url.trim(), name.trim());
     setViewMode('initial');
     setName('');
     setUrl('');

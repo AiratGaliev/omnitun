@@ -343,6 +343,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let data_dir = app
                 .path()
@@ -407,9 +408,21 @@ pub fn run() {
             get_settings,
             update_settings,
             logging::get_logs,
+            logging::log_message,
+            read_clipboard_text,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Read clipboard text via arboard (bypasses WebView2 clipboard restrictions).
+#[tauri::command]
+fn read_clipboard_text() -> Result<String, String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("Clipboard init: {e}"))?;
+    clipboard
+        .get_text()
+        .map_err(|e| format!("Clipboard read: {e}"))
 }
 
 /// Check if a process is alive by PID.
