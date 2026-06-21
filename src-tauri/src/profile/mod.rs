@@ -100,7 +100,12 @@ impl ProfileManager {
             .position(|p| p.id == id)
             .ok_or_else(|| VpnError::Subscription("Profile not found".into()))?;
 
-        let mut servers = crate::subscription::fetch_subscription(&self.profiles[idx].url).await?;
+        let url = &self.profiles[idx].url;
+        let mut servers = if url.starts_with("http://") || url.starts_with("https://") {
+            crate::subscription::fetch_subscription(url).await?
+        } else {
+            crate::subscription::parser::parse_subscription(url)?
+        };
 
         // Preserve server IDs across refresh — match by (protocol, server, port, uuid, password)
         let old_index: std::collections::HashMap<String, String> = self.profiles[idx]

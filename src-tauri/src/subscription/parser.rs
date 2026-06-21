@@ -86,8 +86,13 @@ fn parse_vless(data: &str) -> Option<ServerProfile> {
         flow: params.get("flow").cloned(),
         public_key: None,
         private_key: None,
-            ping_ms: None,
-            flag: None,
+        transport_type: params.get("type").cloned(),
+        transport_path: params.get("path").cloned(),
+        transport_host: params.get("host").cloned(),
+        reality_pbk: params.get("pbk").cloned(),
+        reality_sid: params.get("sid").cloned(),
+        ping_ms: None,
+        flag: None,
     })
 }
 
@@ -132,8 +137,13 @@ fn parse_vmess(data: &str) -> Option<ServerProfile> {
         flow: None,
         public_key: None,
         private_key: None,
-            ping_ms: None,
-            flag: None,
+        transport_type: None,
+        transport_path: None,
+        transport_host: None,
+        reality_pbk: None,
+        reality_sid: None,
+        ping_ms: None,
+        flag: None,
     })
 }
 
@@ -168,6 +178,11 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
                                 flow: None,
                                 public_key: None,
                                 private_key: None,
+                                transport_type: None,
+                                transport_path: None,
+                                transport_host: None,
+                                reality_pbk: None,
+                                reality_sid: None,
                                 ping_ms: None,
                                 flag: None,
                             });
@@ -203,8 +218,13 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
         flow: None,
         public_key: None,
         private_key: None,
-            ping_ms: None,
-            flag: None,
+        transport_type: None,
+        transport_path: None,
+        transport_host: None,
+        reality_pbk: None,
+        reality_sid: None,
+        ping_ms: None,
+        flag: None,
     })
 }
 
@@ -231,11 +251,16 @@ fn parse_trojan(data: &str) -> Option<ServerProfile> {
         password: Some(urlencoding_decode(password)),
         method: None,
         sni: params.get("sni").cloned(),
-        flow: None,
+        flow: params.get("flow").cloned(),
         public_key: None,
         private_key: None,
-            ping_ms: None,
-            flag: None,
+        transport_type: params.get("type").cloned(),
+        transport_path: params.get("path").cloned(),
+        transport_host: params.get("host").cloned(),
+        reality_pbk: params.get("pbk").cloned(),
+        reality_sid: params.get("sid").cloned(),
+        ping_ms: None,
+        flag: None,
     })
 }
 
@@ -265,8 +290,13 @@ fn parse_hysteria2(data: &str) -> Option<ServerProfile> {
         flow: None,
         public_key: None,
         private_key: None,
-            ping_ms: None,
-            flag: None,
+        transport_type: None,
+        transport_path: None,
+        transport_host: None,
+        reality_pbk: None,
+        reality_sid: None,
+        ping_ms: None,
+        flag: None,
     })
 }
 
@@ -298,8 +328,13 @@ fn parse_tuic(data: &str) -> Option<ServerProfile> {
         flow: None,
         public_key: None,
         private_key: None,
-            ping_ms: None,
-            flag: None,
+        transport_type: None,
+        transport_path: None,
+        transport_host: None,
+        reality_pbk: None,
+        reality_sid: None,
+        ping_ms: None,
+        flag: None,
     })
 }
 
@@ -365,6 +400,25 @@ mod tests {
         assert_eq!(p.flow.unwrap(), "xtls-rprx-vision");
         assert_eq!(p.sni.unwrap(), "127.0.0.2");
         assert_eq!(p.name, "Test VLESS");
+    }
+
+    #[test]
+    fn test_parse_vless_with_transport_reality() {
+        let uri = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@server.example.com:443?type=ws&path=%2Fws&host=ws.example.com&security=reality&pbk=abcdef123456&sid=1&sni=example.com&flow=xtls-rprx-vision#VLESS+Reality+WS";
+        let result = parse_uri(uri);
+        assert!(result.is_some(), "VLESS with transport/reality should parse");
+        let p = result.unwrap();
+        assert_eq!(p.protocol, "vless");
+        assert_eq!(p.server, "server.example.com");
+        assert_eq!(p.port, 443);
+        assert_eq!(p.transport_type.unwrap(), "ws");
+        assert_eq!(p.transport_path.unwrap(), "/ws");
+        assert_eq!(p.transport_host.unwrap(), "ws.example.com");
+        assert_eq!(p.reality_pbk.unwrap(), "abcdef123456");
+        assert_eq!(p.reality_sid.unwrap(), "1");
+        assert_eq!(p.sni.unwrap(), "example.com");
+        assert_eq!(p.flow.unwrap(), "xtls-rprx-vision");
+        assert_eq!(p.name, "VLESS Reality WS");
     }
 
     #[test]

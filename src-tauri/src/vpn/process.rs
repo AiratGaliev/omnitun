@@ -115,9 +115,9 @@ impl ProcessManager {
         #[cfg(target_os = "windows")]
         {
             if elevated {
-                // Launch with admin privileges via UAC prompt
+                // Launch with admin privileges via UAC prompt (with env vars for sing-box 1.13 compat)
                 let ps_script = format!(
-                    "Start-Process '{}' -Verb RunAs -ArgumentList 'run','-c','{}' -WindowStyle Hidden -PassThru | Select-Object -ExpandProperty Id",
+                    "Start-Process 'cmd' -Verb RunAs -ArgumentList '/c','set ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true && set ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM=true && set ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true && \"{}\" run -c \"{}\"' -WindowStyle Hidden -PassThru | Select-Object -ExpandProperty Id",
                     binary.replace('\'', "''"),
                     config_path.replace('\'', "''"),
                 );
@@ -141,6 +141,9 @@ impl ProcessManager {
             } else {
                 let child = std::process::Command::new(binary)
                     .args(["run", "-c", config_path])
+                    .env("ENABLE_DEPRECATED_LEGACY_DNS_SERVERS", "true")
+                    .env("ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM", "true")
+                    .env("ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER", "true")
                     .creation_flags(CREATE_NO_WINDOW)
                     .spawn()
                     .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;

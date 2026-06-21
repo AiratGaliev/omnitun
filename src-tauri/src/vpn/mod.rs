@@ -5,6 +5,7 @@ mod process;
 
 use crate::events::emit_traffic;
 use crate::logging::{log, LogLevel, Logger, LogSource};
+use crate::settings::AppSettings;
 use installer::Installer;
 use process::ProcessManager;
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,12 @@ pub struct ServerProfile {
     pub flow: Option<String>,
     pub public_key: Option<String>,
     pub private_key: Option<String>,
+    // Transport and Reality for modern VLESS/Trojan
+    pub transport_type: Option<String>,
+    pub transport_path: Option<String>,
+    pub transport_host: Option<String>,
+    pub reality_pbk: Option<String>,
+    pub reality_sid: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ping_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -115,6 +122,7 @@ impl VpnManager {
         proxy_port: u16,
         routing_mode: &str,
         profile: &ServerProfile,
+        settings: &AppSettings,
     ) -> Result<(), VpnError> {
         let logger = app_handle.state::<Mutex<Logger>>();
         log(
@@ -139,7 +147,7 @@ impl VpnManager {
             include_str!("../../config/base.json")
         };
         let (config_json, stats_port) =
-            config::generate_config(base_template, &self.config_dir, proxy_port, routing_mode, profile)?;
+            config::generate_config(base_template, &self.config_dir, proxy_port, routing_mode, profile, settings)?;
         let config_path = config::write_config(&config_json, &self.config_dir)?;
         log(
             app_handle,
@@ -158,6 +166,32 @@ impl VpnManager {
         );
         let elevated = routing_mode == "vpn";
         self.process_mgr.start(&config_path, elevated).await?;
+
+        // Set system proxy for proxy mode
+        if routing_mode == "proxy" {
+            log(
+                app_handle,
+                &logger,
+                LogLevel::Info,
+                LogSource::Vpn,
+                "Setting system proxy...".into(),
+            );
+            let sysproxy_cfg = sysproxy::Sysproxy {
+                enable: true,
+                host: String::from("127.0.0.1"),
+                port: proxy_port,
+                bypass: String::from("localhost;127.*;10.*;172.16.*;192.168.*"),
+            };
+            if let Err(e) = sysproxy_cfg.set_system_proxy() {
+                log(
+                    app_handle,
+                    &logger,
+                    LogLevel::Warning,
+                    LogSource::Vpn,
+                    format!("Failed to set system proxy: {e}"),
+                );
+            }
+        }
 
         log(
             app_handle,
@@ -218,6 +252,14 @@ impl VpnManager {
     }
 
     pub async fn stop(&self, app_handle: &AppHandle) -> Result<(), VpnError> {
+        // Disable system proxy
+        if let Ok(mut sysproxy) = sysproxy::Sysproxy::get_system_proxy() {
+            if sysproxy.enable {
+                sysproxy.enable = false;
+                let _ = sysproxy.set_system_proxy();
+            }
+        }
+
         let logger = app_handle.state::<Mutex<Logger>>();
         log(
             app_handle,

@@ -1,3 +1,4 @@
+use crate::settings::AppSettings;
 use crate::vpn::{ServerProfile, VpnError};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -15,6 +16,7 @@ pub fn generate_config(
     proxy_port: u16,
     routing_mode: &str,
     server_profile: &ServerProfile,
+    settings: &AppSettings,
 ) -> Result<(String, u16), VpnError> {
     let mut config: Value =
         serde_json::from_str(base_template).map_err(|e| VpnError::Config(e.to_string()))?;
@@ -53,6 +55,23 @@ pub fn generate_config(
         "external_ui": "",
         "secret": ""
     });
+
+    // ── Apply user settings ──────────────────────────────────────────────────
+
+    // 1. Custom DNS server address
+    if settings.custom_dns && !settings.dns_address.is_empty() {
+        if let Some(dns) = config.get_mut("dns") {
+            if let Some(servers) = dns.get_mut("servers").and_then(|s| s.as_array_mut()) {
+                if let Some(remote) = servers.first_mut() {
+                    remote["address"] = json!(settings.dns_address);
+                }
+            }
+        }
+    }
+
+    // 2. Routing rules
+    // Note: GeoIP rules (bypass_ru, allowed/blocked countries) are disabled because
+    // GeoIP database was removed in sing-box 1.12. Feature requires rule-set migration.
 
     let json_string =
         serde_json::to_string_pretty(&config).map_err(|e| VpnError::Config(e.to_string()))?;
@@ -93,10 +112,46 @@ fn build_vless(server_profile: &ServerProfile) -> Value {
     });
 
     if let Some(flow) = &server_profile.flow {
-        outbound["flow"] = json!(flow);
+        if !flow.is_empty() {
+            outbound["flow"] = json!(flow);
+        }
     }
-    if let Some(sni) = &server_profile.sni {
+
+    // Reality TLS (higher priority than regular TLS)
+    if let Some(pbk) = &server_profile.reality_pbk {
+        outbound["tls"] = json!({
+            "enabled": true,
+            "server_name": server_profile.sni.clone().unwrap_or_default(),
+            "reality": {
+                "enabled": true,
+                "public_key": pbk,
+                "short_id": server_profile.reality_sid.clone().unwrap_or_default()
+            }
+        });
+    } else if let Some(sni) = &server_profile.sni {
         set_tls(&mut outbound, sni);
+    }
+
+    // Transport (WebSocket, gRPC)
+    if let Some(t_type) = &server_profile.transport_type {
+        match t_type.as_str() {
+            "ws" => {
+                outbound["transport"] = json!({
+                    "type": "ws",
+                    "path": server_profile.transport_path.clone().unwrap_or_else(|| "/".into()),
+                    "headers": {
+                        "Host": server_profile.transport_host.clone().unwrap_or_default()
+                    }
+                });
+            }
+            "grpc" => {
+                outbound["transport"] = json!({
+                    "type": "grpc",
+                    "service_name": server_profile.transport_path.clone().unwrap_or_default()
+                });
+            }
+            _ => {} // tcp or unknown — no transport block needed
+        }
     }
 
     outbound
@@ -210,14 +265,18 @@ fn set_tls(outbound: &mut Value, sni: &str) {
 mod tests {
     use super::*;
 
-    /// Шаблон клиентского конфига — HTTP inbound (без прав администратора),
-    /// outbounds direct + block, rule_set пустой, final будет заменён на proxy.
+    fn default_settings() -> AppSettings {
+        AppSettings::default()
+    }
+
+    /// Шаблон клиентского конфига — mixed inbound (HTTP + SOCKS5),
+    /// outbounds direct + block + dns-out, route final "proxy".
     fn base_template() -> &'static str {
         r#"{
             "log": { "level": "debug", "timestamp": true },
             "inbounds": [{
-                "type": "http",
-                "tag": "proxy-in",
+                "type": "mixed",
+                "tag": "mixed-in",
                 "listen": "127.0.0.1",
                 "listen_port": 10809
             }],
@@ -236,19 +295,26 @@ mod tests {
     }
 
     /// Шаблон TUN-конфига для VPN-режима — создаёт сетевой интерфейс,
-    /// outbounds direct + block, требует прав администратора.
+    /// outbounds direct + block, DNS сервера с HTTPS-форматом.
     fn vpn_template() -> &'static str {
         r#"{
             "log": { "level": "info", "timestamp": true },
+            "dns": {
+                "servers": [
+                    { "tag": "remote", "address": "https://1.1.1.1/dns-query", "detour": "proxy" },
+                    { "tag": "local", "address": "https://8.8.8.8/dns-query", "detour": "direct" }
+                ],
+                "rules": [
+                    { "outbound": "any", "server": "remote" }
+                ]
+            },
             "inbounds": [{
                 "type": "tun",
                 "tag": "tun-in",
                 "interface_name": "omnitun",
-                "address": "172.19.0.1/30",
+                "address": "172.19.0.1/24",
                 "mtu": 1500,
-                "auto_route": true,
-                "strict_route": true,
-                "stack": "system"
+                "stack": "mixed"
             }],
             "outbounds": [
                 { "type": "direct", "tag": "direct" },
@@ -297,13 +363,33 @@ mod tests {
         }
     }
 
+    /// VLESS+Reality+WebSocket — порт 443, тип ws, pbk Reality
+    fn vless_reality_ws_profile() -> ServerProfile {
+        ServerProfile {
+            id: "test-3".into(),
+            name: "VLESS Reality WS".into(),
+            protocol: "vless".into(),
+            server: "server.example.com".into(),
+            port: 443,
+            uuid: Some("b831381d-6324-4d53-ad4f-8cda48b30811".into()),
+            sni: Some("example.com".into()),
+            flow: Some("xtls-rprx-vision".into()),
+            transport_type: Some("ws".into()),
+            transport_path: Some("/ws".into()),
+            transport_host: Some("ws.example.com".into()),
+            reality_pbk: Some("abcdef123456".into()),
+            reality_sid: Some("1".into()),
+            ..Default::default()
+        }
+    }
+
     fn cache_dir() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("omnitun-cfg-test-{}", std::process::id()))
     }
 
     #[test]
     fn test_vless_plain() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &vless_profile());
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &vless_profile(), &default_settings());
         assert!(
             result.is_ok(),
             "Config generation failed: {:?}",
@@ -329,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_vless_tls() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &vless_tls_profile());
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &vless_tls_profile(), &default_settings());
         assert!(
             result.is_ok(),
             "Config generation failed: {:?}",
@@ -350,12 +436,44 @@ mod tests {
         assert_eq!(tls["server_name"], "localhost");
     }
 
+    #[test]
+    fn test_vless_reality_ws() {
+        let result = generate_config(
+            base_template(), &cache_dir(), 10809, "proxy", &vless_reality_ws_profile(), &default_settings()
+        );
+        assert!(result.is_ok(), "VLESS Reality+WS config failed: {:?}", result.err());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let proxy = &config["outbounds"][2];
+
+        assert_eq!(proxy["type"], "vless");
+        assert_eq!(proxy["server"], "server.example.com");
+        assert_eq!(proxy["server_port"], 443);
+
+        // Reality TLS block
+        let tls = &proxy["tls"];
+        assert_eq!(tls["enabled"], true);
+        assert_eq!(tls["server_name"], "example.com");
+        assert_eq!(tls["reality"]["enabled"], true);
+        assert_eq!(tls["reality"]["public_key"], "abcdef123456");
+        assert_eq!(tls["reality"]["short_id"], "1");
+
+        // WebSocket transport
+        let transport = &proxy["transport"];
+        assert_eq!(transport["type"], "ws");
+        assert_eq!(transport["path"], "/ws");
+        assert_eq!(transport["headers"]["Host"], "ws.example.com");
+
+        // Flow
+        assert_eq!(proxy["flow"], "xtls-rprx-vision");
+    }
+
     // ── VPN mode (TUN) tests ─────────────────────────────────────────────────
 
     /// VPN-режим: генерирует TUN inbound, а не HTTP.
     #[test]
     fn test_vpn_tun_inbound() {
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile());
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &default_settings());
         assert!(result.is_ok(), "VPN config generation failed: {:?}", result.err());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -365,8 +483,7 @@ mod tests {
         assert_eq!(inbounds[0]["type"], "tun", "VPN mode: inbound type is tun");
         assert_eq!(inbounds[0]["tag"], "tun-in");
         assert_eq!(inbounds[0]["interface_name"], "omnitun");
-        assert_eq!(inbounds[0]["address"], "172.19.0.1/30");
-        assert_eq!(inbounds[0]["auto_route"], true);
+        assert_eq!(inbounds[0]["address"], "172.19.0.1/24");
 
         // TUN inbound does NOT get a listen_port — that's only for HTTP proxy
         assert!(
@@ -378,7 +495,7 @@ mod tests {
     /// VPN-режим: outbound server добавляется с tag "proxy", final маршрут совпадает.
     #[test]
     fn test_vpn_outbound_added() {
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_tls_profile());
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_tls_profile(), &default_settings());
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -397,7 +514,7 @@ mod tests {
     /// VPN-режим: clash_api добавляется для сбора статистики трафика.
     #[test]
     fn test_vpn_clash_api_enabled() {
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile());
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &default_settings());
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -412,7 +529,7 @@ mod tests {
     #[test]
     fn test_vpn_absolute_cache_path() {
         let cache = cache_dir();
-        let result = generate_config(vpn_template(), &cache, 1080, "vpn", &vless_profile());
+        let result = generate_config(vpn_template(), &cache, 1080, "vpn", &vless_profile(), &default_settings());
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -429,20 +546,20 @@ mod tests {
     /// Regression: proxy-режим ДОЛЖЕН устанавливать listen_port на inbound.
     #[test]
     fn test_proxy_listen_port_set() {
-        let result = generate_config(base_template(), &cache_dir(), 9999, "proxy", &vless_profile());
+        let result = generate_config(base_template(), &cache_dir(), 9999, "proxy", &vless_profile(), &default_settings());
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
         let inbounds = config["inbounds"].as_array().unwrap();
 
-        assert_eq!(inbounds[0]["type"], "http");
+        assert_eq!(inbounds[0]["type"], "mixed");
         assert_eq!(inbounds[0]["listen_port"], 9999, "Proxy mode: listen_port must be set");
     }
 
     /// Regression: proxy-режим с портом по умолчанию (1080).
     #[test]
     fn test_proxy_default_port() {
-        let result = generate_config(base_template(), &cache_dir(), 1080, "proxy", &vless_profile());
+        let result = generate_config(base_template(), &cache_dir(), 1080, "proxy", &vless_profile(), &default_settings());
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -452,7 +569,7 @@ mod tests {
     /// Regression: proxy-режим — clash_api тоже добавляется.
     #[test]
     fn test_proxy_clash_api_enabled() {
-        let result = generate_config(base_template(), &cache_dir(), 1080, "proxy", &vless_profile());
+        let result = generate_config(base_template(), &cache_dir(), 1080, "proxy", &vless_profile(), &default_settings());
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -469,7 +586,7 @@ mod tests {
             ..vless_profile()
         };
 
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &profile);
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &profile, &default_settings());
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -506,7 +623,7 @@ mod tests {
 
     #[test]
     fn test_vmess() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("vmess"));
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("vmess"), &default_settings());
         assert!(result.is_ok());
         let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "vmess");
@@ -516,7 +633,7 @@ mod tests {
 
     #[test]
     fn test_trojan() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("trojan"));
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("trojan"), &default_settings());
         assert!(result.is_ok());
         let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "trojan");
@@ -526,7 +643,7 @@ mod tests {
 
     #[test]
     fn test_shadowsocks() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("shadowsocks"));
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("shadowsocks"), &default_settings());
         assert!(result.is_ok());
         let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "shadowsocks");
@@ -544,7 +661,7 @@ mod tests {
             public_key: Some("some-public-key".into()),
             ..Default::default()
         };
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &profile);
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &profile, &default_settings());
         assert!(result.is_ok());
         let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "wireguard");
@@ -553,7 +670,7 @@ mod tests {
 
     #[test]
     fn test_hysteria2() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("hysteria2"));
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("hysteria2"), &default_settings());
         assert!(result.is_ok());
         let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "hysteria2");
@@ -563,7 +680,7 @@ mod tests {
 
     #[test]
     fn test_tuic() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("tuic"));
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("tuic"), &default_settings());
         assert!(result.is_ok());
         let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
         assert_eq!(proxy["type"], "tuic");

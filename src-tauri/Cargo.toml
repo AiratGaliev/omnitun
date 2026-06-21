@@ -41,4 +41,5 @@ async-trait = "0.1"
 base64 = "0.22"
 anyhow = "1"
 url = "2"
+sysproxy = "0.3"
 

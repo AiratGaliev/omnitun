@@ -1,7 +1,7 @@
 mod events;
 mod logging;
 mod profile;
-mod settings;
+pub(crate) mod settings;
 mod subscription;
 mod vpn;
 
@@ -38,6 +38,7 @@ struct ProfileState {
 async fn start_vpn(
     app: tauri::AppHandle,
     state: tauri::State<'_, VpnState>,
+    settings_state: tauri::State<'_, Mutex<AppSettings>>,
     profile: ServerProfile,
     routing_mode: String,
     proxy_port: u16,
@@ -54,7 +55,8 @@ async fn start_vpn(
 
     let manager_arc = state.manager.clone();
     let manager = manager_arc.lock().await;
-    match manager.start(&app, proxy_port, &routing_mode, &profile).await {
+    let settings = settings_state.lock().await.clone();
+    match manager.start(&app, proxy_port, &routing_mode, &profile, &settings).await {
         Ok(_) => {
             log(
                 &app,

@@ -74,6 +74,19 @@ impl Installer {
             Self::extract_tar_gz(&bytes, bin_dir, binary_name)?;
         }
 
+        // Fallback: download wintun.dll separately if still missing (Windows)
+        #[cfg(target_os = "windows")]
+        if !bin_dir.join("wintun.dll").exists() {
+            log(
+                app_handle,
+                &logger,
+                LogLevel::Info,
+                LogSource::Installer,
+                "wintun.dll not found in sing-box archive, downloading separately...".into(),
+            );
+            Self::download_wintun(bin_dir).await?;
+        }
+
         let binary_path = bin_dir.join(binary_name);
 
         #[cfg(not(target_os = "windows"))]
@@ -221,6 +234,44 @@ impl Installer {
         {
             "linux-amd64.tar.gz"
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn download_wintun(bin_dir: &Path) -> Result<(), VpnError> {
+        let url = "https://www.wintun.net/builds/wintun-0.14.1.zip";
+        let response = reqwest::get(url)
+            .await
+            .map_err(|e| VpnError::Install(format!("Failed to download wintun: {e}")))?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| VpnError::Install(format!("Failed to read wintun response: {e}")))?;
+
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+            .map_err(|e| VpnError::Install(format!("Failed to open wintun zip: {e}")))?;
+
+        for i in 0..archive.len() {
+            let mut entry = archive
+                .by_index(i)
+                .map_err(|e| VpnError::Install(format!("Failed to read wintun zip entry: {e}")))?;
+
+            if entry.is_dir() {
+                continue;
+            }
+
+            let entry_name = entry.name().to_string();
+            // Inside wintun-0.14.1.zip the DLL is at: wintun-0.14.1/amd64/wintun.dll
+            if entry_name.ends_with("amd64/wintun.dll") {
+                let out_path = bin_dir.join("wintun.dll");
+                let mut out = std::fs::File::create(&out_path)
+                    .map_err(|e| VpnError::Install(format!("Failed to create wintun.dll: {e}")))?;
+                std::io::copy(&mut entry, &mut out)
+                    .map_err(|e| VpnError::Install(format!("Failed to extract wintun.dll: {e}")))?;
+                return Ok(());
+            }
+        }
+
+        Err(VpnError::Install("wintun.dll not found in wintun archive".into()))
     }
 }
 
