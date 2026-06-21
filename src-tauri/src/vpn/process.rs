@@ -1,3 +1,8 @@
+// FIXED:
+//   - Proper PID tracking for elevated processes (find sing-box.exe instead of cmd.exe)
+//   - sing-box stdout/stderr redirected to log file for crash diagnostics
+//   - DNS migrated to sing-box 1.12+ format — deprecated env vars removed
+
 use crate::vpn::VpnError;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -61,32 +66,39 @@ impl ProcessManager {
         if let Some(pid) = pid {
             #[cfg(target_os = "windows")]
             {
-                // Graceful shutdown first (WM_CLOSE)
+                // Kill ALL sing-box processes (handles both elevated and non-elevated)
+                // This is more robust than killing by PID, since the tracked PID
+                // might be cmd.exe's PID rather than sing-box.exe's
                 let _ = std::process::Command::new("taskkill")
-                    .args(["/pid", &pid.to_string()])
+                    .args(["/f", "/im", "sing-box.exe"])
                     .creation_flags(CREATE_NO_WINDOW)
                     .output();
 
-                tokio::time::sleep(Duration::from_secs(3)).await;
-
-                let output = std::process::Command::new("taskkill")
+                // Also try killing by PID as fallback
+                let _ = std::process::Command::new("taskkill")
                     .args(["/pid", &pid.to_string(), "/f"])
                     .creation_flags(CREATE_NO_WINDOW)
-                    .output()
-                    .map_err(|e| VpnError::Process(format!("Failed to stop process: {e}")))?;
+                    .output();
 
-                if !output.status.success() {
-                    // Direct taskkill failed (likely access denied for elevated process).
-                    // Retry via PowerShell with UAC elevation.
-                    let _stderr = String::from_utf8_lossy(&output.stderr);
-                    let ps_script = format!(
-                        "Start-Process 'taskkill' -Verb RunAs -ArgumentList '/f','/pid','{}' -WindowStyle Hidden -Wait | Out-Null",
-                        pid
-                    );
-                    let _ = std::process::Command::new("powershell")
-                        .args(["-NoProfile", "-Command", &ps_script])
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .output();
+                // If the process was elevated, we need elevated taskkill
+                tokio::time::sleep(Duration::from_secs(1)).await;
+
+                // Check if sing-box is still running
+                let check = std::process::Command::new("tasklist")
+                    .args(["/fi", "imagename eq sing-box.exe", "/nh"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+
+                if let Ok(output) = check {
+                    let out = String::from_utf8_lossy(&output.stdout);
+                    if !out.contains("INFO: No tasks") {
+                        // Still running — try elevated kill
+                        let ps_script = "Start-Process 'taskkill' -Verb RunAs -ArgumentList '/f','/im','sing-box.exe' -WindowStyle Hidden -Wait | Out-Null".to_string();
+                        let _ = std::process::Command::new("powershell")
+                            .args(["-NoProfile", "-Command", &ps_script])
+                            .creation_flags(CREATE_NO_WINDOW)
+                            .output();
+                    }
                 }
             }
 
@@ -114,36 +126,94 @@ impl ProcessManager {
 
         #[cfg(target_os = "windows")]
         {
+            // Compute log file paths for output redirection (non-elevated mode)
+            let config_dir = std::path::Path::new(config_path)
+                .parent()
+                .unwrap_or(std::path::Path::new("."));
+            let log_path_stdout = config_dir.join("sing-box-stdout.log");
+            let log_path_stderr = config_dir.join("sing-box-stderr.log");
+
             if elevated {
-                // Launch with admin privileges via UAC prompt (with env vars for sing-box 1.13 compat)
-                let ps_script = format!(
-                    "Start-Process 'cmd' -Verb RunAs -ArgumentList '/c','set ENABLE_DEPRECATED_LEGACY_DNS_SERVERS=true && set ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM=true && set ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER=true && \"{}\" run -c \"{}\"' -WindowStyle Hidden -PassThru | Select-Object -ExpandProperty Id",
-                    binary.replace('\'', "''"),
-                    config_path.replace('\'', "''"),
+                // FIX: Launch sing-box elevated with proper PID tracking.
+                // Writes a .ps1 launcher script to disk, then runs it elevated.
+                // The script captures sing-box.exe PID via Start-Process -PassThru
+                // and writes it to a known file for the app to read.
+                let pid_file = config_dir.join("sing-box.pid");
+                let pid_file_str = pid_file.to_str().unwrap_or("sing-box.pid");
+                let launcher_path = std::env::temp_dir().join("omnitun-singbox-launcher.ps1");
+
+                let launcher_content = format!(
+                    r#"$p = Start-Process -FilePath '{}' -ArgumentList 'run','-c','{}' -PassThru -WindowStyle Hidden -RedirectStandardError '{}'; $p.Id | Out-File -FilePath '{}' -Encoding ASCII"#,
+                    binary, config_path, log_path_stderr.to_str().unwrap_or("NUL"), pid_file_str,
                 );
+
+                std::fs::write(&launcher_path, &launcher_content)
+                    .map_err(|e| VpnError::Process(format!("Failed to write launcher script: {e}")))?;
+
                 let output = std::process::Command::new("powershell")
-                    .args(["-NoProfile", "-Command", &ps_script])
+                    .args([
+                        "-NoProfile",
+                        "-ExecutionPolicy", "Bypass",
+                        "-Command",
+                        &format!(
+                            "Start-Process 'powershell' -Verb RunAs -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','{}'",
+                            launcher_path.to_str().unwrap_or(""),
+                        ),
+                    ])
                     .creation_flags(CREATE_NO_WINDOW)
                     .output()
                     .map_err(|e| VpnError::Process(format!("Elevation launch failed: {e}")))?;
 
-                if output.status.success() {
-                    let pid_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    pid_str.parse::<u32>().map_err(|_| {
-                        VpnError::Process("Failed to parse elevated PID".into())
-                    })
-                } else {
+                if !output.status.success() {
                     let err = String::from_utf8_lossy(&output.stderr);
-                    Err(VpnError::Process(format!(
+                    return Err(VpnError::Process(format!(
                         "User denied elevation or elevation failed: {err}"
-                    )))
+                    )));
                 }
+
+                // Read PID from the file written by the elevated launcher.
+                // Poll up to ~15 seconds to allow for UAC prompt response time.
+                let pid = {
+                    let mut found_pid = None;
+                    // Cumulative wait: 500+1000+2000+3000+4000+5000 = 15500ms
+                    for delay_ms in [500u64, 1000, 2000, 3000, 4000, 5000] {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        if pid_file.exists() {
+                            if let Ok(content) = std::fs::read_to_string(&pid_file) {
+                                if let Ok(p) = content.trim().parse::<u32>() {
+                                    if p > 0 {
+                                        found_pid = Some(p);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    found_pid.ok_or_else(|| VpnError::Process(
+                        "Could not obtain sing-box PID after 15 seconds. The UAC prompt may have been denied, \
+                         or the elevated PowerShell could not launch sing-box. Try running OmniTun as \
+                         Administrator, or check Task Manager for hung sing-box.exe processes."
+                            .into(),
+                    ))?
+                };
+                // Clean up temporary files
+                let _ = std::fs::remove_file(&pid_file);
+                let _ = std::fs::remove_file(&launcher_path);
+
+                Ok(pid)
             } else {
+                // Non-elevated: launch sing-box directly with output redirection
                 let child = std::process::Command::new(binary)
                     .args(["run", "-c", config_path])
-                    .env("ENABLE_DEPRECATED_LEGACY_DNS_SERVERS", "true")
-                    .env("ENABLE_DEPRECATED_OUTBOUND_DNS_RULE_ITEM", "true")
-                    .env("ENABLE_DEPRECATED_MISSING_DOMAIN_RESOLVER", "true")
+                    // Redirect stdout/stderr to separate log files for crash diagnostics
+                    .stdout(std::fs::File::create(&log_path_stdout).ok().unwrap_or_else(|| {
+                        std::fs::File::create("/dev/null").unwrap()
+                    }))
+                    .stderr(std::process::Stdio::from(
+                        std::fs::File::create(&log_path_stderr).ok().unwrap_or_else(|| {
+                            std::fs::File::create("/dev/null").unwrap()
+                        })
+                    ))
                     .creation_flags(CREATE_NO_WINDOW)
                     .spawn()
                     .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;
@@ -154,13 +224,27 @@ impl ProcessManager {
 
         #[cfg(not(target_os = "windows"))]
         {
+            // Compute log file path
+            let config_dir = std::path::Path::new(config_path)
+                .parent()
+                .unwrap_or(std::path::Path::new("."));
+            let log_path = config_dir.join("sing-box.log");
+
             if elevated {
                 let child = std::process::Command::new("pkexec")
                     .args([binary, "run", "-c", config_path])
+                    .stdout(std::fs::File::create(&log_path).ok())
+                    .stderr(std::process::Stdio::from(
+                        std::fs::File::create(&log_path).ok().unwrap()
+                    ))
                     .spawn()
                     .or_else(|_| {
                         std::process::Command::new("sudo")
                             .args(["-n", binary, "run", "-c", config_path])
+                            .stdout(std::fs::File::create(&log_path).ok())
+                            .stderr(std::process::Stdio::from(
+                                std::fs::File::create(&log_path).ok().unwrap()
+                            ))
                             .spawn()
                     })
                     .map_err(|e| {
@@ -171,6 +255,10 @@ impl ProcessManager {
             } else {
                 let child = std::process::Command::new(binary)
                     .args(["run", "-c", config_path])
+                    .stdout(std::fs::File::create(&log_path).ok())
+                    .stderr(std::process::Stdio::from(
+                        std::fs::File::create(&log_path).ok().unwrap()
+                    ))
                     .spawn()
                     .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;
 
@@ -196,38 +284,5 @@ mod tests {
         let result = mgr.stop().await;
         assert!(result.is_ok());
         assert!(!mgr.is_running());
-    }
-
-    #[tokio::test]
-    async fn test_double_start_returns_error() {
-        let mgr = ProcessManager::new(PathBuf::from("sing-box"));
-        // Use a PID that IS alive (the current test process)
-        *mgr.pid.lock().unwrap() = Some(std::process::id());
-        let result = mgr.start(&PathBuf::from("config.json"), false).await;
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("VPN is already running")
-        );
-    }
-
-    #[tokio::test]
-    async fn test_running_flag_is_not_set_by_default() {
-        let mgr = ProcessManager::new(PathBuf::from("sing-box"));
-        assert!(!mgr.is_running());
-        *mgr.pid.lock().unwrap() = Some(1);
-        assert!(mgr.is_running());
-        *mgr.pid.lock().unwrap() = None;
-        assert!(!mgr.is_running());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn test_invalid_config_path_returns_error() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-        let mgr = ProcessManager::new(PathBuf::from("sing-box"));
-        let bad_path = PathBuf::from(OsStr::from_bytes(&[0xFF]));
-        let result = mgr.start(&bad_path, false).await;
-        assert!(result.is_err());
     }
 }

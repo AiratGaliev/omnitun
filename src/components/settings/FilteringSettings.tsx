@@ -62,8 +62,12 @@ export function FilteringSettings() {
     updateSettings({ allowedCountries: newAllowed, blockedCountries: newBlocked });
     const action =
       listType === 'allow'
-        ? settings.allowedCountries.includes(countryCode) ? 'removed from allowed' : 'added to allowed'
-        : settings.blockedCountries.includes(countryCode) ? 'removed from blocked' : 'added to blocked';
+        ? settings.allowedCountries.includes(countryCode)
+          ? 'removed from allowed'
+          : 'added to allowed'
+        : settings.blockedCountries.includes(countryCode)
+          ? 'removed from blocked'
+          : 'added to blocked';
     addLog(`Country ${countryCode} ${action}`, 'info', 'settings');
   };
 
@@ -89,11 +93,19 @@ export function FilteringSettings() {
   return (
     <div className="space-y-4">
       <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-2xl p-6 shadow-sm">
-        <h3 className="font-semibold text-sm text-zinc-100 tracking-wide mb-1">{t('geoNodeRules')}</h3>
+        <h3 className="font-semibold text-sm text-zinc-100 tracking-wide mb-1">
+          {t('geoNodeRules')}
+        </h3>
         <p className="text-xs text-zinc-500 mb-6">{t('geoNodeRulesDesc')}</p>
 
         <div className="space-y-8">
-          <div className={hasBlocked ? 'opacity-50 grayscale transition-all duration-300' : 'transition-all duration-300'}>
+          <div
+            className={
+              hasBlocked
+                ? 'opacity-50 grayscale transition-all duration-300'
+                : 'transition-all duration-300'
+            }
+          >
             <h4 className="font-medium text-emerald-400 text-sm mb-3 flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-emerald-400" />
               {t('allowedList')}
@@ -105,7 +117,9 @@ export function FilteringSettings() {
                   <button
                     key={country.code}
                     disabled={hasBlocked}
-                    onClick={() => { handleToggleCountry(country.code, 'allow'); }}
+                    onClick={() => {
+                      handleToggleCountry(country.code, 'allow');
+                    }}
                     className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all
                       ${isSelected ? 'bg-emerald-500/20 border-emerald-500/50 text-white shadow-inner' : 'bg-zinc-900/60 border-white/5 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60'}
                       ${hasBlocked ? 'cursor-not-allowed' : ''}`}
@@ -119,12 +133,16 @@ export function FilteringSettings() {
             {settings.allowedCountries.length === 0 && !hasBlocked && (
               <p className="text-xs text-zinc-600 mt-2 italic">{t('emptyList')}</p>
             )}
-            {hasBlocked && (
-              <p className="text-xs text-zinc-500 mt-2">{t('alreadyInOther')}</p>
-            )}
+            {hasBlocked && <p className="text-xs text-zinc-500 mt-2">{t('alreadyInOther')}</p>}
           </div>
 
-          <div className={hasAllowed ? 'opacity-50 grayscale transition-all duration-300' : 'transition-all duration-300'}>
+          <div
+            className={
+              hasAllowed
+                ? 'opacity-50 grayscale transition-all duration-300'
+                : 'transition-all duration-300'
+            }
+          >
             <h4 className="font-medium text-red-400 text-sm mb-3 flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-red-400" />
               {t('blockedList')}
@@ -136,7 +154,9 @@ export function FilteringSettings() {
                   <button
                     key={country.code}
                     disabled={hasAllowed}
-                    onClick={() => { handleToggleCountry(country.code, 'block'); }}
+                    onClick={() => {
+                      handleToggleCountry(country.code, 'block');
+                    }}
                     className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all
                       ${isSelected ? 'bg-red-500/20 border-red-500/50 text-white shadow-inner' : 'bg-zinc-900/60 border-white/5 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60'}
                       ${hasAllowed ? 'cursor-not-allowed' : ''}`}
@@ -150,9 +170,7 @@ export function FilteringSettings() {
             {settings.blockedCountries.length === 0 && !hasAllowed && (
               <p className="text-xs text-zinc-600 mt-2 italic">{t('emptyList')}</p>
             )}
-            {hasAllowed && (
-              <p className="text-xs text-zinc-500 mt-2">{t('alreadyInOther')}</p>
-            )}
+            {hasAllowed && <p className="text-xs text-zinc-500 mt-2">{t('alreadyInOther')}</p>}
           </div>
         </div>
 
@@ -162,21 +180,27 @@ export function FilteringSettings() {
             <input
               type="text"
               value={newCode}
-              onChange={(e) => { setNewCode(e.target.value); }}
+              onChange={(e) => {
+                setNewCode(e.target.value);
+              }}
               placeholder={t('countryCode')}
               className="w-20 bg-zinc-950/50 border border-white/10 rounded-xl px-3 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none transition-all shadow-inner"
             />
             <input
               type="text"
               value={newName}
-              onChange={(e) => { setNewName(e.target.value); }}
+              onChange={(e) => {
+                setNewName(e.target.value);
+              }}
               placeholder={t('countryName')}
               className="flex-1 bg-zinc-950/50 border border-white/10 rounded-xl px-3 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none transition-all shadow-inner"
             />
             <input
               type="text"
               value={newFlag}
-              onChange={(e) => { setNewFlag(e.target.value); }}
+              onChange={(e) => {
+                setNewFlag(e.target.value);
+              }}
               placeholder={t('countryFlag')}
               className="w-24 bg-zinc-950/50 border border-white/10 rounded-xl px-3 py-2.5 text-sm focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none transition-all shadow-inner text-center"
             />

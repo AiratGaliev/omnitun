@@ -5,12 +5,21 @@
   },
   "dns": {
     "servers": [
-      { "tag": "remote", "address": "https://1.1.1.1/dns-query", "detour": "direct" },
-      { "tag": "local", "address": "https://8.8.8.8/dns-query", "detour": "direct" }
+      {
+        "type": "https",
+        "tag": "remote",
+        "server": "1.1.1.1",
+        "server_port": 443,
+        "detour": "proxy"
+      },
+      {
+        "type": "https",
+        "tag": "local",
+        "server": "8.8.8.8",
+        "server_port": 443
+      }
     ],
-    "rules": [
-      { "outbound": "any", "server": "remote" }
-    ]
+    "final": "remote"
   },
   "inbounds": [
     {
@@ -19,7 +28,9 @@
       "interface_name": "omnitun",
       "address": "172.19.0.1/24",
       "mtu": 1500,
-      "stack": "mixed"
+      "stack": "gvisor",
+      "auto_route": true,
+      "strict_route": false
     }
   ],
   "outbounds": [
@@ -27,10 +38,15 @@
     { "type": "block", "tag": "block" }
   ],
   "route": {
-    "rules": [
-      { "ip_is_private": true, "outbound": "direct" }
-    ],
+    "rules": [],
     "final": "proxy",
-    "auto_detect_interface": true
+    "auto_detect_interface": true,
+    "default_domain_resolver": "local"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "path": "cache.db"
+    }
   }
 }

@@ -97,12 +97,33 @@ async fn start_vpn(
                             loop {
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                                 if !is_process_alive(pid) {
+                                    // Read sing-box log before clearing state
+                                    let mgr_locked = mgr_arc.lock().await;
+                                    let log_snippet = vpn::config::read_singbox_log(mgr_locked.config_dir())
+                                        .and_then(|log_text| {
+                                            let lines: Vec<&str> = log_text
+                                                .lines()
+                                                .filter(|l| !l.is_empty())
+                                                .collect();
+                                            if lines.len() > 5 {
+                                                Some(lines[lines.len()-5..].join("\n"))
+                                            } else if !lines.is_empty() {
+                                                Some(lines.join("\n"))
+                                            } else {
+                                                None
+                                            }
+                                        });
+                                    let msg = match log_snippet {
+                                        Some(snippet) => format!("VPN process exited unexpectedly. Last log lines:\n{snippet}"),
+                                        None => "VPN process exited unexpectedly".into(),
+                                    };
+                                    drop(mgr_locked); // release lock before logging
                                     log(
                                         &app_clone,
                                         &app_clone.state::<StdMutex<Logger>>(),
                                         LogLevel::Warning,
                                         LogSource::Process,
-                                        "VPN process exited unexpectedly".into(),
+                                        msg,
                                     );
                                     // Clear stale PID so reconnect works
                                     let _ = mgr_arc.lock().await.stop(&app_clone).await;

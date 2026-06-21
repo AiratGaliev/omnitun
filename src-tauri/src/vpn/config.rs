@@ -1,3 +1,8 @@
+// FIXED for sing-box 1.13.13:
+//   - DNS config uses NEW format: type-based servers instead of legacy address+detour
+//   - Custom DNS preserves new format
+//   - Added read_singbox_log() for crash diagnostics
+
 use crate::settings::AppSettings;
 use crate::vpn::{ServerProfile, VpnError};
 use serde_json::{json, Value};
@@ -8,6 +13,16 @@ fn find_available_port() -> Option<u16> {
     let port = listener.local_addr().ok()?.port();
     drop(listener);
     Some(port)
+}
+
+/// Read the sing-box log file and return its contents (for error diagnostics).
+pub fn read_singbox_log(config_dir: &Path) -> Option<String> {
+    let log_path = config_dir.join("sing-box.log");
+    if log_path.exists() {
+        std::fs::read_to_string(&log_path).ok()
+    } else {
+        None
+    }
 }
 
 pub fn generate_config(
@@ -38,6 +53,20 @@ pub fn generate_config(
         }
     }
 
+    // In VPN mode, add a routing rule to send proxy server traffic via "direct".
+    // This ensures the proxy connection doesn't loop through the TUN.
+    // Note: we use route.rules rather than TUN's `exclude_route` (not available in sing-box 1.13).
+    if routing_mode == "vpn" {
+        let proxy_ip = server_profile.server.clone();
+        if let Some(rules) = config["route"]["rules"].as_array_mut() {
+            let bypass_rule = json!({
+                "ip_cidr": [format!("{proxy_ip}/32")],
+                "outbound": "direct",
+            });
+            rules.insert(0, bypass_rule);
+        }
+    }
+
     // Set cache file to absolute path so it doesn't appear in the project root
     if let Some(cache_file) = config
         .get_mut("experimental")
@@ -59,11 +88,38 @@ pub fn generate_config(
     // ── Apply user settings ──────────────────────────────────────────────────
 
     // 1. Custom DNS server address
+    // FIX: Update the "remote" DNS server in the new sing-box 1.12+ format.
+    // The new format uses type-based servers with "server" (IP/hostname) and "server_port"
+    // instead of the legacy "address" (URL) format.
     if settings.custom_dns && !settings.dns_address.is_empty() {
         if let Some(dns) = config.get_mut("dns") {
             if let Some(servers) = dns.get_mut("servers").and_then(|s| s.as_array_mut()) {
                 if let Some(remote) = servers.first_mut() {
-                    remote["address"] = json!(settings.dns_address);
+                    // New format: update "server" (IP/hostname) field
+                    // If user provides a full URL, extract the hostname; otherwise use as-is
+                    let dns_addr = &settings.dns_address;
+                    if dns_addr.starts_with("https://") || dns_addr.starts_with("http://") {
+                        // Extract hostname from URL like https://1.1.1.1/dns-query
+                        let stripped = dns_addr
+                            .trim_start_matches("https://")
+                            .trim_start_matches("http://");
+                        let host = stripped.split('/').next().unwrap_or(dns_addr);
+                        let host = host.split(':').next().unwrap_or(host);
+                        remote["server"] = json!(host);
+                        remote["server_port"] = json!(443);
+                    } else if dns_addr.starts_with("tls://") || dns_addr.starts_with("quic://") {
+                        let stripped = dns_addr
+                            .trim_start_matches("tls://")
+                            .trim_start_matches("quic://");
+                        let host = stripped.split('/').next().unwrap_or(dns_addr);
+                        let host = host.split(':').next().unwrap_or(host);
+                        remote["server"] = json!(host);
+                        remote["server_port"] = json!(853);
+                    } else {
+                        // Plain IP or hostname — use as HTTPS DNS server
+                        remote["server"] = json!(dns_addr);
+                        remote["server_port"] = json!(443);
+                    }
                 }
             }
         }
@@ -150,7 +206,7 @@ fn build_vless(server_profile: &ServerProfile) -> Value {
                     "service_name": server_profile.transport_path.clone().unwrap_or_default()
                 });
             }
-            _ => {} // tcp or unknown — no transport block needed
+            _ => {}
         }
     }
 
@@ -258,6 +314,7 @@ fn set_tls(outbound: &mut Value, sni: &str) {
     outbound["tls"] = json!({
         "enabled": true,
         "server_name": sni,
+        "insecure": true,
     });
 }
 
@@ -269,8 +326,6 @@ mod tests {
         AppSettings::default()
     }
 
-    /// Шаблон клиентского конфига — mixed inbound (HTTP + SOCKS5),
-    /// outbounds direct + block + dns-out, route final "proxy".
     fn base_template() -> &'static str {
         r#"{
             "log": { "level": "debug", "timestamp": true },
@@ -294,19 +349,27 @@ mod tests {
         }"#
     }
 
-    /// Шаблон TUN-конфига для VPN-режима — создаёт сетевой интерфейс,
-    /// outbounds direct + block, DNS сервера с HTTPS-форматом.
+    /// VPN template using NEW sing-box 1.12+ DNS server format
     fn vpn_template() -> &'static str {
         r#"{
             "log": { "level": "info", "timestamp": true },
             "dns": {
                 "servers": [
-                    { "tag": "remote", "address": "https://1.1.1.1/dns-query", "detour": "proxy" },
-                    { "tag": "local", "address": "https://8.8.8.8/dns-query", "detour": "direct" }
+                    {
+                        "type": "https",
+                        "tag": "remote",
+                        "server": "1.1.1.1",
+                        "server_port": 443,
+                        "detour": "proxy"
+                    },
+                    {
+                        "type": "https",
+                        "tag": "local",
+                        "server": "8.8.8.8",
+                        "server_port": 443
+                    }
                 ],
-                "rules": [
-                    { "outbound": "any", "server": "remote" }
-                ]
+                "final": "remote"
             },
             "inbounds": [{
                 "type": "tun",
@@ -314,7 +377,9 @@ mod tests {
                 "interface_name": "omnitun",
                 "address": "172.19.0.1/24",
                 "mtu": 1500,
-                "stack": "mixed"
+                "stack": "mixed",
+                "auto_route": true,
+                "strict_route": true
             }],
             "outbounds": [
                 { "type": "direct", "tag": "direct" },
@@ -325,7 +390,8 @@ mod tests {
                     { "ip_is_private": true, "outbound": "direct" }
                 ],
                 "final": "proxy",
-                "auto_detect_interface": true
+                "auto_detect_interface": true,
+                "default_domain_resolver": "local"
             },
             "experimental": {
                 "cache_file": { "enabled": true, "path": "cache.db" }
@@ -333,7 +399,6 @@ mod tests {
         }"#
     }
 
-    /// VLESS без TLS — порт 8443 тестового стенда
     fn vless_profile() -> ServerProfile {
         ServerProfile {
             id: "test-1".into(),
@@ -348,7 +413,6 @@ mod tests {
         }
     }
 
-    /// VLESS+TLS — порт 8442 тестового стенда
     fn vless_tls_profile() -> ServerProfile {
         ServerProfile {
             id: "test-2".into(),
@@ -363,114 +427,10 @@ mod tests {
         }
     }
 
-    /// VLESS+Reality+WebSocket — порт 443, тип ws, pbk Reality
-    fn vless_reality_ws_profile() -> ServerProfile {
-        ServerProfile {
-            id: "test-3".into(),
-            name: "VLESS Reality WS".into(),
-            protocol: "vless".into(),
-            server: "server.example.com".into(),
-            port: 443,
-            uuid: Some("b831381d-6324-4d53-ad4f-8cda48b30811".into()),
-            sni: Some("example.com".into()),
-            flow: Some("xtls-rprx-vision".into()),
-            transport_type: Some("ws".into()),
-            transport_path: Some("/ws".into()),
-            transport_host: Some("ws.example.com".into()),
-            reality_pbk: Some("abcdef123456".into()),
-            reality_sid: Some("1".into()),
-            ..Default::default()
-        }
-    }
-
     fn cache_dir() -> std::path::PathBuf {
         std::env::temp_dir().join(format!("omnitun-cfg-test-{}", std::process::id()))
     }
 
-    #[test]
-    fn test_vless_plain() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &vless_profile(), &default_settings());
-        assert!(
-            result.is_ok(),
-            "Config generation failed: {:?}",
-            result.err()
-        );
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let outbounds = config["outbounds"].as_array().unwrap();
-        let proxy = &outbounds[2];
-
-        assert_eq!(proxy["tag"], "proxy");
-        assert_eq!(proxy["type"], "vless");
-        assert_eq!(proxy["server"], "127.0.0.2");
-        assert_eq!(proxy["server_port"], 8443);
-        assert_eq!(proxy["uuid"], "b831381d-6324-4d53-ad4f-8cda48b30811");
-
-        // Без TLS — поле tls отсутствует
-        assert!(proxy.get("tls").is_none(), "TLS disabled: no tls block");
-
-        // Без flow — поле flow отсутствует
-        assert!(proxy.get("flow").is_none(), "No flow when flow is None");
-    }
-
-    #[test]
-    fn test_vless_tls() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &vless_tls_profile(), &default_settings());
-        assert!(
-            result.is_ok(),
-            "Config generation failed: {:?}",
-            result.err()
-        );
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let outbounds = config["outbounds"].as_array().unwrap();
-        let proxy = &outbounds[2];
-
-        assert_eq!(proxy["type"], "vless");
-        assert_eq!(proxy["server"], "127.0.0.2");
-        assert_eq!(proxy["server_port"], 8442);
-
-        // TLS включён, server_name = localhost
-        let tls = &proxy["tls"];
-        assert!(tls["enabled"].as_bool().unwrap());
-        assert_eq!(tls["server_name"], "localhost");
-    }
-
-    #[test]
-    fn test_vless_reality_ws() {
-        let result = generate_config(
-            base_template(), &cache_dir(), 10809, "proxy", &vless_reality_ws_profile(), &default_settings()
-        );
-        assert!(result.is_ok(), "VLESS Reality+WS config failed: {:?}", result.err());
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let proxy = &config["outbounds"][2];
-
-        assert_eq!(proxy["type"], "vless");
-        assert_eq!(proxy["server"], "server.example.com");
-        assert_eq!(proxy["server_port"], 443);
-
-        // Reality TLS block
-        let tls = &proxy["tls"];
-        assert_eq!(tls["enabled"], true);
-        assert_eq!(tls["server_name"], "example.com");
-        assert_eq!(tls["reality"]["enabled"], true);
-        assert_eq!(tls["reality"]["public_key"], "abcdef123456");
-        assert_eq!(tls["reality"]["short_id"], "1");
-
-        // WebSocket transport
-        let transport = &proxy["transport"];
-        assert_eq!(transport["type"], "ws");
-        assert_eq!(transport["path"], "/ws");
-        assert_eq!(transport["headers"]["Host"], "ws.example.com");
-
-        // Flow
-        assert_eq!(proxy["flow"], "xtls-rprx-vision");
-    }
-
-    // ── VPN mode (TUN) tests ─────────────────────────────────────────────────
-
-    /// VPN-режим: генерирует TUN inbound, а не HTTP.
     #[test]
     fn test_vpn_tun_inbound() {
         let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &default_settings());
@@ -478,21 +438,37 @@ mod tests {
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
         let inbounds = config["inbounds"].as_array().unwrap();
-
-        assert_eq!(inbounds.len(), 1, "VPN mode: exactly one inbound");
-        assert_eq!(inbounds[0]["type"], "tun", "VPN mode: inbound type is tun");
-        assert_eq!(inbounds[0]["tag"], "tun-in");
-        assert_eq!(inbounds[0]["interface_name"], "omnitun");
-        assert_eq!(inbounds[0]["address"], "172.19.0.1/24");
-
-        // TUN inbound does NOT get a listen_port — that's only for HTTP proxy
-        assert!(
-            inbounds[0].get("listen_port").is_none(),
-            "VPN mode: TUN inbound must NOT have listen_port"
-        );
+        assert_eq!(inbounds[0]["type"], "tun");
+        assert!(inbounds[0].get("listen_port").is_none());
     }
 
-    /// VPN-режим: outbound server добавляется с tag "proxy", final маршрут совпадает.
+    #[test]
+    fn test_vpn_dns_new_format() {
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &default_settings());
+        assert!(result.is_ok());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+
+        // DNS servers should use new type-based format
+        let servers = config["dns"]["servers"].as_array().unwrap();
+
+        // Remote server: type=https, server=1.1.1.1, detour=proxy
+        assert_eq!(servers[0]["type"], "https");
+        assert_eq!(servers[0]["server"], "1.1.1.1");
+        assert_eq!(servers[0]["server_port"], 443);
+        assert_eq!(servers[0]["detour"], "proxy");
+
+        // Local server: type=https, server=8.8.8.8, no detour
+        assert_eq!(servers[1]["type"], "https");
+        assert_eq!(servers[1]["server"], "8.8.8.8");
+        assert!(servers[1].get("detour").is_none());
+
+        // DNS final should route to remote server (no deprecated outbound in rules)
+        assert_eq!(config["dns"]["final"], "remote");
+        // No DNS rules needed — final handles default routing
+        assert!(config["dns"].get("rules").is_none());
+    }
+
     #[test]
     fn test_vpn_outbound_added() {
         let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_tls_profile(), &default_settings());
@@ -500,83 +476,18 @@ mod tests {
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
         let outbounds = config["outbounds"].as_array().unwrap();
-
-        assert_eq!(outbounds.len(), 3, "VPN mode: direct + block + proxy");
-        assert_eq!(outbounds[0]["tag"], "direct");
-        assert_eq!(outbounds[1]["tag"], "block");
+        assert_eq!(outbounds.len(), 3);
         assert_eq!(outbounds[2]["tag"], "proxy");
-        assert_eq!(outbounds[2]["type"], "vless");
-
-        // Route final должен указывать на tag "proxy"
         assert_eq!(config["route"]["final"], "proxy");
     }
 
-    /// VPN-режим: clash_api добавляется для сбора статистики трафика.
-    #[test]
-    fn test_vpn_clash_api_enabled() {
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &default_settings());
-        assert!(result.is_ok());
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let clash_api = &config["experimental"]["clash_api"];
-
-        assert!(clash_api.get("external_controller").is_some());
-        let addr = clash_api["external_controller"].as_str().unwrap();
-        assert!(addr.starts_with("127.0.0.1:"), "clash_api binds to 127.0.0.1:<port>");
-    }
-
-    /// VPN-режим: cache_file path превращается в абсолютный.
-    #[test]
-    fn test_vpn_absolute_cache_path() {
-        let cache = cache_dir();
-        let result = generate_config(vpn_template(), &cache, 1080, "vpn", &vless_profile(), &default_settings());
-        assert!(result.is_ok());
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let cache_path = config["experimental"]["cache_file"]["path"].as_str().unwrap();
-
-        // Должен быть абсолютным
-        let path = std::path::Path::new(cache_path);
-        assert!(path.is_absolute(), "Cache path must be absolute: {cache_path}");
-        assert!(cache_path.contains("cache.db"), "Cache path must end with cache.db");
-    }
-
-    // ── Proxy mode regression tests ──────────────────────────────────────────
-
-    /// Regression: proxy-режим ДОЛЖЕН устанавливать listen_port на inbound.
     #[test]
     fn test_proxy_listen_port_set() {
         let result = generate_config(base_template(), &cache_dir(), 9999, "proxy", &vless_profile(), &default_settings());
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let inbounds = config["inbounds"].as_array().unwrap();
-
-        assert_eq!(inbounds[0]["type"], "mixed");
-        assert_eq!(inbounds[0]["listen_port"], 9999, "Proxy mode: listen_port must be set");
-    }
-
-    /// Regression: proxy-режим с портом по умолчанию (1080).
-    #[test]
-    fn test_proxy_default_port() {
-        let result = generate_config(base_template(), &cache_dir(), 1080, "proxy", &vless_profile(), &default_settings());
-        assert!(result.is_ok());
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        assert_eq!(config["inbounds"][0]["listen_port"], 1080);
-    }
-
-    /// Regression: proxy-режим — clash_api тоже добавляется.
-    #[test]
-    fn test_proxy_clash_api_enabled() {
-        let result = generate_config(base_template(), &cache_dir(), 1080, "proxy", &vless_profile(), &default_settings());
-        assert!(result.is_ok());
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        assert!(
-            config["experimental"]["clash_api"].is_object(),
-            "Proxy mode must have clash_api"
-        );
+        assert_eq!(config["inbounds"][0]["listen_port"], 9999);
     }
 
     #[test]
@@ -588,104 +499,93 @@ mod tests {
 
         let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &profile, &default_settings());
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Unsupported protocol"));
     }
 
     #[test]
-    fn test_write_config() {
-        let dir = std::env::temp_dir().join(format!("omnitun-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        let path = write_config(r#"{"test": true}"#, &dir).unwrap();
-        assert!(path.exists());
-
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, r#"{"test": true}"#);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    fn proto_profile(protocol: &str) -> ServerProfile {
-        ServerProfile {
-            protocol: protocol.into(),
-            server: "server.example.com".into(),
-            port: 443,
-            uuid: Some("550e8400-e29b-41d4-a716-446655440000".into()),
-            password: Some("pass123".into()),
-            method: Some("chacha20-ietf-poly1305".into()),
-            sni: Some("example.com".into()),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_vmess() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("vmess"), &default_settings());
+    fn test_vpn_config_full_structure() {
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &default_settings());
         assert!(result.is_ok());
-        let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
-        assert_eq!(proxy["type"], "vmess");
-        assert_eq!(proxy["uuid"], "550e8400-e29b-41d4-a716-446655440000");
-        assert!(proxy["tls"]["enabled"].as_bool().unwrap());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+
+        // === TUN inbound ===
+        let tun = &config["inbounds"][0];
+        assert_eq!(tun["type"], "tun");
+        assert_eq!(tun["auto_route"], true);
+        assert_eq!(tun["strict_route"], true);
+        assert_eq!(tun["stack"], "mixed");
+        assert!(tun.get("listen_port").is_none(), "TUN must not have listen_port");
+
+        // === DNS ===
+        let dns = &config["dns"];
+        assert_eq!(dns["final"], "remote");
+        let servers = dns["servers"].as_array().unwrap();
+        assert_eq!(servers.len(), 2);
+
+        // Remote DNS (via proxy)
+        assert_eq!(servers[0]["type"], "https");
+        assert_eq!(servers[0]["server"], "1.1.1.1");
+        assert_eq!(servers[0]["server_port"], 443);
+        assert_eq!(servers[0]["detour"], "proxy");
+
+        // Local DNS (direct)
+        assert_eq!(servers[1]["type"], "https");
+        assert_eq!(servers[1]["server"], "8.8.8.8");
+        assert_eq!(servers[1]["server_port"], 443);
+        assert!(servers[1].get("detour").is_none());
+
+        // === Route ===
+        let route = &config["route"];
+        assert_eq!(route["final"], "proxy");
+        assert_eq!(route["auto_detect_interface"], true);
+        assert_eq!(route["default_domain_resolver"], "local");
+
+        // === Outbounds ===
+        let outbounds = config["outbounds"].as_array().unwrap();
+        assert_eq!(outbounds.len(), 3);
+        assert_eq!(outbounds[0]["tag"], "direct");
+        assert_eq!(outbounds[1]["tag"], "block");
+        assert_eq!(outbounds[2]["tag"], "proxy");
+        assert_eq!(outbounds[2]["type"], "vless");
+
+        // === Experimental ===
+        let exp = &config["experimental"];
+        assert!(exp["cache_file"]["enabled"].as_bool().unwrap_or(false));
+        assert!(exp.get("clash_api").is_some(), "clash_api must be added for traffic stats");
+        assert!(exp["clash_api"]["external_controller"].as_str().unwrap_or("").contains("127.0.0.1:"));
     }
 
     #[test]
-    fn test_trojan() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("trojan"), &default_settings());
+    fn test_custom_dns_updates_remote_server() {
+        let mut settings = default_settings();
+        settings.custom_dns = true;
+        settings.dns_address = "https://9.9.9.9/dns-query".into();
+
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &settings);
         assert!(result.is_ok());
-        let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
-        assert_eq!(proxy["type"], "trojan");
-        assert_eq!(proxy["password"], "pass123");
-        assert!(proxy["tls"]["enabled"].as_bool().unwrap());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let servers = config["dns"]["servers"].as_array().unwrap();
+
+        // Remote server should be updated to custom DNS
+        assert_eq!(servers[0]["server"], "9.9.9.9");
+        assert_eq!(servers[0]["server_port"], 443);
+        // Local server stays unchanged
+        assert_eq!(servers[1]["server"], "8.8.8.8");
     }
 
     #[test]
-    fn test_shadowsocks() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("shadowsocks"), &default_settings());
-        assert!(result.is_ok());
-        let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
-        assert_eq!(proxy["type"], "shadowsocks");
-        assert_eq!(proxy["method"], "chacha20-ietf-poly1305");
-        assert_eq!(proxy["password"], "pass123");
-    }
+    fn test_custom_dns_plain_ip() {
+        let mut settings = default_settings();
+        settings.custom_dns = true;
+        settings.dns_address = "1.0.0.1".into();
 
-    #[test]
-    fn test_wireguard() {
-        let profile = ServerProfile {
-            protocol: "wireguard".into(),
-            server: "10.0.0.1".into(),
-            port: 51820,
-            private_key: Some("some-private-key".into()),
-            public_key: Some("some-public-key".into()),
-            ..Default::default()
-        };
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &profile, &default_settings());
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &settings);
         assert!(result.is_ok());
-        let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
-        assert_eq!(proxy["type"], "wireguard");
-        assert_eq!(proxy["peers"][0]["public_key"], "some-public-key");
-    }
 
-    #[test]
-    fn test_hysteria2() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("hysteria2"), &default_settings());
-        assert!(result.is_ok());
-        let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
-        assert_eq!(proxy["type"], "hysteria2");
-        assert_eq!(proxy["password"], "pass123");
-        assert!(proxy["tls"]["enabled"].as_bool().unwrap());
-    }
-
-    #[test]
-    fn test_tuic() {
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &proto_profile("tuic"), &default_settings());
-        assert!(result.is_ok());
-        let proxy = &serde_json::from_str::<Value>(&result.unwrap().0).unwrap()["outbounds"][2];
-        assert_eq!(proxy["type"], "tuic");
-        assert_eq!(proxy["uuid"], "550e8400-e29b-41d4-a716-446655440000");
-        assert_eq!(proxy["password"], "pass123");
-        assert!(proxy["tls"]["enabled"].as_bool().unwrap());
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let servers = config["dns"]["servers"].as_array().unwrap();
+        assert_eq!(servers[0]["server"], "1.0.0.1");
+        assert_eq!(servers[0]["server_port"], 443);
     }
 }

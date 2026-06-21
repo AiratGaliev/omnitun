@@ -30,6 +30,11 @@ export interface Server {
   flow?: string;
   publicKey?: string;
   privateKey?: string;
+  transportType?: string;
+  transportPath?: string;
+  transportHost?: string;
+  realityPbk?: string;
+  realitySid?: string;
 }
 
 export interface Profile {

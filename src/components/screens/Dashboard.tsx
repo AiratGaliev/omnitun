@@ -38,8 +38,12 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   const { t } = useTranslation();
   const formatElapsed = (since: number): string => {
     const diff = Math.floor((Date.now() - since) / 1000);
-    const h = Math.floor(diff / 3600).toString().padStart(2, '0');
-    const m = Math.floor((diff % 3600) / 60).toString().padStart(2, '0');
+    const h = Math.floor(diff / 3600)
+      .toString()
+      .padStart(2, '0');
+    const m = Math.floor((diff % 3600) / 60)
+      .toString()
+      .padStart(2, '0');
     const s = (diff % 60).toString().padStart(2, '0');
     return `${h}:${m}:${s}`;
   };
@@ -333,7 +337,11 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 </p>
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-semibold text-zinc-200">
-                    {isConnected ? (activeServer?.protocol ? formatProtocol(activeServer.protocol) : 'Unknown') : t('standby')}
+                    {isConnected
+                      ? activeServer?.protocol
+                        ? formatProtocol(activeServer.protocol)
+                        : 'Unknown'
+                      : t('standby')}
                   </span>
                   <span
                     className={`text-xs font-mono px-2 py-1 rounded-md ${isConnected ? 'bg-emerald-500/10 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}

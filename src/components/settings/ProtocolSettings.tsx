@@ -45,8 +45,12 @@ export function ProtocolSettings() {
     updateSettings({ allowedProtocols: newAllowed, blockedProtocols: newBlocked });
     const action =
       listType === 'allow'
-        ? settings.allowedProtocols.includes(code) ? 'removed from allowed' : 'added to allowed'
-        : settings.blockedProtocols.includes(code) ? 'removed from blocked' : 'added to blocked';
+        ? settings.allowedProtocols.includes(code)
+          ? 'removed from allowed'
+          : 'added to allowed'
+        : settings.blockedProtocols.includes(code)
+          ? 'removed from blocked'
+          : 'added to blocked';
     addLog(`Protocol ${code} ${action}`, 'info', 'settings');
   };
 
@@ -66,7 +70,9 @@ export function ProtocolSettings() {
       <button
         key={code}
         disabled={isDisabled}
-        onClick={() => { handleToggleProtocol(code, listType); }}
+        onClick={() => {
+          handleToggleProtocol(code, listType);
+        }}
         className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all
           ${
             isSelected
@@ -85,11 +91,19 @@ export function ProtocolSettings() {
   return (
     <div className="space-y-4">
       <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-2xl p-6 shadow-sm">
-        <h3 className="font-semibold text-sm text-zinc-100 tracking-wide mb-1">{t('protocolRules')}</h3>
+        <h3 className="font-semibold text-sm text-zinc-100 tracking-wide mb-1">
+          {t('protocolRules')}
+        </h3>
         <p className="text-xs text-zinc-500 mb-6">{t('protocolRulesDesc')}</p>
 
         <div className="space-y-8">
-          <div className={hasBlocked ? 'opacity-50 grayscale transition-all duration-300' : 'transition-all duration-300'}>
+          <div
+            className={
+              hasBlocked
+                ? 'opacity-50 grayscale transition-all duration-300'
+                : 'transition-all duration-300'
+            }
+          >
             <h4 className="font-medium text-emerald-400 text-sm mb-3 flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-emerald-400" />
               {t('protocolAllowedList')}
@@ -102,12 +116,16 @@ export function ProtocolSettings() {
             {settings.allowedProtocols.length === 0 && !hasBlocked && (
               <p className="text-xs text-zinc-600 mt-2 italic">{t('emptyProtocolList')}</p>
             )}
-            {hasBlocked && (
-              <p className="text-xs text-zinc-500 mt-2">{t('alreadyInOther')}</p>
-            )}
+            {hasBlocked && <p className="text-xs text-zinc-500 mt-2">{t('alreadyInOther')}</p>}
           </div>
 
-          <div className={hasAllowed ? 'opacity-50 grayscale transition-all duration-300' : 'transition-all duration-300'}>
+          <div
+            className={
+              hasAllowed
+                ? 'opacity-50 grayscale transition-all duration-300'
+                : 'transition-all duration-300'
+            }
+          >
             <h4 className="font-medium text-red-400 text-sm mb-3 flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-red-400" />
               {t('protocolBlockedList')}
@@ -120,9 +138,7 @@ export function ProtocolSettings() {
             {settings.blockedProtocols.length === 0 && !hasAllowed && (
               <p className="text-xs text-zinc-600 mt-2 italic">{t('emptyProtocolList')}</p>
             )}
-            {hasAllowed && (
-              <p className="text-xs text-zinc-500 mt-2">{t('alreadyInOther')}</p>
-            )}
+            {hasAllowed && <p className="text-xs text-zinc-500 mt-2">{t('alreadyInOther')}</p>}
           </div>
         </div>
       </div>

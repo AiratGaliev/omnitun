@@ -1,4 +1,4 @@
-mod config;
+pub mod config;
 pub mod geoip;
 pub mod installer;
 mod process;
@@ -9,7 +9,7 @@ use crate::settings::AppSettings;
 use installer::Installer;
 use process::ProcessManager;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -167,7 +167,8 @@ impl VpnManager {
         let elevated = routing_mode == "vpn";
         self.process_mgr.start(&config_path, elevated).await?;
 
-        // Set system proxy for proxy mode
+        // Set system proxy for proxy mode (TCP via system proxy, UDP via TUN if present)
+        // VPN mode relies solely on TUN (auto_route + gVisor) for all traffic.
         if routing_mode == "proxy" {
             log(
                 app_handle,
@@ -273,6 +274,10 @@ impl VpnManager {
 
     pub fn process_pid(&self) -> Option<u32> {
         *self.process_mgr.pid()
+    }
+
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
     }
 
     pub fn status(&self) -> VpnStatus {

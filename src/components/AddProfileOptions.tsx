@@ -1,11 +1,11 @@
-import {useState} from 'react';
-import {AnimatePresence, motion} from 'framer-motion';
-import {Clipboard, Plus, X} from 'lucide-react';
-import {toast} from 'sonner';
-import {invoke} from '@tauri-apps/api/core';
-import {readText} from '@tauri-apps/plugin-clipboard-manager';
-import {useTranslation} from '@/hooks/useTranslation';
-import {useVPNStore} from '@/store';
+import { useState } from 'react';
+import { AnimatePresence, motion } from 'framer-motion';
+import { Clipboard, Plus, X } from 'lucide-react';
+import { toast } from 'sonner';
+import { invoke } from '@tauri-apps/api/core';
+import { readText } from '@tauri-apps/plugin-clipboard-manager';
+import { useTranslation } from '@/hooks/useTranslation';
+import { useVPNStore } from '@/store';
 import * as z from 'zod';
 
 const manualSchema = z.object({
@@ -73,7 +73,11 @@ export function AddProfileOptions({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       useVPNStore.getState().addLog(`Clipboard error: ${msg}`, 'error', 'subscription');
-      invoke('log_message', {level: 'error', source: 'subscription', message: `Clipboard error: ${msg}`}).catch(() => undefined);
+      invoke('log_message', {
+        level: 'error',
+        source: 'subscription',
+        message: `Clipboard error: ${msg}`,
+      }).catch(() => undefined);
       toast.error(t('clipboardErrMsg'), { description: msg, duration: 4000 });
     }
   };
