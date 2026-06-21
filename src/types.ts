@@ -54,7 +54,7 @@ export interface CustomCountry {
 
 export interface Settings {
   acceptTerms: boolean;
-  routingMode: 'vpn' | 'proxy';
+  routingMode: 'vpn' | 'system-proxy' | 'local-proxy';
   proxyPort: number;
   bypassRu: boolean;
   startWithWindows: boolean;

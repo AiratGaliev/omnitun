@@ -123,7 +123,8 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                   <SegmentedControl
                     options={[
                       { id: 'vpn', label: t('vpnMode') },
-                      { id: 'proxy', label: t('proxyMode') },
+                      { id: 'system-proxy', label: t('systemProxyMode') },
+                      { id: 'local-proxy', label: t('proxyMode') },
                     ]}
                     value={settings.routingMode}
                     onChange={(val) => {
@@ -145,9 +146,13 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                         className="absolute inset-0 flex flex-col items-center justify-start text-center"
                       >
                         <p className="text-xs text-zinc-400 font-medium">
-                          {settings.routingMode === 'vpn' ? t('vpnModeDesc') : t('proxyModeDesc')}
+                          {settings.routingMode === 'vpn'
+                            ? t('vpnModeDesc')
+                            : settings.routingMode === 'system-proxy'
+                              ? t('systemProxyModeDesc')
+                              : t('proxyModeDesc')}
                         </p>
-                        {settings.routingMode === 'proxy' && (
+                        {(settings.routingMode === 'system-proxy' || settings.routingMode === 'local-proxy') && (
                           <motion.div className="flex items-center justify-between gap-3 mt-3 bg-zinc-900/80 w-37.5 rounded-xl border border-white/10 p-2 px-4 transition-all shadow-inner focus-within:ring-2 focus-within:ring-emerald-500/30 focus-within:border-emerald-500/50">
                             <span className="text-xs text-zinc-500 font-semibold tracking-wide uppercase">
                               {t('proxyPort')}

@@ -46,8 +46,8 @@ pub fn generate_config(
         ));
     }
 
-    // Set proxy listen port from user settings (HTTP proxy only — TUN doesn't use listen_port)
-    if routing_mode == "proxy" {
+    // Set proxy listen port from user settings (HTTP/SOCKS proxy — set for all proxy modes)
+    if routing_mode == "proxy" || routing_mode == "local-proxy" || routing_mode == "system-proxy" {
         if let Some(inbound) = config["inbounds"].get_mut(0) {
             inbound["listen_port"] = json!(proxy_port);
         }

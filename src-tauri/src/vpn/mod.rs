@@ -167,9 +167,10 @@ impl VpnManager {
         let elevated = routing_mode == "vpn";
         self.process_mgr.start(&config_path, elevated).await?;
 
-        // Set system proxy for proxy mode (TCP via system proxy, UDP via TUN if present)
+        // Set system proxy for system-proxy mode (TCP via system proxy, UDP via TUN if present)
         // VPN mode relies solely on TUN (auto_route + gVisor) for all traffic.
-        if routing_mode == "proxy" {
+        // Local proxy mode (local-proxy) starts a mixed inbound on localhost without system proxy.
+        if routing_mode == "proxy" || routing_mode == "system-proxy" {
             log(
                 app_handle,
                 &logger,

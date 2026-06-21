@@ -293,6 +293,10 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   loadSettings: async () => {
     try {
       const result = await invoke<Settings>('get_settings');
+      // Migration: old 'proxy' mode → 'system-proxy'
+      if ((result as { routingMode: string }).routingMode === 'proxy') {
+        (result as { routingMode: string }).routingMode = 'system-proxy';
+      }
       set({ settings: result });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Unknown error';
