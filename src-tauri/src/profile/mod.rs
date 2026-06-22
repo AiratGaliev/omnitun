@@ -8,15 +8,28 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Semaphore;
 
-/// Get the user-configured proxy port when sing-box is running.
+/// Get proxy port to use for subscription fetch: try running proxy first,
+/// then configured port as fallback.
 fn proxy_port(app: &AppHandle) -> Option<u16> {
     use crate::settings::AppSettings;
+    // If sing-box is running, use its proxy port
     if crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-        app.try_state::<Mutex<AppSettings>>()
-            .and_then(|s| s.lock().ok().map(|s| s.proxy_port))
-    } else {
-        None
+        if let Some(settings) = app.try_state::<Mutex<AppSettings>>() {
+            if let Ok(settings) = settings.lock() {
+                return Some(settings.proxy_port);
+            }
+        }
     }
+    // Fallback: always try the configured proxy port — may connect if the
+    // previous sing-box instance is still running, or user has external proxy
+    if let Some(settings) = app.try_state::<Mutex<AppSettings>>() {
+        if let Ok(settings) = settings.lock() {
+            if settings.proxy_port > 0 {
+                return Some(settings.proxy_port);
+            }
+        }
+    }
+    None
 }
 
 pub struct ProfileManager {
@@ -190,7 +203,53 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         );
     }
 
-    // 2. TCP ping — up to 50 concurrent connections, 3-second timeout each
+    // 2. Apply user filters (country, protocol) from settings
+    if let Some(settings) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
+        if let Ok(settings) = settings.lock() {
+            let total_before = unique.len();
+            unique.retain(|s| {
+                // Filter by protocol
+                if !settings.allowed_protocols.is_empty() {
+                    if !settings.allowed_protocols.contains(&s.protocol) {
+                        return false;
+                    }
+                }
+                if !settings.blocked_protocols.is_empty() {
+                    if settings.blocked_protocols.contains(&s.protocol) {
+                        return false;
+                    }
+                }
+                // Filter by country (flag must be resolved first)
+                if !settings.allowed_countries.is_empty() {
+                    if let Some(ref flag) = s.flag {
+                        if !settings.allowed_countries.contains(flag) {
+                            return false;
+                        }
+                    }
+                }
+                if !settings.blocked_countries.is_empty() {
+                    if let Some(ref flag) = s.flag {
+                        if settings.blocked_countries.contains(flag) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            });
+            let filtered = total_before - unique.len();
+            if filtered > 0 {
+                log(
+                    app,
+                    &logger,
+                    LogLevel::Info,
+                    LogSource::Subscription,
+                    format!("Filtered {filtered} server(s) by country/protocol settings"),
+                );
+            }
+        }
+    }
+
+    // 3. TCP ping — up to 50 concurrent connections, 3-second timeout each
     let unique_count = unique.len();
     log(
         app,
@@ -260,14 +319,27 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         format!("{} server(s) passed and saved", alive.len()),
     );
 
-    // 3. Real latency test via Clash API — start a temporary sing-box with all servers as outbounds
+    // 4. Real latency test via Clash API — start a temporary sing-box with all servers as outbounds
     if !alive.is_empty() {
         let updated = test_servers_via_singbox_batch(app, &alive).await;
-        if let Ok(updated) = updated {
+        if let Ok(mut updated) = updated {
+            // Sort by ping (fastest first), unknown pings last
+            updated.sort_by(|a, b| a.ping_ms.unwrap_or(u64::MAX).cmp(&b.ping_ms.unwrap_or(u64::MAX)));
+            if let Some(fastest) = updated.first() {
+                log(
+                    app,
+                    &logger,
+                    LogLevel::Info,
+                    LogSource::Subscription,
+                    format!("Fastest server: {} ({} ms)", fastest.name, fastest.ping_ms.unwrap_or(0)),
+                );
+            }
             return updated;
         }
     }
 
+    // Fallback: sort alive servers by TCP ping
+    alive.sort_by(|a, b| a.ping_ms.unwrap_or(u64::MAX).cmp(&b.ping_ms.unwrap_or(u64::MAX)));
     alive
 }
 

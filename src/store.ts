@@ -238,10 +238,12 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         const newProfiles = state.profiles.map((p) => (p.id === id ? { ...p, ...updated } : p));
         const allServers = newProfiles.flatMap((p) => p.servers);
         const activeServerStillExists = allServers.some((s) => s.id === state.activeServer?.id);
+        // Auto-select fastest when setting is enabled or current server is gone
+        const autoSelect = state.settings.autoConnectFastest || !activeServerStillExists;
         return {
           profiles: newProfiles,
           servers: allServers,
-          activeServer: activeServerStillExists ? state.activeServer : (allServers[0] ?? null),
+          activeServer: autoSelect ? (allServers[0] ?? null) : state.activeServer,
         };
       });
       get().addLog(
@@ -262,11 +264,11 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       const profiles = results.map(mapRustProfile);
       const allServers = profiles.flatMap((p) => p.servers);
       const state = get();
+      const autoSelect = state.settings.autoConnectFastest || !state.activeServer;
       set({
         profiles,
         servers: allServers,
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-        activeServer: state.activeServer ?? allServers[0] ?? null,
+        activeServer: autoSelect ? (allServers[0] ?? null) : state.activeServer,
       });
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Unknown error';

@@ -9,7 +9,7 @@ use crate::settings::AppSettings;
 use installer::Installer;
 use process::ProcessManager;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -18,6 +18,17 @@ use tauri::{AppHandle, Manager};
 
 /// Current Clash API port (0 = not running). Set by config.rs on each start.
 pub(crate) static CLASH_API_PORT: AtomicU16 = AtomicU16::new(0);
+
+/// Last connected profile — stored for auto-reconnect on watchdog exit.
+pub(crate) static LAST_PROFILE: std::sync::Mutex<Option<LastConnection>> = std::sync::Mutex::new(None);
+
+/// Data needed to re-establish a connection after unexpected exit.
+#[derive(Clone)]
+pub struct LastConnection {
+    pub profile: ServerProfile,
+    pub routing_mode: String,
+    pub proxy_port: u16,
+}
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -281,10 +292,6 @@ impl VpnManager {
 
     pub fn process_pid(&self) -> Option<u32> {
         *self.process_mgr.pid()
-    }
-
-    pub fn config_dir(&self) -> &Path {
-        &self.config_dir
     }
 
     pub fn status(&self) -> VpnStatus {

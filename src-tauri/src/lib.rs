@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 mod events;
 mod logging;
 mod profile;
@@ -6,6 +7,7 @@ mod subscription;
 mod vpn;
 
 use crate::events::emit_status;
+use crate::events::emit_traffic;
 use crate::logging::{log, LogLevel, Logger, LogSource, MAX_LOG_FILES_COUNT};
 use crate::profile::ProfileManager;
 use crate::subscription::SubscriptionProfile;
@@ -88,7 +90,56 @@ async fn start_vpn(
                     );
                     emit_status(&app, VpnStatus::Connected);
 
-                    // Watchdog: detect unexpected process exit and clear PID
+                    // Auto-refresh subscriptions now that proxy is available
+                    // (fetch may have failed earlier when not connected)
+                    {
+                        let profile_state = app.state::<ProfileState>();
+                        let subs = {
+                            let mgr = profile_state.manager.lock().await;
+                            mgr.list().to_vec()
+                        };
+                        for sub in &subs {
+                            if !sub.url.is_empty() {
+                                let app_clone = app.clone();
+                                let id = sub.id.clone();
+                                let name = sub.name.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(Duration::from_secs(3)).await;
+                                    let logger = app_clone.state::<StdMutex<Logger>>();
+                                    log(
+                                        &app_clone,
+                                        &logger,
+                                        LogLevel::Info,
+                                        LogSource::Subscription,
+                                        format!("Auto-refreshing '{name}' via active proxy..."),
+                                    );
+                                    let state = app_clone.state::<ProfileState>();
+                                    let mut pm = state.manager.lock().await;
+                                    if let Ok(profile) = pm.refresh(&app_clone, &id).await {
+                                        log(
+                                            &app_clone,
+                                            &logger,
+                                            LogLevel::Success,
+                                            LogSource::Subscription,
+                                            format!("'{name}' refreshed ({} server(s))", profile.servers.len()),
+                                        );
+                                    }
+                                });
+                            }
+                        }
+                    }
+
+                    // Save for auto-reconnect on unexpected exit
+                    {
+                        let mut last = crate::vpn::LAST_PROFILE.lock().unwrap();
+                        *last = Some(crate::vpn::LastConnection {
+                            profile: profile.clone(),
+                            routing_mode: routing_mode.clone(),
+                            proxy_port,
+                        });
+                    }
+
+                    // Watchdog: detect unexpected process exit → auto-reconnect
                     let watch_pid = manager.process_pid();
                     if let Some(pid) = watch_pid {
                         let app_clone = app.clone();
@@ -97,39 +148,114 @@ async fn start_vpn(
                             loop {
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                                 if !is_process_alive(pid) {
-                                    // Read sing-box log before clearing state
-                                    let mgr_locked = mgr_arc.lock().await;
-                                    let log_snippet = vpn::config::read_singbox_log(mgr_locked.config_dir())
-                                        .and_then(|log_text| {
-                                            let lines: Vec<&str> = log_text
-                                                .lines()
-                                                .filter(|l| !l.is_empty())
-                                                .collect();
-                                            if lines.len() > 5 {
-                                                Some(lines[lines.len()-5..].join("\n"))
-                                            } else if !lines.is_empty() {
-                                                Some(lines.join("\n"))
-                                            } else {
-                                                None
-                                            }
-                                        });
-                                    let msg = match log_snippet {
-                                        Some(snippet) => format!("VPN process exited unexpectedly. Last log lines:\n{snippet}"),
-                                        None => "VPN process exited unexpectedly".into(),
-                                    };
-                                    drop(mgr_locked); // release lock before logging
+                                    let logger = app_clone.state::<StdMutex<Logger>>();
                                     log(
                                         &app_clone,
-                                        &app_clone.state::<StdMutex<Logger>>(),
+                                        &logger,
                                         LogLevel::Warning,
                                         LogSource::Process,
-                                        msg,
+                                        "Connection lost — reconnecting...".into(),
                                     );
-                                    // Clear stale PID so reconnect works
+
+                                    // Clear stale state
                                     let _ = mgr_arc.lock().await.stop(&app_clone).await;
-                                    emit_status(&app_clone, VpnStatus::Disconnected);
+
+                                    // Auto-reconnect up to 3 times
+                                    let last = {
+                                        let lock = crate::vpn::LAST_PROFILE.lock().unwrap();
+                                        lock.clone()
+                                    };
+                                    let mut reconnected = false;
+                                    if let Some(ref last) = last {
+                                        for attempt in 1..=3 {
+                                            tokio::time::sleep(Duration::from_secs(attempt * 2)).await;
+                                            log(
+                                                &app_clone,
+                                                &logger,
+                                                LogLevel::Info,
+                                                LogSource::Process,
+                                                format!("Reconnect attempt {attempt}..."),
+                                            );
+
+                                            let mgr = mgr_arc.lock().await;
+                                            let settings = app_clone.state::<StdMutex<crate::settings::AppSettings>>()
+                                                .lock().unwrap().clone();
+                                            let ok = mgr
+                                                .start(
+                                                    &app_clone,
+                                                    last.proxy_port,
+                                                    &last.routing_mode,
+                                                    &last.profile,
+                                                    &settings,
+                                                )
+                                                .await
+                                                .is_ok();
+                                            drop(mgr);
+
+                                            if ok {
+                                                log(
+                                                    &app_clone,
+                                                    &logger,
+                                                    LogLevel::Success,
+                                                    LogSource::Process,
+                                                    "Reconnected successfully".into(),
+                                                );
+                                                emit_status(&app_clone, VpnStatus::Connected);
+                                                reconnected = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    if !reconnected {
+                                        log(
+                                            &app_clone,
+                                            &logger,
+                                            LogLevel::Error,
+                                            LogSource::Process,
+                                            "Auto-reconnect failed after 3 attempts".into(),
+                                        );
+                                        emit_status(&app_clone, VpnStatus::Disconnected);
+                                    }
                                     break;
                                 }
+                            }
+                        });
+                    }
+
+                    // Traffic stats: poll Clash API every second
+                    let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                    if stats_port > 0 {
+                        let app_clone = app.clone();
+                        let mgr_arc = manager_arc.clone();
+                        tokio::spawn(async move {
+                            let client = reqwest::Client::builder()
+                                .timeout(Duration::from_secs(5))
+                                .build()
+                                .unwrap_or_default();
+                            let url = format!("http://127.0.0.1:{stats_port}/traffic");
+                            loop {
+                                // Stop polling if VPN disconnected
+                                {
+                                    let mgr = mgr_arc.lock().await;
+                                    if mgr.status() == crate::vpn::VpnStatus::Disconnected {
+                                        break;
+                                    }
+                                }
+                                // GET /traffic returns streaming newline-delimited JSON.
+                                // Each chunk is a full line like {"up":123,"down":456}\n
+                                if let Ok(resp) = client.get(&url).send().await {
+                                    if let Err(e) = parse_traffic_stream(resp, &app_clone).await {
+                                        log(
+                                            &app_clone,
+                                            &app_clone.state::<StdMutex<Logger>>(),
+                                            LogLevel::Warning,
+                                            LogSource::System,
+                                            format!("Traffic poll error: {e}"),
+                                        );
+                                    }
+                                }
+                                tokio::time::sleep(Duration::from_secs(1)).await;
                             }
                         });
                     }
@@ -362,27 +488,62 @@ async fn update_settings(
         *current = new_settings.clone();
     }
     let mgr = settings_mgr.lock().await;
-    match mgr.save(&new_settings) {
-        Ok(()) => {
-            log(
-                &app,
-                &logger,
-                LogLevel::Success,
-                LogSource::Settings,
-                "Settings saved".into(),
-            );
-            Ok(())
+    mgr.save(&new_settings)?;
+
+    // Handle startWithWindows
+    set_start_on_boot(new_settings.start_with_windows);
+
+    log(
+        &app,
+        &logger,
+        LogLevel::Success,
+        LogSource::Settings,
+        "Settings saved".into(),
+    );
+    Ok(())
+}
+
+/// Set or remove Windows auto-start via registry Run key.
+fn set_start_on_boot(enabled: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+        let exe_path = std::env::current_exe().unwrap_or_default();
+        let exe_str = exe_path.to_string_lossy();
+
+        if enabled {
+            let _ = std::process::Command::new("reg")
+                .args([
+                    "add",
+                    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                    "/v",
+                    "OmniTun",
+                    "/t",
+                    "REG_SZ",
+                    "/d",
+                    &exe_str,
+                    "/f",
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+        } else {
+            let _ = std::process::Command::new("reg")
+                .args([
+                    "delete",
+                    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                    "/v",
+                    "OmniTun",
+                    "/f",
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
         }
-        Err(e) => {
-            log(
-                &app,
-                &logger,
-                LogLevel::Error,
-                LogSource::Settings,
-                format!("Failed to save settings: {e}"),
-            );
-            Err(e)
-        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = enabled; // no-op on non-Windows
     }
 }
 
@@ -433,6 +594,8 @@ pub fn run() {
 
             let settings_mgr = SettingsManager::new(data_dir.clone());
             let settings = settings_mgr.load().expect("Failed to load settings");
+            // Sync auto-start at boot (user may have manually removed the Run key)
+            set_start_on_boot(settings.start_with_windows);
             app.manage(Mutex::new(settings_mgr));
             app.manage(Mutex::new(settings));
 
@@ -463,6 +626,47 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Read streaming Clash API `/traffic` lines (newline-delimited JSON)
+/// and emit parsed up/down values to the frontend.
+async fn parse_traffic_stream(
+    mut resp: reqwest::Response,
+    app: &tauri::AppHandle,
+) -> Result<(), String> {
+    let mut buf = String::new();
+    loop {
+        let chunk = resp.chunk().await.map_err(|e| format!("traffic stream error: {e}"))?;
+        match chunk {
+            None => break, // stream ended
+            Some(bytes) => {
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+                // Process complete lines
+                while let Some(newline) = buf.find('\n') {
+                    let line = buf[..newline].trim().to_string();
+                    buf = buf[newline + 1..].to_string();
+                    if let Some(up_down) = parse_traffic_line(&line) {
+                        emit_traffic(app, up_down.0, up_down.1);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse a single Clash traffic line: {"up":123,"down":456}
+fn parse_traffic_line(line: &str) -> Option<(f64, f64)> {
+    let line = line.trim();
+    let rest = line.strip_prefix("{\"up\":")?;
+    let end = rest.find(',')?;
+    let up = rest[..end].trim().parse::<f64>().ok()?;
+    let tail = &rest[end..];
+    let down_start = tail.find(':')?;
+    let after = &tail[down_start + 1..];
+    let end = after.find('}')?;
+    let down = after[..end].trim().parse::<f64>().ok()?;
+    Some((up, down))
 }
 
 /// Read clipboard text via arboard (bypasses WebView2 clipboard restrictions).
