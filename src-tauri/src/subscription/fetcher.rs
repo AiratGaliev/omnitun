@@ -12,19 +12,27 @@ pub struct HttpFetcher {
 }
 
 impl HttpFetcher {
-    pub fn new() -> Self {
-        let client = reqwest::Client::builder()
+    pub fn new(proxy_port: Option<u16>) -> Self {
+        let mut builder = reqwest::Client::builder()
             .user_agent("omnitun/0.1.0")
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .timeout(std::time::Duration::from_secs(15));
 
+        // If sing-box is running (proxy_port from app settings), route fetch through it
+        if let Some(port) = proxy_port {
+            let proxy_url = format!("http://127.0.0.1:{port}");
+            if let Ok(proxy) = reqwest::Proxy::http(&proxy_url) {
+                builder = builder.proxy(proxy);
+            }
+        }
+
+        let client = builder.build().unwrap_or_else(|_| reqwest::Client::new());
         Self { client }
     }
 }
 
 impl Default for HttpFetcher {
     fn default() -> Self {
-        Self::new()
+        Self::new(None)
     }
 }
 

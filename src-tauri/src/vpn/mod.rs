@@ -10,11 +10,14 @@ use installer::Installer;
 use process::ProcessManager;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
+
+/// Current Clash API port (0 = not running). Set by config.rs on each start.
+pub(crate) static CLASH_API_PORT: AtomicU16 = AtomicU16::new(0);
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -254,6 +257,9 @@ impl VpnManager {
     }
 
     pub async fn stop(&self, app_handle: &AppHandle) -> Result<(), VpnError> {
+        // Reset Clash API port so fetcher goes direct
+        crate::vpn::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Relaxed);
+
         // Disable system proxy
         if let Ok(mut sysproxy) = sysproxy::Sysproxy::get_system_proxy() {
             if sysproxy.enable {

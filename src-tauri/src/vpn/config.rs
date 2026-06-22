@@ -8,7 +8,7 @@ use crate::vpn::{ServerProfile, VpnError};
 use serde_json::{json, Value};
 use std::path::Path;
 
-fn find_available_port() -> Option<u16> {
+pub(crate) fn find_available_port() -> Option<u16> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
     let port = listener.local_addr().ok()?.port();
     drop(listener);
@@ -79,6 +79,7 @@ pub fn generate_config(
 
     // Find an available port and enable the clash_api for traffic stats
     let stats_port = find_available_port().unwrap_or(20000);
+    crate::vpn::CLASH_API_PORT.store(stats_port, std::sync::atomic::Ordering::Relaxed);
     config["experimental"]["clash_api"] = json!({
         "external_controller": format!("127.0.0.1:{}", stats_port),
         "external_ui": "",
@@ -142,7 +143,7 @@ pub fn write_config(json: &str, config_dir: &Path) -> Result<std::path::PathBuf,
     Ok(config_path)
 }
 
-fn build_outbound(server_profile: &ServerProfile) -> Result<Value, VpnError> {
+pub(crate) fn build_outbound(server_profile: &ServerProfile) -> Result<Value, VpnError> {
     match server_profile.protocol.as_str() {
         "vless" => Ok(build_vless(server_profile)),
         "vmess" => Ok(build_vmess(server_profile)),
@@ -243,6 +244,28 @@ fn build_trojan(profile: &ServerProfile) -> Value {
 
     if let Some(sni) = &profile.sni {
         set_tls(&mut outbound, sni);
+    }
+
+    // Transport (WebSocket, gRPC) — same as VLESS
+    if let Some(t_type) = &profile.transport_type {
+        match t_type.as_str() {
+            "ws" => {
+                outbound["transport"] = json!({
+                    "type": "ws",
+                    "path": profile.transport_path.clone().unwrap_or_else(|| "/".into()),
+                    "headers": {
+                        "Host": profile.transport_host.clone().unwrap_or_default()
+                    }
+                });
+            }
+            "grpc" => {
+                outbound["transport"] = json!({
+                    "type": "grpc",
+                    "service_name": profile.transport_path.clone().unwrap_or_default()
+                });
+            }
+            _ => {}
+        }
     }
 
     outbound

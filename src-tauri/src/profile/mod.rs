@@ -8,6 +8,17 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Semaphore;
 
+/// Get the user-configured proxy port when sing-box is running.
+fn proxy_port(app: &AppHandle) -> Option<u16> {
+    use crate::settings::AppSettings;
+    if crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        app.try_state::<Mutex<AppSettings>>()
+            .and_then(|s| s.lock().ok().map(|s| s.proxy_port))
+    } else {
+        None
+    }
+}
+
 pub struct ProfileManager {
     profiles: Vec<SubscriptionProfile>,
     file_path: PathBuf,
@@ -63,7 +74,7 @@ impl ProfileManager {
         }
 
         let mut servers = if clean_url.starts_with("http://") || clean_url.starts_with("https://") {
-            crate::subscription::fetch_subscription(&clean_url).await?
+            crate::subscription::fetch_subscription(&clean_url, proxy_port(app)).await?
         } else {
             crate::subscription::parser::parse_subscription(&clean_url)?
         };
@@ -102,7 +113,7 @@ impl ProfileManager {
 
         let url = &self.profiles[idx].url;
         let mut servers = if url.starts_with("http://") || url.starts_with("https://") {
-            crate::subscription::fetch_subscription(url).await?
+            crate::subscription::fetch_subscription(url, proxy_port(app)).await?
         } else {
             crate::subscription::parser::parse_subscription(url)?
         };
@@ -249,7 +260,195 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         format!("{} server(s) passed and saved", alive.len()),
     );
 
+    // 3. Real latency test via Clash API — start a temporary sing-box with all servers as outbounds
+    if !alive.is_empty() {
+        let updated = test_servers_via_singbox_batch(app, &alive).await;
+        if let Ok(updated) = updated {
+            return updated;
+        }
+    }
+
     alive
+}
+
+/// Test all servers that passed TCP ping using sing-box and Clash API.
+/// Generates a single config with ALL servers as outbounds, starts sing-box,
+/// tests each via GET /proxies/{tag}/delay, returns servers with real latency.
+async fn test_servers_via_singbox_batch(
+    app: &AppHandle,
+    servers: &[ServerProfile],
+) -> Result<Vec<ServerProfile>, ()> {
+    use crate::vpn::config::{build_outbound, find_available_port};
+    use serde_json::json;
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let logger = app.state::<Mutex<Logger>>();
+
+    log(
+        app,
+        &logger,
+        LogLevel::Info,
+        LogSource::Subscription,
+        format!("Testing {} server(s) via real proxy connection...", servers.len()),
+    );
+
+    let data_dir = app.path().app_data_dir().map_err(|_| ())?;
+    let binary_path = data_dir
+        .join("binaries")
+        .join(crate::vpn::installer::Installer::binary_name());
+
+    let proxy_port = find_available_port().ok_or(())?;
+    let stats_port = find_available_port().ok_or(())?;
+
+    // Build outbounds for all servers
+    let mut outbounds: Vec<serde_json::Value> = vec![
+        json!({"type": "direct", "tag": "direct"}),
+        json!({"type": "block", "tag": "block"}),
+    ];
+    for server in servers {
+        if let Ok(ob) = build_outbound(server) {
+            // Tag must match server index for Clash API lookup
+            let tag = format!("proxy-{}", &server.id);
+            let mut ob = ob;
+            ob["tag"] = json!(tag);
+            outbounds.push(ob);
+        }
+    }
+
+    let test_dir = std::env::temp_dir().join(format!("omnitun-latency-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&test_dir);
+
+    let config_json = json!({
+        "log": { "level": "error", "output": test_dir.join("sing-box.log").to_string_lossy().to_string(), "timestamp": true },
+        "dns": {
+            "servers": [
+                {"type": "https", "tag": "remote", "server": "1.1.1.1", "server_port": 443, "detour": "proxy"},
+                {"type": "https", "tag": "local", "server": "8.8.8.8", "server_port": 443}
+            ],
+            "final": "remote"
+        },
+        "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": proxy_port}],
+        "outbounds": outbounds,
+        "experimental": {
+            "clash_api": {
+                "external_controller": format!("127.0.0.1:{stats_port}"),
+                "secret": ""
+            }
+        },
+        "route": {
+            "final": "direct",
+            "auto_detect_interface": true,
+            "default_domain_resolver": "local",
+            "rules": [{"ip_is_private": true, "outbound": "direct"}]
+        }
+    });
+
+    let config_path = test_dir.join("test-batch.json");
+    let config_str = serde_json::to_string_pretty(&config_json).map_err(|_| ())?;
+    std::fs::write(&config_path, &config_str).map_err(|_| ())?;
+
+    // Start sing-box
+    #[cfg(windows)]
+    let child = std::process::Command::new(&binary_path)
+        .args(["run", "-c"])
+        .arg(&config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|_| ())?;
+    #[cfg(not(windows))]
+    let child = std::process::Command::new(&binary_path)
+        .args(["run", "-c"])
+        .arg(&config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| ())?;
+
+    let pid = child.id();
+
+    // Wait for sing-box to start
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+    // Test each server via Clash API
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|_| {
+            let _ = kill_process(pid);
+            ()
+        })?;
+
+    let api_url = format!("http://127.0.0.1:{stats_port}");
+    let test_url = "http://cp.cloudflare.com/generate_204";
+
+    let mut updated = Vec::new();
+
+    for server in servers {
+        let tag = format!("proxy-{}", &server.id);
+        let delay_url = format!(
+            "{api_url}/proxies/{tag}/delay?url={test_url}&timeout=5000"
+        );
+
+        match client.get(&delay_url).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    if let Ok(body) = resp.text().await {
+                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
+                            if let Some(ms) = data["delay"].as_u64() {
+                                let mut s = server.clone();
+                                s.ping_ms = Some(ms);
+                                updated.push(s);
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Fallback: still include servers that passed TCP ping but Clash API test failed
+        updated.push(server.clone());
+    }
+
+    // Cleanup
+    let _ = kill_process(pid);
+    let _ = std::fs::remove_dir_all(&test_dir);
+
+    log(
+        app,
+        &logger,
+        LogLevel::Success,
+        LogSource::Subscription,
+        format!("Real latency test complete for {} server(s)", updated.len()),
+    );
+
+    Ok(updated)
+}
+
+/// Kill a process by PID (cross-platform)
+fn kill_process(pid: u32) -> Result<(), ()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/pid", &pid.to_string(), "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map_err(|_| ())?;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .output()
+            .map_err(|_| ())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

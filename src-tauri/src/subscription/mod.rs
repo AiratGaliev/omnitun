@@ -17,8 +17,9 @@ pub struct SubscriptionProfile {
 }
 
 /// Fetch subscription data from URL and parse into server profiles.
-pub async fn fetch_subscription(url: &str) -> Result<Vec<ServerProfile>, VpnError> {
-    let fetcher = HttpFetcher::new();
+/// If `proxy_port` is Some, routes the HTTP request through that local proxy.
+pub async fn fetch_subscription(url: &str, proxy_port: Option<u16>) -> Result<Vec<ServerProfile>, VpnError> {
+    let fetcher = HttpFetcher::new(proxy_port);
     let data = fetcher.fetch(url).await?;
     parser::parse_subscription(&data)
 }
