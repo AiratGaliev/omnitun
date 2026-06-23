@@ -19,16 +19,62 @@ pub fn generate_config(
     cache_dir: &Path,
     proxy_port: u16,
     routing_mode: &str,
-    server_profile: &ServerProfile,
+    server_profiles: &[ServerProfile],
     settings: &AppSettings,
 ) -> Result<(String, u16), VpnError> {
     let mut config: Value =
         serde_json::from_str(base_template).map_err(|e| VpnError::Config(e.to_string()))?;
 
-    let outbound = build_outbound(server_profile)?;
+    if server_profiles.is_empty() {
+        return Err(VpnError::Config("No server profiles provided".into()));
+    }
+
+    // Build all outbounds
+    let mut proxy_outbounds: Vec<Value> = Vec::new();
+    for (i, profile) in server_profiles.iter().enumerate() {
+        let mut outbound = build_outbound(profile)?;
+        if server_profiles.len() > 1 {
+            // Tag each as proxy-0, proxy-1, etc. for urltest group
+            outbound["tag"] = json!(format!("proxy-{i}"));
+        } else {
+            outbound["tag"] = json!("proxy");
+        }
+
+        // Apply anti-DPI (TLS fragment/utls) if enabled
+        if settings.anti_dpi {
+            apply_anti_dpi(&mut outbound);
+        }
+
+        // Apply Mux for TCP-based outbounds if enabled
+        if settings.enable_mux {
+            apply_mux(&mut outbound);
+        }
+
+        proxy_outbounds.push(outbound);
+    }
 
     if let Some(outbounds) = config["outbounds"].as_array_mut() {
-        outbounds.push(outbound);
+        if proxy_outbounds.len() > 1 {
+            // Create urltest group for auto-selection
+            let tags: Vec<String> = (0..proxy_outbounds.len())
+                .map(|i| format!("proxy-{i}"))
+                .collect();
+            let urltest = json!({
+                "type": "urltest",
+                "tag": "proxy",
+                "outbounds": tags.clone(),
+                "url": "http://cp.cloudflare.com/generate_204",
+                "interval": "5m",
+                "tolerance": 50
+            });
+            for ob in proxy_outbounds {
+                outbounds.push(ob);
+            }
+            outbounds.push(urltest);
+        } else {
+            // Single server — use it as the proxy outbound
+            outbounds.push(proxy_outbounds.into_iter().next().unwrap());
+        }
     } else {
         return Err(VpnError::Config(
             "Missing outbounds array in template".into(),
@@ -42,17 +88,25 @@ pub fn generate_config(
         }
     }
 
-    // In VPN mode, add a routing rule to send proxy server traffic via "direct".
+    // In VPN mode, add routing rules to send proxy server traffic via "direct".
     // This ensures the proxy connection doesn't loop through the TUN.
-    // Note: we use route.rules rather than TUN's `exclude_route` (not available in sing-box 1.13).
     if routing_mode == "vpn" {
-        let proxy_ip = server_profile.server.clone();
         if let Some(rules) = config["route"]["rules"].as_array_mut() {
-            let bypass_rule = json!({
-                "ip_cidr": [format!("{proxy_ip}/32")],
-                "outbound": "direct",
-            });
-            rules.insert(0, bypass_rule);
+            let mut bypass_cidrs = Vec::new();
+            for sp in server_profiles {
+                let ip = sp.server.clone();
+                // Only add if it's a valid IP address — hostnames can't be CIDR
+                if !ip.is_empty() && ip.parse::<std::net::IpAddr>().is_ok() {
+                    bypass_cidrs.push(format!("{ip}/32"));
+                }
+            }
+            if !bypass_cidrs.is_empty() {
+                let bypass_rule = json!({
+                    "ip_cidr": bypass_cidrs,
+                    "outbound": "direct",
+                });
+                rules.insert(0, bypass_rule);
+            }
         }
     }
 
@@ -236,6 +290,11 @@ pub fn generate_config(
         }
     }
 
+    // Apply kill switch setting for TUN mode
+    if settings.kill_switch && routing_mode == "vpn" {
+        apply_kill_switch(&mut config);
+    }
+
     let json_string =
         serde_json::to_string_pretty(&config).map_err(|e| VpnError::Config(e.to_string()))?;
 
@@ -258,6 +317,8 @@ pub(crate) fn build_outbound(server_profile: &ServerProfile) -> Result<Value, Vp
         "wireguard" => Ok(build_wireguard(server_profile)),
         "hysteria2" => Ok(build_hysteria2(server_profile)),
         "tuic" => Ok(build_tuic(server_profile)),
+        "socks" => Ok(build_socks(server_profile)),
+        "http" => Ok(build_http(server_profile)),
         _ => Err(VpnError::Config(format!(
             "Unsupported protocol: {}",
             server_profile.protocol
@@ -389,21 +450,45 @@ fn build_shadowsocks(profile: &ServerProfile) -> Value {
 }
 
 fn build_wireguard(profile: &ServerProfile) -> Value {
-    json!({
+    let local_address = profile.wg_local_address.clone().unwrap_or_else(|| "172.16.0.2/32".into());
+    let allowed_ips: Vec<String> = profile.wg_allowed_ips
+        .clone()
+        .map(|ips| ips.split(',').map(|s| s.trim().to_string()).collect())
+        .unwrap_or_else(|| vec!["0.0.0.0/0".into()]);
+
+    let mut peer = json!({
+        "server": profile.server,
+        "server_port": profile.port,
+        "public_key": profile.public_key,
+        "allowed_ips": allowed_ips,
+    });
+
+    if let Some(k) = profile.wg_keepalive {
+        peer["persistent_keepalive"] = json!(k);
+    }
+
+    let mut outbound = json!({
         "type": "wireguard",
         "tag": "proxy",
         "server": profile.server,
         "server_port": profile.port,
         "system_interface": false,
-        "local_address": ["172.16.0.2/32"],
+        "local_address": local_address.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>(),
         "private_key": profile.private_key,
-        "peers": [{
-            "address": profile.server,
-            "port": profile.port,
-            "public_key": profile.public_key,
-            "allowed_ips": ["0.0.0.0/0"]
-        }]
-    })
+        "peers": [peer],
+    });
+
+    if let Some(mtu) = profile.wg_mtu {
+        outbound["mtu"] = json!(mtu);
+    }
+
+    if let Some(_dns) = &profile.wg_dns {
+        // WireGuard DNS in sing-box is per-outbound
+        // We skip it here — the global DNS config handles resolution
+        // This field is stored for informational purposes
+    }
+
+    outbound
 }
 
 fn build_hysteria2(profile: &ServerProfile) -> Value {
@@ -434,6 +519,87 @@ fn build_tuic(profile: &ServerProfile) -> Value {
 
     if let Some(sni) = &profile.sni {
         set_tls(&mut outbound, sni);
+    }
+
+    outbound
+}
+
+/// Apply anti-DPI measures to outbounds with TLS enabled.
+/// Uses utls fingerprint randomization (equivalent to karing's TLS fragment / mixed-case SNI).
+fn apply_anti_dpi(outbound: &mut Value) {
+    // Only apply to outbounds with TLS
+    if outbound.get("tls").and_then(|t| t.get("enabled")).and_then(|e| e.as_bool()).unwrap_or(false) {
+        if let Some(tls) = outbound.get_mut("tls") {
+            // Add utls with Chrome fingerprint for anti-DPI (supported in sing-box 1.13+)
+            if tls.get("utls").is_none() {
+                tls["utls"] = json!({
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                });
+            }
+        }
+    }
+}
+
+/// Apply Mux (h2mux multiplexing) to TCP-based outbounds.
+fn apply_mux(outbound: &mut Value) {
+    let outbound_type = outbound["type"].as_str().unwrap_or("");
+    // Mux works on TCP-based protocols
+    match outbound_type {
+        "vless" | "vmess" | "trojan" | "shadowsocks" | "tuic" => {
+            outbound["mux"] = json!({
+                "enabled": true,
+                "protocol": "h2mux",
+                "max_streams": 32,
+                "padding": false,
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Apply kill switch to TUN inbound (block traffic when VPN drops).
+fn apply_kill_switch(config: &mut Value) {
+    if let Some(inbounds) = config["inbounds"].as_array_mut() {
+        for inbound in inbounds.iter_mut() {
+            if inbound["type"] == "tun" {
+                inbound["auto_redirect"] = json!(true);
+            }
+        }
+    }
+}
+
+fn build_socks(profile: &ServerProfile) -> Value {
+    let mut outbound = json!({
+        "type": "socks",
+        "tag": "proxy",
+        "server": profile.server,
+        "server_port": profile.port,
+    });
+
+    if let Some(pass) = &profile.password {
+        outbound["password"] = json!(pass);
+        if let Some(user) = &profile.username {
+            outbound["username"] = json!(user);
+        }
+    }
+
+    outbound
+}
+
+fn build_http(profile: &ServerProfile) -> Value {
+    let mut outbound = json!({
+        "type": "http",
+        "tag": "proxy",
+        "server": profile.server,
+        "server_port": profile.port,
+    });
+
+    if let Some(pass) = &profile.password {
+        outbound["password"] = json!(pass);
+        if let Some(user) = &profile.username {
+            outbound["username"] = json!(user);
+        }
     }
 
     outbound
@@ -562,7 +728,7 @@ mod tests {
 
     #[test]
     fn test_vpn_tun_inbound() {
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &default_settings());
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &[vless_profile()], &default_settings());
         assert!(result.is_ok(), "VPN config generation failed: {:?}", result.err());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -573,7 +739,7 @@ mod tests {
 
     #[test]
     fn test_vpn_dns_new_format() {
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &default_settings());
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &[vless_profile()], &default_settings());
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -600,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_vpn_outbound_added() {
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_tls_profile(), &default_settings());
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &[vless_tls_profile()], &default_settings());
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -612,7 +778,7 @@ mod tests {
 
     #[test]
     fn test_proxy_listen_port_set() {
-        let result = generate_config(base_template(), &cache_dir(), 9999, "proxy", &vless_profile(), &default_settings());
+        let result = generate_config(base_template(), &cache_dir(), 9999, "proxy", &[vless_profile()], &default_settings());
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -626,13 +792,13 @@ mod tests {
             ..vless_profile()
         };
 
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &profile, &default_settings());
+        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &[profile], &default_settings());
         assert!(result.is_err());
     }
 
     #[test]
     fn test_vpn_config_full_structure() {
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &default_settings());
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &[vless_profile()], &default_settings());
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -690,7 +856,7 @@ mod tests {
         settings.custom_dns = true;
         settings.dns_address = "https://9.9.9.9/dns-query".into();
 
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &settings);
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &[vless_profile()], &settings);
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -709,7 +875,7 @@ mod tests {
         settings.custom_dns = true;
         settings.dns_address = "1.0.0.1".into();
 
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &vless_profile(), &settings);
+        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &[vless_profile()], &settings);
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();

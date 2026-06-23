@@ -3,7 +3,6 @@ pub mod geoip;
 pub mod installer;
 mod process;
 
-use crate::events::emit_traffic;
 use crate::logging::{log, LogLevel, Logger, LogSource};
 use crate::settings::AppSettings;
 use installer::Installer;
@@ -13,7 +12,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
 /// Current Clash API port (0 = not running). Set by config.rs on each start.
@@ -25,7 +23,7 @@ pub(crate) static LAST_PROFILE: std::sync::Mutex<Option<LastConnection>> = std::
 /// Data needed to re-establish a connection after unexpected exit.
 #[derive(Clone)]
 pub struct LastConnection {
-    pub profile: ServerProfile,
+    pub all_servers: Vec<ServerProfile>,
     pub routing_mode: String,
     pub proxy_port: u16,
 }
@@ -76,6 +74,18 @@ pub struct ServerProfile {
     pub ping_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flag: Option<String>,
+    // WireGuard-specific fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wg_local_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wg_allowed_ips: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wg_dns: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wg_mtu: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wg_keepalive: Option<u16>,
+    pub username: Option<String>,
 }
 
 
@@ -135,7 +145,7 @@ impl VpnManager {
         app_handle: &AppHandle,
         proxy_port: u16,
         routing_mode: &str,
-        profile: &ServerProfile,
+        profiles: &[ServerProfile],
         settings: &AppSettings,
     ) -> Result<(), VpnError> {
         let logger = app_handle.state::<Mutex<Logger>>();
@@ -144,7 +154,7 @@ impl VpnManager {
             &logger,
             LogLevel::Info,
             LogSource::Vpn,
-            format!("Starting in {routing_mode} mode..."),
+            format!("Starting in {routing_mode} mode with {} server(s)...", profiles.len()),
         );
         self.ensure_installed(app_handle).await?;
 
@@ -160,8 +170,8 @@ impl VpnManager {
         } else {
             include_str!("../../config/base.json")
         };
-        let (config_json, stats_port) =
-            config::generate_config(base_template, &self.config_dir, proxy_port, routing_mode, profile, settings)?;
+        let (config_json, _stats_port) =
+            config::generate_config(base_template, &self.config_dir, proxy_port, routing_mode, profiles, settings)?;
         let config_path = config::write_config(&config_json, &self.config_dir)?;
         log(
             app_handle,
@@ -214,55 +224,8 @@ impl VpnManager {
             &logger,
             LogLevel::Info,
             LogSource::Vpn,
-            "sing-box process started, spawning traffic monitor...".into(),
+            "sing-box process started, traffic monitored from lib.rs".into(),
         );
-
-        // Spawn background task to poll sing-box clash_api for traffic stats
-        let app_handle = app_handle.clone();
-        let api_url = format!("http://127.0.0.1:{}/connections", stats_port);
-        tokio::spawn(async move {
-            let client = reqwest::Client::new();
-
-            // Retry connecting — API starts slightly after sing-box
-            for delay_ms in [200u64, 400, 800, 1500, 3000] {
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                if client.get(&api_url).send().await.is_ok() {
-                    break;
-                }
-            }
-
-            let mut prev_up = 0u64;
-            let mut prev_down = 0u64;
-            let mut first = true;
-
-            loop {
-                tokio::time::sleep(Duration::from_secs(1)).await;
-
-                match client.get(&api_url).send().await {
-                    Ok(resp) => match resp.json::<serde_json::Value>().await {
-                        Ok(data) => {
-                            let up = data["upload_total"].as_u64().unwrap_or(0);
-                            let down = data["download_total"].as_u64().unwrap_or(0);
-
-                            if !first && (up != prev_up || down != prev_down) {
-                                let up_speed = up.saturating_sub(prev_up) as f64;
-                                let down_speed = down.saturating_sub(prev_down) as f64;
-                                emit_traffic(
-                                    &app_handle,
-                                    up_speed / 1_048_576.0,
-                                    down_speed / 1_048_576.0,
-                                );
-                            }
-                            first = false;
-                            prev_up = up;
-                            prev_down = down;
-                        }
-                        Err(_) => break, // JSON parse failed → sing-box stopped
-                    },
-                    Err(_) => break, // Connection refused → sing-box stopped
-                }
-            }
-        });
 
         Ok(())
     }

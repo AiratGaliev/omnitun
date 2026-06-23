@@ -49,6 +49,17 @@ fn parse_uri(uri: &str) -> Option<ServerProfile> {
         parse_hysteria2(remainder)
     } else if let Some(remainder) = uri.strip_prefix("tuic://") {
         parse_tuic(remainder)
+    } else if let Some(remainder) = uri.strip_prefix("wireguard://") {
+        parse_wireguard(remainder)
+    } else if uri.starts_with("socks5://") || uri.starts_with("socks://") {
+        parse_socks(uri)
+    } else if uri.starts_with("http://") || uri.starts_with("https://") {
+        // Only treat as proxy URI if it matches the http(s):// proxy pattern (has @ for auth)
+        if uri.contains('@') {
+            parse_http(uri)
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -93,6 +104,12 @@ fn parse_vless(data: &str) -> Option<ServerProfile> {
         reality_sid: params.get("sid").cloned(),
         ping_ms: None,
         flag: None,
+        wg_local_address: None,
+        wg_allowed_ips: None,
+        wg_dns: None,
+        wg_mtu: None,
+        wg_keepalive: None,
+        username: None,
     })
 }
 
@@ -144,6 +161,12 @@ fn parse_vmess(data: &str) -> Option<ServerProfile> {
         reality_sid: None,
         ping_ms: None,
         flag: None,
+        wg_local_address: None,
+        wg_allowed_ips: None,
+        wg_dns: None,
+        wg_mtu: None,
+        wg_keepalive: None,
+        username: None,
     })
 }
 
@@ -185,6 +208,12 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
                                 reality_sid: None,
                                 ping_ms: None,
                                 flag: None,
+                                wg_local_address: None,
+                                wg_allowed_ips: None,
+                                wg_dns: None,
+                                wg_mtu: None,
+                                wg_keepalive: None,
+                                username: None,
                             });
                         }
                     }
@@ -225,6 +254,12 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
         reality_sid: None,
         ping_ms: None,
         flag: None,
+        wg_local_address: None,
+        wg_allowed_ips: None,
+        wg_dns: None,
+        wg_mtu: None,
+        wg_keepalive: None,
+        username: None,
     })
 }
 
@@ -261,6 +296,12 @@ fn parse_trojan(data: &str) -> Option<ServerProfile> {
         reality_sid: params.get("sid").cloned(),
         ping_ms: None,
         flag: None,
+        wg_local_address: None,
+        wg_allowed_ips: None,
+        wg_dns: None,
+        wg_mtu: None,
+        wg_keepalive: None,
+        username: None,
     })
 }
 
@@ -297,6 +338,12 @@ fn parse_hysteria2(data: &str) -> Option<ServerProfile> {
         reality_sid: None,
         ping_ms: None,
         flag: None,
+        wg_local_address: None,
+        wg_allowed_ips: None,
+        wg_dns: None,
+        wg_mtu: None,
+        wg_keepalive: None,
+        username: None,
     })
 }
 
@@ -335,6 +382,134 @@ fn parse_tuic(data: &str) -> Option<ServerProfile> {
         reality_sid: None,
         ping_ms: None,
         flag: None,
+        wg_local_address: None,
+        wg_allowed_ips: None,
+        wg_dns: None,
+        wg_mtu: None,
+        wg_keepalive: None,
+        username: None,
+    })
+}
+
+fn parse_wireguard(data: &str) -> Option<ServerProfile> {
+    // wireguard://<key>@<server>:<port>?public_key=<pk>&allowed_ips=0.0.0.0/0&dns=1.1.1.1#Remark
+    let (main, query, fragment) = split_uri(data);
+    let name = urlencoding_decode(fragment);
+    let params = parse_query(query);
+
+    let (key_b64, server_port) = main.split_once('@')?;
+    let (server, port_str) = server_port.rsplit_once(':')?;
+    let port: u16 = port_str.parse().ok()?;
+
+    let private_key = Some(urlencoding_decode(key_b64));
+
+    Some(ServerProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: if name.is_empty() {
+            params.get("remark").cloned().unwrap_or_default()
+        } else {
+            name
+        },
+        protocol: "wireguard".into(),
+        server: server.to_string(),
+        port,
+        uuid: None,
+        password: None,
+        method: None,
+        sni: None,
+        flow: None,
+        public_key: params.get("public_key").cloned(),
+        private_key,
+        transport_type: None,
+        transport_path: None,
+        transport_host: None,
+        reality_pbk: None,
+        reality_sid: None,
+        ping_ms: None,
+        flag: None,
+        wg_local_address: params.get("local_address").or_else(|| params.get("address")).cloned(),
+        wg_allowed_ips: params.get("allowed_ips").cloned(),
+        wg_dns: params.get("dns").cloned(),
+        wg_mtu: params.get("mtu").and_then(|m| m.parse().ok()),
+        wg_keepalive: params.get("keepalive").or_else(|| params.get("persistent_keepalive")).and_then(|k| k.parse().ok()),
+        username: None,
+    })
+}
+
+fn parse_socks(uri: &str) -> Option<ServerProfile> {
+    // socks5://user:pass@server:port#Remark
+    // socks5://server:port#Remark
+    let stripped = uri
+        .strip_prefix("socks5://")
+        .or_else(|| uri.strip_prefix("socks://"))?;
+
+    let (main, _query, fragment) = split_uri(stripped);
+    let name = urlencoding_decode(fragment);
+
+    let (server, port, username, password) = if let Some((userinfo, rest)) = main.split_once('@') {
+        let (srv, prt) = rest.rsplit_once(':')?;
+        let port: u16 = prt.parse().ok()?;
+        let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+        (srv.to_string(), port, if user.is_empty() { None } else { Some(user.to_string()) }, if pass.is_empty() { None } else { Some(urlencoding_decode(pass)) })
+    } else {
+        let (srv_host, srv_port) = main.rsplit_once(':').unwrap_or((main, "1080"));
+        (srv_host.to_string(), srv_port.parse().ok()?, None, None)
+    };
+
+    Some(ServerProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: if name.is_empty() { server.clone() } else { name },
+        protocol: "socks".into(),
+        server,
+        port,
+        uuid: None,
+        password,
+        method: if username.is_some() { Some("username_password".into()) } else { None },
+        username,
+        ..Default::default()
+    })
+}
+
+fn parse_http(uri: &str) -> Option<ServerProfile> {
+    // http://user:pass@server:port#Remark
+    // https://user:pass@server:port#Remark
+    let stripped = uri.strip_prefix("http://").or_else(|| uri.strip_prefix("https://"))?;
+    let is_https = uri.starts_with("https://");
+
+    let (main, _query, fragment) = split_uri(stripped);
+    let name = urlencoding_decode(fragment);
+
+    let (userinfo, rest) = main.split_once('@')?;
+    let (server, port_str) = rest.rsplit_once(':').unwrap_or((rest, if is_https { "443" } else { "80" }));
+    let port: u16 = port_str.parse().ok()?;
+    let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
+
+    Some(ServerProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: if name.is_empty() { user.to_string() } else { name },
+        protocol: "http".into(),
+        server: server.to_string(),
+        port,
+        uuid: None,
+        password: if pass.is_empty() { None } else { Some(urlencoding_decode(pass)) },
+        method: if user.is_empty() { None } else { Some("username_password".into()) },
+        sni: None,
+        flow: None,
+        public_key: None,
+        private_key: None,
+        transport_type: None,
+        transport_path: None,
+        transport_host: None,
+        reality_pbk: None,
+        reality_sid: None,
+        ping_ms: None,
+        flag: None,
+        wg_local_address: None,
+        wg_allowed_ips: None,
+        wg_dns: None,
+        wg_mtu: None,
+        wg_keepalive: None,
+        username: None,
     })
 }
 

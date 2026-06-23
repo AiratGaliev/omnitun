@@ -1,7 +1,7 @@
 import { useVPNStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { i18n } from '../../i18n';
-import { Languages, RefreshCw, Rocket, Zap } from 'lucide-react';
+import { Languages, Minus, RefreshCw, Rocket, Zap } from 'lucide-react';
 import { SettingItem } from './SettingItem';
 
 export function GeneralSettings() {
@@ -130,6 +130,16 @@ export function GeneralSettings() {
           </div>
         </div>
       </div>
+
+      <SettingItem
+        icon={<Minus size={20} className="text-indigo-400" />}
+        title={t('minimizeToTray')}
+        description={t('minimizeToTrayDesc')}
+        checked={settings.minimizeToTray}
+        onChange={(checked) => {
+          updateSettings({ minimizeToTray: checked });
+        }}
+      />
     </div>
   );
 }

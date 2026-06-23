@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Toaster } from 'sonner';
 import { AnimatePresence, motion } from 'framer-motion';
+import { Loader2, Shield } from 'lucide-react';
 import { useVPNStore } from './store';
 import { i18n } from './i18n';
+import { invoke } from '@tauri-apps/api/core';
 import { Onboarding } from './components/screens/Onboarding';
 import { Dashboard } from './components/screens/Dashboard';
 import { Profiles } from './components/screens/Profiles';
@@ -33,6 +35,7 @@ export default function App() {
   const initListener = useVPNStore((state) => state.initListener);
   const loadProfiles = useVPNStore((state) => state.loadProfiles);
   const loadSettings = useVPNStore((state) => state.loadSettings);
+  const fetchRealIp = useVPNStore((state) => state.fetchRealIp);
   const addLog = useVPNStore((state) => state.addLog);
 
   useEffect(() => {
@@ -51,6 +54,10 @@ export default function App() {
     void Promise.all([
       loadProfiles().catch(() => undefined),
       loadSettings().catch(() => undefined),
+      invoke('initialize_app').catch(() => {
+        addLog('Background initialization failed (offline?) — app will work without GeoIP', 'warning', 'system');
+      }),
+      fetchRealIp().catch(() => undefined),
     ]).then(() => {
       setIsInitialized(true);
       const { profiles: loadedProfiles, settings: loadedSettings } = useVPNStore.getState();
@@ -60,7 +67,7 @@ export default function App() {
         'system',
       );
     });
-  }, [loadProfiles, loadSettings, addLog]);
+  }, [loadProfiles, loadSettings, addLog, fetchRealIp]);
 
   useEffect(() => {
     void i18n.changeLanguage(settings.language);
@@ -115,7 +122,15 @@ export default function App() {
         }}
       />
 
-      {!isInitialized ? null : (
+      {!isInitialized ? (
+        <div className="w-full h-screen bg-zinc-950 flex items-center justify-center">
+          <div className="flex flex-col items-center gap-4">
+            <Shield className="w-10 h-10 text-emerald-400" />
+            <Loader2 className="w-6 h-6 text-zinc-500 animate-spin" />
+            <p className="text-zinc-500 text-sm">Downloading resources...</p>
+          </div>
+        </div>
+      ) : (
         <AnimatePresence mode="wait">
           {!settings.acceptTerms ? (
             <Terms key="terms" />

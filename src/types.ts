@@ -44,6 +44,34 @@ export interface Profile {
   lastUpdated?: number;
   servers: Server[];
   error?: string;
+  trafficUsed?: number;
+  trafficTotal?: number;
+  trafficExpiry?: string;
+}
+
+export interface ConnectionInfo {
+  id: string;
+  host?: string;
+  metadata?: {
+    network?: string;
+    type?: string;
+    source_ip?: string;
+    destination_ip?: string;
+    destination_port?: string;
+    process?: string;
+    process_path?: string;
+    host?: string;
+  };
+  rule?: string;
+  chains?: string[];
+  upload_total?: number;
+  download_total?: number;
+  start?: string;
+}
+
+export interface SpeedTestResult {
+  delay?: number;
+  mean_delay?: number;
 }
 
 export interface CustomCountry {
@@ -70,4 +98,7 @@ export interface Settings {
   blockedProtocols: string[];
   language: 'en' | 'ru';
   autoUpdateInterval: number;
+  antiDpi: boolean;
+  enableMux: boolean;
+  minimizeToTray: boolean;
 }

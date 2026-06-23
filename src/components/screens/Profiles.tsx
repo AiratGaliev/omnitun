@@ -16,6 +16,13 @@ const profileSchema = z.object({
   url: z.string().url('Invalid URL format'),
 });
 
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / 1024 ** i).toFixed(i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
 export function Profiles() {
   const { profiles, addProfile, removeProfile, refreshProfile, updateProfile } = useVPNStore();
   const { t } = useTranslation();
@@ -217,6 +224,22 @@ function ProfileItem({
                   {p.servers.length}{' '}
                   {p.servers.length === 1 ? t('serverSingular') : t('serverPlural')}
                 </span>
+              )}
+              {p.trafficTotal && p.trafficTotal > 0 && (
+                <div className="mt-3 flex items-center gap-3 text-[11px] font-mono text-zinc-400">
+                  <span className="flex items-center gap-1">
+                    <span className="text-zinc-500">{t('trafficUsed')}:</span>
+                    <span className="text-emerald-400 font-semibold">
+                      {formatBytes(p.trafficUsed ?? 0)} / {formatBytes(p.trafficTotal)}
+                    </span>
+                  </span>
+                  {p.trafficExpiry && (
+                    <span className="flex items-center gap-1">
+                      <span className="text-zinc-500">·</span>
+                      <span>{t('trafficExpiry')}: {p.trafficExpiry}</span>
+                    </span>
+                  )}
+                </div>
               )}
             </div>
           </div>

@@ -19,7 +19,7 @@ tauri-build = { version = "2", features = [] }
 winresource = "0.1"
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2.3.5"
 tauri-plugin-fs = "2.5.1"
@@ -42,4 +42,5 @@ base64 = "0.22"
 anyhow = "1"
 url = "2"
 sysproxy = "0.3"
+maxminddb = "0.24"
 

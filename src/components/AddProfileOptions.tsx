@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Clipboard, Plus, X } from 'lucide-react';
+import { Clipboard, FileText, Plus, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { invoke } from '@tauri-apps/api/core';
 import { readText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTranslation } from '@/hooks/useTranslation';
-import { useVPNStore } from '@/store';
+import { useVPNStore, mapRustProfile } from '@/store';
+import type { RustSubscriptionProfile } from '@/store';
 import * as z from 'zod';
 
 const manualSchema = z.object({
@@ -37,6 +38,7 @@ export function AddProfileOptions({
   const [viewMode, setViewMode] = useState<'initial' | 'manual'>('initial');
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleClipboardAdd = async () => {
     try {
@@ -64,7 +66,10 @@ export function AddProfileOptions({
         cleanText.startsWith('trojan://') ||
         cleanText.startsWith('hysteria2://') ||
         cleanText.startsWith('hy2://') ||
-        cleanText.startsWith('tuic://')
+        cleanText.startsWith('tuic://') ||
+        cleanText.startsWith('wireguard://') ||
+        cleanText.startsWith('socks5://') ||
+        cleanText.startsWith('socks://')
       ) {
         onAdd(cleanText);
       } else {
@@ -80,6 +85,31 @@ export function AddProfileOptions({
       }).catch(() => undefined);
       toast.error(t('clipboardErrMsg'), { description: msg, duration: 4000 });
     }
+  };
+
+  const handleFileImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const name = file.name.replace(/\.[^.]+$/, '');
+      const result = await invoke<RustSubscriptionProfile>('import_subscription_content', {
+        name,
+        content: text,
+      });
+      const mapped = mapRustProfile(result);
+      useVPNStore.getState().addLog(
+        `Imported "${name}" (${String(mapped.servers.length)} server(s))`,
+        'success',
+        'subscription',
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      useVPNStore.getState().addLog(`File import error: ${msg}`, 'error', 'subscription');
+      toast.error(msg);
+    }
+    // Reset input so same file can be re-imported
+    e.target.value = '';
   };
 
   const handleManualAdd = () => {
@@ -132,6 +162,30 @@ export function AddProfileOptions({
             {t('manualAdd')}
           </span>
         </button>
+
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          className="flex-1 aspect-4/3 max-h-32 bg-zinc-900/40 backdrop-blur-md border border-white/5 hover:border-emerald-500/30 hover:bg-zinc-800/60 rounded-3xl flex flex-col items-center justify-center gap-4 transition-all duration-300 group shadow-lg"
+        >
+          <div className="p-3 bg-zinc-800/80 rounded-2xl group-hover:bg-emerald-500/10 transition-colors">
+            <FileText
+              size={28}
+              strokeWidth={1.5}
+              className="text-zinc-400 group-hover:text-emerald-400 transition-colors"
+            />
+          </div>
+          <span className="text-sm font-semibold text-zinc-300 group-hover:text-white transition-colors">
+            {t('fromFile')}
+          </span>
+        </button>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".txt,.conf,.json,.yaml,.yml,.uri,.srs"
+          className="hidden"
+          onChange={(e) => { void handleFileImport(e); }}
+        />
       </div>
 
       <AnimatePresence>

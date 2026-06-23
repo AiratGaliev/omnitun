@@ -19,7 +19,9 @@ use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tokio::sync::Mutex;
 
 #[cfg(windows)]
@@ -44,21 +46,28 @@ async fn start_vpn(
     profile: ServerProfile,
     routing_mode: String,
     proxy_port: u16,
+    alternative_servers: Vec<ServerProfile>,
 ) -> Result<(), String> {
     let logger = app.state::<StdMutex<Logger>>();
+    let server_count = alternative_servers.len() + 1;
     log(
         &app,
         &logger,
         LogLevel::Info,
         LogSource::System,
-        format!("Starting VPN connection to {} ({routing_mode} mode, {} port)...", profile.name, proxy_port),
+        format!("Starting VPN connection to {} ({routing_mode} mode, {} server(s) available)...", profile.name, server_count),
     );
     emit_status(&app, VpnStatus::Connecting);
 
     let manager_arc = state.manager.clone();
     let manager = manager_arc.lock().await;
     let settings = settings_state.lock().await.clone();
-    match manager.start(&app, proxy_port, &routing_mode, &profile, &settings).await {
+
+    // Collect all servers for smart selector group
+    let mut all_servers = vec![profile.clone()];
+    all_servers.extend(alternative_servers);
+
+    match manager.start(&app, proxy_port, &routing_mode, &all_servers, &settings).await {
         Ok(_) => {
             log(
                 &app,
@@ -133,7 +142,7 @@ async fn start_vpn(
                     {
                         let mut last = crate::vpn::LAST_PROFILE.lock().unwrap();
                         *last = Some(crate::vpn::LastConnection {
-                            profile: profile.clone(),
+                            all_servers: all_servers.clone(),
                             routing_mode: routing_mode.clone(),
                             proxy_port,
                         });
@@ -148,6 +157,21 @@ async fn start_vpn(
                             loop {
                                 tokio::time::sleep(Duration::from_secs(2)).await;
                                 if !is_process_alive(pid) {
+                                    // Stop if the user disconnected (LAST_PROFILE cleared)
+                                    {
+                                        let lock = crate::vpn::LAST_PROFILE.lock().unwrap();
+                                        if lock.is_none() {
+                                            break; // intentional stop
+                                        }
+                                    }
+                                    // Also check via manager status
+                                    {
+                                        let mgr = mgr_arc.lock().await;
+                                        if mgr.status() == crate::vpn::VpnStatus::Disconnected {
+                                            break; // intentional stop
+                                        }
+                                    }
+
                                     let logger = app_clone.state::<StdMutex<Logger>>();
                                     log(
                                         &app_clone,
@@ -178,14 +202,19 @@ async fn start_vpn(
                                             );
 
                                             let mgr = mgr_arc.lock().await;
-                                            let settings = app_clone.state::<StdMutex<crate::settings::AppSettings>>()
-                                                .lock().unwrap().clone();
+                                            // User might have disconnected while we were sleeping
+                                            if mgr.status() == crate::vpn::VpnStatus::Disconnected {
+                                                drop(mgr);
+                                                break;
+                                            }
+                                            let settings = app_clone.state::<Mutex<crate::settings::AppSettings>>()
+                                                .lock().await.clone();
                                             let ok = mgr
                                                 .start(
                                                     &app_clone,
                                                     last.proxy_port,
                                                     &last.routing_mode,
-                                                    &last.profile,
+                                                    &last.all_servers,
                                                     &settings,
                                                 )
                                                 .await
@@ -224,6 +253,7 @@ async fn start_vpn(
                     }
 
                     // Traffic stats: poll Clash API every second
+                    // /traffic returns cumulative bytes — we compute speed as delta/timediff
                     let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
                     if stats_port > 0 {
                         let app_clone = app.clone();
@@ -234,6 +264,9 @@ async fn start_vpn(
                                 .build()
                                 .unwrap_or_default();
                             let url = format!("http://127.0.0.1:{stats_port}/traffic");
+                            let mut prev_up: Option<f64> = None;
+                            let mut prev_down: Option<f64> = None;
+                            let mut prev_time: Option<std::time::Instant> = None;
                             loop {
                                 // Stop polling if VPN disconnected
                                 {
@@ -242,19 +275,46 @@ async fn start_vpn(
                                         break;
                                     }
                                 }
-                                // GET /traffic returns newline-delimited JSON lines.
-                                // We do a short-lived GET each second instead of streaming,
-                                // which is more resilient to sing-box restarts.
-                                if let Ok(resp) = client.get(&url).send().await {
-                                    if let Ok(text) = resp.text().await {
-                                        for line in text.lines() {
-                                            if let Some(up_down) = parse_traffic_line(line) {
-                                                emit_traffic(&app_clone, up_down.0, up_down.1);
+                                // GET /traffic streams newline-delimited JSON (chunked).
+                                // Read chunks as they arrive, don't wait for EOF.
+                                if let Ok(mut resp) = client.get(&url).send().await {
+                                    let mut buf = String::new();
+                                    loop {
+                                        match resp.chunk().await {
+                                            Ok(Some(bytes)) => {
+                                                buf.push_str(&String::from_utf8_lossy(&bytes));
+                                                while let Some(newline) = buf.find('\n') {
+                                                    let line = buf[..newline].trim().to_string();
+                                                    buf = buf[newline + 1..].to_string();
+                                                    if let Some((up, down)) = parse_traffic_line(&line) {
+                                                        let now = std::time::Instant::now();
+                                                        let (speed_up, speed_down) = if let (Some(pu), Some(pd), Some(pt)) = (prev_up, prev_down, prev_time) {
+                                                            let dt = now.saturating_duration_since(pt).as_secs_f64();
+                                                            if dt > 0.001 {
+                                                                (((up - pu) / dt).max(0.0), ((down - pd) / dt).max(0.0))
+                                                            } else {
+                                                                continue; // too fast, keep prev values
+                                                            }
+                                                        } else {
+                                                            (0.0, 0.0) // first reading, no delta yet
+                                                        };
+                                                        prev_up = Some(up);
+                                                        prev_down = Some(down);
+                                                        prev_time = Some(now);
+                                                        emit_traffic(&app_clone, speed_up, speed_down);
+                                                    }
+                                                }
                                             }
+                                            Ok(None) => break, // stream ended gracefully
+                                            Err(_) => break,   // transport error, reconnect
                                         }
                                     }
                                 }
-                                tokio::time::sleep(Duration::from_secs(1)).await;
+                                // On reconnect, reset state so first reading doesn't spike
+                                prev_up = None;
+                                prev_down = None;
+                                prev_time = None;
+                                tokio::time::sleep(Duration::from_millis(500)).await;
                             }
                         });
                     }
@@ -347,6 +407,9 @@ async fn stop_vpn(
     let manager = state.manager.lock().await;
     match manager.stop(&app).await {
         Ok(_) => {
+            // Clear last connection so stale watchdogs don't try to reconnect
+            let mut last = crate::vpn::LAST_PROFILE.lock().unwrap();
+            *last = None;
             log(
                 &app,
                 &logger,
@@ -652,6 +715,73 @@ pub fn run() {
             };
             app.manage(profile_state);
 
+            // ── System tray ────────────────────────────────────────────────
+            let show = MenuItem::with_id(app, "show", "Show OmniTun", true, None::<&str>)?;
+            let toggle_vpn = MenuItem::with_id(app, "toggle_vpn", "Connect", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+
+            let menu = Menu::with_items(app, &[
+                &show,
+                &PredefinedMenuItem::separator(app)?,
+                &toggle_vpn,
+                &PredefinedMenuItem::separator(app)?,
+                &quit,
+            ])?;
+
+            let _tray_icon = TrayIconBuilder::new()
+                .tooltip("OmniTun")
+                .menu(&menu)
+                .on_menu_event(move |app, event| {
+                    match event.id().as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
+                        "toggle_vpn" => {
+                            // Emit toggle event — frontend handles the connect/disconnect
+                            let _ = app.emit("tray-toggle-vpn", ());
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up, ..
+                    } = event {
+                        if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                })
+                .build(app)?;
+
+            // Handle window close: minimize to tray if configured
+            if let Some(window) = app.get_webview_window("main") {
+                let app_handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        let minimize = if let Some(state) = app_handle
+                            .try_state::<Mutex<crate::settings::AppSettings>>()
+                        {
+                            state.try_lock().map(|g| g.minimize_to_tray).unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        if minimize {
+                            let _ = app_handle.get_webview_window("main").map(|w| w.hide());
+                            api.prevent_close();
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -667,6 +797,13 @@ pub fn run() {
             logging::get_logs,
             logging::log_message,
             read_clipboard_text,
+            get_real_ip,
+            outlet_ip,
+            speed_test,
+            get_connections,
+            import_subscription_content,
+            import_subscription_file,
+            initialize_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -694,6 +831,404 @@ fn read_clipboard_text() -> Result<String, String> {
     clipboard
         .get_text()
         .map_err(|e| format!("Clipboard read: {e}"))
+}
+
+/// Get the user's real IP (before VPN/proxy) with GeoIP location.
+/// Always fetches directly (no proxy) — works whether VPN is connected or not.
+#[tauri::command]
+async fn get_real_ip() -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let ip_urls = [
+        "http://checkip.amazonaws.com",
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ];
+
+    let mut ip = String::new();
+    for url in &ip_urls {
+        if let Ok(resp) = client.get(*url).send().await {
+            if let Ok(text) = resp.text().await {
+                let trimmed = text.trim().to_string();
+                if !trimmed.is_empty() {
+                    ip = trimmed;
+                    break;
+                }
+            }
+        }
+    }
+
+    if ip.is_empty() {
+        return Err("Could not determine external IP".into());
+    }
+
+    // GeoIP location from ip-api.com
+    let location = match client.get(format!("http://ip-api.com/json/{ip}")).send().await {
+        Ok(resp) => {
+            if let Ok(v) = resp.json::<serde_json::Value>().await {
+                let country = v.get("country").and_then(|c| c.as_str()).unwrap_or("");
+                let city = v.get("city").and_then(|c| c.as_str()).unwrap_or("");
+                if !country.is_empty() && !city.is_empty() {
+                    Some(format!("{}, {}", city, country))
+                } else if !country.is_empty() {
+                    Some(country.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
+    .unwrap_or_default();
+
+    if !location.is_empty() {
+        Ok(format!("{} ({})", ip, location))
+    } else {
+        Ok(ip)
+    }
+}
+
+/// Find the active proxy's outlet (external) IP address via checkip.amazonaws.com
+/// Uses the active proxy port when connected in proxy mode so the request
+/// actually goes through the VPN / proxy tunnel.
+#[tauri::command]
+async fn outlet_ip(
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    if stats_port == 0 {
+        return Err("VPN not connected".into());
+    }
+
+    // If sing-box is running in proxy mode, route the IP check through it
+    let proxy_port = app
+        .try_state::<Mutex<crate::settings::AppSettings>>()
+        .and_then(|state| {
+            state.try_lock().ok().map(|guard| guard.proxy_port)
+        });
+
+    let mut client_builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8));
+
+    if let Some(port) = proxy_port {
+        if let Ok(proxy) = reqwest::Proxy::http(format!("http://127.0.0.1:{port}")) {
+            client_builder = client_builder.proxy(proxy);
+        }
+    }
+
+    let client = client_builder
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Try multiple IP check services (some may be blocked depending on region)
+    let ip_urls = [
+        "http://checkip.amazonaws.com",
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ];
+
+    let mut ip = String::new();
+    for url in &ip_urls {
+        if let Ok(resp) = client.get(*url).send().await {
+            if let Ok(text) = resp.text().await {
+                let trimmed = text.trim().to_string();
+                if !trimmed.is_empty() {
+                    ip = trimmed;
+                    break;
+                }
+            }
+        }
+    }
+
+    if ip.is_empty() {
+        return Err("Could not determine external IP".into());
+    }
+
+    // Try to get location info from ip-api.com
+    let location = match client.get(format!("http://ip-api.com/json/{ip}")).send().await {
+        Ok(resp) => {
+            if let Ok(v) = resp.json::<serde_json::Value>().await {
+                let country = v.get("country").and_then(|c| c.as_str()).unwrap_or("");
+                let city = v.get("city").and_then(|c| c.as_str()).unwrap_or("");
+                if !country.is_empty() && !city.is_empty() {
+                    Some(format!("{}, {}", city, country))
+                } else if !country.is_empty() {
+                    Some(country.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        Err(_) => None,
+    }
+    .unwrap_or_default();
+
+    if !location.is_empty() {
+        Ok(format!("{} ({})", ip, location))
+    } else {
+        Ok(ip)
+    }
+}
+
+/// Speed test: test latency of all servers via Clash API delay endpoint
+#[tauri::command]
+async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
+    let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    if stats_port == 0 {
+        return Err("VPN not connected".into());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let api_url = format!("http://127.0.0.1:{stats_port}");
+    let test_url = "http://cp.cloudflare.com/generate_204";
+
+    // First get all proxies
+    let groups_resp = client
+        .get(format!("{api_url}/proxies"))
+        .send()
+        .await
+        .map_err(|e| format!("Clash API error: {e}"))?;
+
+    let groups: serde_json::Value = groups_resp
+        .json()
+        .await
+        .map_err(|e| format!("Parse error: {e}"))?;
+
+    let mut results = Vec::new();
+
+    // Find all proxy outbounds (not direct, block, or groups)
+    if let Some(proxies) = groups.get("proxies").and_then(|p| p.as_object()) {
+        for (name, proxy) in proxies {
+            let ptype = proxy.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if ptype == "Direct" || ptype == "Reject" || ptype == "Selector" || ptype == "URLTest" || ptype == "Fallback" {
+                continue;
+            }
+            // Test each proxy
+            let delay_url = format!("{api_url}/proxies/{name}/delay?url={test_url}&timeout=5000");
+            if let Ok(resp) = client.get(&delay_url).send().await {
+                if let Ok(body) = resp.text().await {
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
+                        results.push(data);
+                    }
+                }
+            }
+        }
+    }
+
+    // If no per-proxy results, test the proxy outbound directly
+    if results.is_empty() {
+        let delay_url = format!("{api_url}/proxies/proxy/delay?url={test_url}&timeout=5000");
+        if let Ok(resp) = client.get(&delay_url).send().await {
+            if let Ok(body) = resp.text().await {
+                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
+                    results.push(data);
+                }
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Get active connections from sing-box Clash API
+#[tauri::command]
+async fn get_connections() -> Result<Vec<serde_json::Value>, String> {
+    let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    if stats_port == 0 {
+        return Err("VPN not connected".into());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{stats_port}/connections"))
+        .send()
+        .await
+        .map_err(|e| format!("Clash API error: {e}"))?;
+
+    let data: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Parse error: {e}"))?;
+
+    let connections = data["connections"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(connections)
+}
+
+/// Import subscription from raw content (file content or pasted data)
+#[tauri::command]
+async fn import_subscription_content(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ProfileState>,
+    name: String,
+    content: String,
+) -> Result<SubscriptionProfile, String> {
+    let logger = app.state::<StdMutex<Logger>>();
+    log(
+        &app,
+        &logger,
+        LogLevel::Info,
+        LogSource::Subscription,
+        format!("Importing subscription content: {name}"),
+    );
+
+    let servers = crate::subscription::parser::parse_subscription(&content)
+        .map_err(|e| format!("Failed to parse subscription: {e}"))?;
+
+    if servers.is_empty() {
+        return Err("No servers found in content".into());
+    }
+
+    let servers = crate::profile::process_servers(&app, servers).await;
+
+    let profile = SubscriptionProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        name,
+        url: format!("content://{}", uuid::Uuid::new_v4()),
+        servers,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        traffic_used: None,
+        traffic_total: None,
+        traffic_expiry: None,
+    };
+
+    let mut mgr = state.manager.lock().await;
+    mgr.list_mut().push(profile.clone());
+    mgr.save().map_err(|e| e.to_string())?;
+
+    log(
+        &app,
+        &logger,
+        LogLevel::Success,
+        LogSource::Subscription,
+        format!("Imported {} server(s) from content", profile.servers.len()),
+    );
+
+    Ok(profile)
+}
+
+/// Import subscription from a local file path
+#[tauri::command]
+async fn import_subscription_file(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ProfileState>,
+    file_path: String,
+) -> Result<SubscriptionProfile, String> {
+    let logger = app.state::<StdMutex<Logger>>();
+    log(
+        &app,
+        &logger,
+        LogLevel::Info,
+        LogSource::Subscription,
+        format!("Importing subscription from file: {file_path}"),
+    );
+
+    // Read file content
+    let content = tokio::fs::read_to_string(&file_path)
+        .await
+        .map_err(|e| format!("Failed to read file: {e}"))?;
+
+    // Try to parse as subscription data
+    let servers = crate::subscription::parser::parse_subscription(&content)
+        .map_err(|e| format!("Failed to parse subscription: {e}"))?;
+
+    if servers.is_empty() {
+        return Err("No servers found in file".into());
+    }
+
+    let file_name = std::path::Path::new(&file_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Imported")
+        .to_string();
+
+    // Use file URL as unique identifier (hash of content)
+    let url = format!("file://{}", file_path);
+
+    let mut mgr = state.manager.lock().await;
+    let servers = crate::profile::process_servers(&app, servers).await;
+    let server_count = servers.len();
+
+    let profile = SubscriptionProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: file_name,
+        url,
+        servers,
+        updated_at: chrono::Utc::now().to_rfc3339(),
+        traffic_used: None,
+        traffic_total: None,
+        traffic_expiry: None,
+    };
+
+    mgr.list_mut().push(profile.clone());
+    mgr.save().map_err(|e| e.to_string())?;
+
+    log(
+        &app,
+        &logger,
+        LogLevel::Success,
+        LogSource::Subscription,
+        format!("Imported {server_count} server(s) from file"),
+    );
+
+    Ok(profile)
+}
+
+/// Initialize app resources: download GeoIP database, ensure sing-box is installed.
+/// Call from frontend on startup to show a loading screen.
+#[tauri::command]
+async fn initialize_app(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, VpnState>,
+) -> Result<(), String> {
+    let logger = app.state::<StdMutex<Logger>>();
+    log(
+        &app,
+        &logger,
+        LogLevel::Info,
+        LogSource::System,
+        "Initializing app...".into(),
+    );
+
+    // 1. Ensure sing-box is installed (checks for updates if needed)
+    let manager = state.manager.lock().await;
+    let _ = manager.ensure_installed(&app).await.map_err(|e| e.to_string())?;
+    drop(manager);
+
+    // 2. Download GeoIP database
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let geo_dir = data_dir.join("geoip");
+    std::fs::create_dir_all(&geo_dir).map_err(|e| e.to_string())?;
+    crate::vpn::geoip::ensure_downloaded(&geo_dir).await?;
+
+    log(
+        &app,
+        &logger,
+        LogLevel::Success,
+        LogSource::System,
+        "App initialized".into(),
+    );
+    Ok(())
 }
 
 /// Check if a process is alive by PID.

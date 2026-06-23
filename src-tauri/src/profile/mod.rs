@@ -14,18 +14,18 @@ fn proxy_port(app: &AppHandle) -> Option<u16> {
     use crate::settings::AppSettings;
     // If sing-box is running, use its proxy port
     if crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-        if let Some(settings) = app.try_state::<Mutex<AppSettings>>() {
-            if let Ok(settings) = settings.lock() {
+        if let Some(settings) = app.try_state::<tokio::sync::Mutex<AppSettings>>() {
+            if let Ok(settings) = settings.try_lock() {
                 return Some(settings.proxy_port);
             }
         }
     }
     // Fallback: always try the configured proxy port — may connect if the
     // previous sing-box instance is still running, or user has external proxy
-    if let Some(settings) = app.try_state::<Mutex<AppSettings>>() {
-        if let Ok(settings) = settings.lock() {
-            if settings.proxy_port > 0 {
-                return Some(settings.proxy_port);
+    if let Some(settings) = app.try_state::<tokio::sync::Mutex<AppSettings>>() {
+        if let Ok(settings_guard) = settings.try_lock() {
+            if settings_guard.proxy_port > 0 {
+                return Some(settings_guard.proxy_port);
             }
         }
     }
@@ -98,12 +98,20 @@ impl ProfileManager {
 
         servers = process_servers(app, servers).await;
 
+        // Fetch subscription traffic info
+        let (traffic_used, traffic_total, traffic_expiry) = crate::subscription::fetch_subscription_traffic(&clean_url, proxy_port(app)).await
+            .map(|(used, total, expiry)| (Some(used), Some(total), expiry))
+            .unwrap_or((None, None, None));
+
         let profile = SubscriptionProfile {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             url: clean_url,
             servers,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            traffic_used,
+            traffic_total,
+            traffic_expiry,
         };
 
         self.profiles.push(profile.clone());
@@ -166,8 +174,25 @@ impl ProfileManager {
         }
 
         servers = process_servers(app, servers).await;
+
+        // Guard: don't overwrite servers with empty list (e.g. content:// URLs)
+        if servers.is_empty() {
+            return Err(VpnError::Subscription(
+                "Refresh returned 0 servers — keeping existing servers".into()
+            ));
+        }
+
         self.profiles[idx].servers = servers;
         self.profiles[idx].updated_at = chrono::Utc::now().to_rfc3339();
+
+        // Refresh traffic info
+        let traffic = crate::subscription::fetch_subscription_traffic(&self.profiles[idx].url, proxy_port(app)).await;
+        if let Some((used, total, expiry)) = traffic {
+            self.profiles[idx].traffic_used = Some(used);
+            self.profiles[idx].traffic_total = Some(total);
+            self.profiles[idx].traffic_expiry = expiry;
+        }
+
         let profile = self.profiles[idx].clone();
         self.save()?;
         Ok(profile)
@@ -179,6 +204,32 @@ impl ProfileManager {
 pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Vec<ServerProfile> {
     let initial_count = servers.len();
     let logger = app.state::<Mutex<Logger>>();
+
+    // Lazy-init GeoIP: try to load existing MMDB; spawn download if missing
+    if !crate::vpn::geoip::is_ready() {
+        let data_dir = app.path().app_data_dir().ok();
+        if let Some(dir) = data_dir {
+            let db_path = dir.join("geoip").join("GeoLite2-Country.mmdb");
+            if db_path.exists() {
+                let _ = crate::vpn::geoip::init(&db_path);
+            } else {
+                // Spawn background download — will be ready for next refresh
+                let app_clone = app.clone();
+                tokio::spawn(async move {
+                    let geo_dir = app_clone.path().app_data_dir().unwrap_or_default().join("geoip");
+                    if let Err(e) = crate::vpn::geoip::ensure_downloaded(&geo_dir).await {
+                        log(
+                            &app_clone,
+                            &app_clone.state::<Mutex<Logger>>(),
+                            LogLevel::Warning,
+                            LogSource::System,
+                            format!("GeoIP download failed: {e}"),
+                        );
+                    }
+                });
+            }
+        }
+    }
 
     // 1. Deduplication by protocol + server + port + uuid + password
     let mut unique = Vec::new();
@@ -208,48 +259,47 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
     }
 
     // 2. Apply user filters (country, protocol) from settings
-    if let Some(settings) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
-        if let Ok(settings) = settings.lock() {
-            let total_before = unique.len();
-            unique.retain(|s| {
-                // Filter by protocol
-                if !settings.allowed_protocols.is_empty() {
-                    if !settings.allowed_protocols.contains(&s.protocol) {
-                        return false;
-                    }
+    if let Some(settings) = app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>() {
+        let settings_guard = settings.lock().await;
+        let total_before = unique.len();
+        unique.retain(|s| {
+            // Filter by protocol
+            if !settings_guard.allowed_protocols.is_empty() {
+                if !settings_guard.allowed_protocols.contains(&s.protocol) {
+                    return false;
                 }
-                if !settings.blocked_protocols.is_empty() {
-                    if settings.blocked_protocols.contains(&s.protocol) {
-                        return false;
-                    }
-                }
-                // Filter by country (flag must be resolved first)
-                if !settings.allowed_countries.is_empty() {
-                    if let Some(ref flag) = s.flag {
-                        if !settings.allowed_countries.contains(flag) {
-                            return false;
-                        }
-                    }
-                }
-                if !settings.blocked_countries.is_empty() {
-                    if let Some(ref flag) = s.flag {
-                        if settings.blocked_countries.contains(flag) {
-                            return false;
-                        }
-                    }
-                }
-                true
-            });
-            let filtered = total_before - unique.len();
-            if filtered > 0 {
-                log(
-                    app,
-                    &logger,
-                    LogLevel::Info,
-                    LogSource::Subscription,
-                    format!("Filtered {filtered} server(s) by country/protocol settings"),
-                );
             }
+            if !settings_guard.blocked_protocols.is_empty() {
+                if settings_guard.blocked_protocols.contains(&s.protocol) {
+                    return false;
+                }
+            }
+            // Filter by country (flag must be resolved first)
+            if !settings_guard.allowed_countries.is_empty() {
+                if let Some(ref flag) = s.flag {
+                    if !settings_guard.allowed_countries.contains(flag) {
+                        return false;
+                    }
+                }
+            }
+            if !settings_guard.blocked_countries.is_empty() {
+                if let Some(ref flag) = s.flag {
+                    if settings_guard.blocked_countries.contains(flag) {
+                        return false;
+                    }
+                }
+            }
+            true
+        });
+        let filtered = total_before - unique.len();
+        if filtered > 0 {
+            log(
+                app,
+                &logger,
+                LogLevel::Info,
+                LogSource::Subscription,
+                format!("Filtered {filtered} server(s) by country/protocol settings"),
+            );
         }
     }
 
@@ -273,11 +323,16 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
             .await
             .expect("semaphore not closed");
 
-        // Resolve country flag from server IP (if not already set)
+        // Resolve country flag from server name (emoji) or IP (GeoIP)
         if server.flag.is_none() {
-            let country = crate::vpn::geoip::resolve(&server.server);
-            if country != "Unknown" {
-                server.flag = Some(country);
+            // 1. Try emoji flag in server name first
+            let flag = emoji_flag_from_name(&server.name)
+                .or_else(|| {
+                    let c = crate::vpn::geoip::resolve(&server.server);
+                    if c != "Unknown" { Some(c) } else { None }
+                });
+            if let Some(f) = flag {
+                server.flag = Some(f);
             }
         }
 
@@ -581,6 +636,9 @@ mod tests {
             url: "https://example.com/sub".into(),
             servers: vec![],
             updated_at: "2025-01-01T00:00:00Z".into(),
+            traffic_used: None,
+            traffic_total: None,
+            traffic_expiry: None,
         };
 
         {
@@ -598,7 +656,40 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
 
+/// Extract the country code from an emoji flag at the start of a server name.
+///
+/// Examples:
+/// - "🇨🇭 Switzerland" → Some("CH")
+/// - "🇵🇱 Warsaw" → Some("PL")
+/// - "some-server" → None
+fn emoji_flag_from_name(name: &str) -> Option<String> {
+    // Emoji flags are two Regional Indicator symbols: U+1F1E6..U+1F1FF (🇦..🇿)
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() < 2 {
+        return None;
+    }
+
+    let c1 = chars[0] as u32;
+    let c2 = chars[1] as u32;
+
+    // Regional Indicator A..Z
+    if c1 >= 0x1F1E6 && c1 <= 0x1F1FF && c2 >= 0x1F1E6 && c2 <= 0x1F1FF {
+        let letter1 = char::from_u32((c1 - 0x1F1E6) + b'A' as u32)?;
+        let letter2 = char::from_u32((c2 - 0x1F1E6) + b'A' as u32)?;
+        Some(format!("{letter1}{letter2}"))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod extra_tests {
+    use super::*;
+    fn test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("omnitun-test-{name}"))
+    }
     #[test]
     fn test_remove_nonexistent_returns_error() {
         let dir = test_dir("remove_err");

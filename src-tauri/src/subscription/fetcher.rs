@@ -89,7 +89,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_http_fetcher_invalid_url() {
-        let fetcher = HttpFetcher::new();
+        let fetcher = HttpFetcher::new(None);
         let result = fetcher.fetch("htp://[invalid-url").await;
         assert!(result.is_err());
     }

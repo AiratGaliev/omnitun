@@ -1,6 +1,6 @@
 import { useVPNStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
-import { Network, PowerOff, Server, ShieldAlert } from 'lucide-react';
+import { Network, PowerOff, Server, Shield, ShieldAlert, Split } from 'lucide-react';
 import { toast } from 'sonner';
 import { SettingItem } from './SettingItem';
 
@@ -81,6 +81,26 @@ export function NetworkSettings() {
           </div>
         )}
       </div>
+      <SettingItem
+        icon={<Shield size={20} className="text-orange-400" />}
+        title={t('antiDpi')}
+        description={t('antiDpiDesc')}
+        checked={settings.antiDpi}
+        onChange={(checked) => {
+          updateSettings({ antiDpi: checked });
+          addLog(`Anti-DPI ${checked ? 'enabled' : 'disabled'}`, 'info', 'settings');
+        }}
+      />
+      <SettingItem
+        icon={<Split size={20} className="text-pink-400" />}
+        title={t('enableMux')}
+        description={t('enableMuxDesc')}
+        checked={settings.enableMux}
+        onChange={(checked) => {
+          updateSettings({ enableMux: checked });
+          addLog(`Mux ${checked ? 'enabled' : 'disabled'}`, 'info', 'settings');
+        }}
+      />
     </>
   );
 }

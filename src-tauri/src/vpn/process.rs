@@ -63,59 +63,65 @@ impl ProcessManager {
             guard.take()
         };
 
-        if let Some(pid) = pid {
-            #[cfg(target_os = "windows")]
-            {
-                // Kill ALL sing-box processes (handles both elevated and non-elevated)
-                // This is more robust than killing by PID, since the tracked PID
-                // might be cmd.exe's PID rather than sing-box.exe's
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/f", "/im", "sing-box.exe"])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output();
+        if pid.is_none() {
+            return Ok(());
+        }
 
-                // Also try killing by PID as fallback
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/pid", &pid.to_string(), "/f"])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output();
+        // Windows: parallel kill — try both non-elevated and elevated simultaneously
+        #[cfg(target_os = "windows")]
+        {
+            let pid = pid.unwrap();
 
-                // If the process was elevated, we need elevated taskkill
-                tokio::time::sleep(Duration::from_secs(1)).await;
+            // Fire both killers in parallel
+            let _ = std::process::Command::new("taskkill")
+                .args(["/f", "/im", "sing-box.exe"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
 
-                // Check if sing-box is still running
-                let check = std::process::Command::new("tasklist")
-                    .args(["/fi", "imagename eq sing-box.exe", "/nh"])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output();
+            let _ = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command",
+                    &format!("Start-Process 'taskkill' -Verb RunAs -WindowStyle Hidden -ArgumentList '/f','/im','sing-box.exe' | Out-Null")])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
 
-                if let Ok(output) = check {
-                    let out = String::from_utf8_lossy(&output.stdout);
-                    if !out.contains("INFO: No tasks") {
-                        // Still running — try elevated kill
-                        let ps_script = "Start-Process 'taskkill' -Verb RunAs -ArgumentList '/f','/im','sing-box.exe' -WindowStyle Hidden -Wait | Out-Null".to_string();
-                        let _ = std::process::Command::new("powershell")
-                            .args(["-NoProfile", "-Command", &ps_script])
-                            .creation_flags(CREATE_NO_WINDOW)
-                            .output();
-                    }
+            // Quick poll: up to 2 seconds total
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if !crate::is_process_alive(pid) {
+                    return Ok(());
                 }
             }
 
-            #[cfg(not(target_os = "windows"))]
-            {
-                // Send SIGTERM
-                let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
-                tokio::time::sleep(Duration::from_secs(3)).await;
-                // Force kill if still alive
-                std::process::Command::new("kill")
-                    .args(["-9", &pid.to_string()])
-                    .output()
-                    .map_err(|e| VpnError::Process(format!("Failed to kill process: {e}")))?;
-            }
+            return Err(VpnError::Process(
+                format!("sing-box PID {pid} alive after taskkill")
+            ));
         }
 
-        Ok(())
+        // Unix: SIGTERM → wait → SIGKILL
+        #[cfg(not(target_os = "windows"))]
+        {
+            let pid = pid.unwrap();
+            let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+
+            if !crate::is_process_alive(pid) {
+                return Ok(());
+            }
+
+            std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output()
+                .map_err(|e| VpnError::Process(format!("Failed to kill process {pid}: {e}")))?;
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if crate::is_process_alive(pid) {
+                return Err(VpnError::Process(format!(
+                    "Could not kill sing-box (PID {pid}) even with SIGKILL"
+                )));
+            }
+
+            Ok(())
+        }
     }
 
     async fn launch(&self, config_path: &str, elevated: bool) -> Result<u32, VpnError> {

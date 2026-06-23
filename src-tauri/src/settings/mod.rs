@@ -22,6 +22,9 @@ pub struct AppSettings {
     pub blocked_protocols: Vec<String>,
     pub language: String,
     pub auto_update_interval: u32,
+    pub anti_dpi: bool,
+    pub enable_mux: bool,
+    pub minimize_to_tray: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +55,9 @@ impl Default for AppSettings {
             blocked_protocols: Vec::new(),
             language: "en".to_string(),
             auto_update_interval: 5,
+            anti_dpi: true,
+            enable_mux: false,
+            minimize_to_tray: false,
         }
     }
 }

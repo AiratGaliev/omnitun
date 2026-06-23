@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import type { ConnectionStatus, LogEntry, LogSource, Profile, Server, Settings } from './types';
+import type { ConnectionInfo, ConnectionStatus, LogEntry, LogSource, Profile, Server, Settings, SpeedTestResult } from './types';
 
 interface VpnStatusPayload {
   status: string | { error: string };
@@ -34,12 +34,15 @@ interface RustServerProfile {
   flag?: string;
 }
 
-interface RustSubscriptionProfile {
+export interface RustSubscriptionProfile {
   id: string;
   name: string;
   url: string;
   servers: RustServerProfile[];
   updated_at: string;
+  traffic_used?: number;
+  traffic_total?: number;
+  traffic_expiry?: string;
 }
 
 interface VPNStore {
@@ -74,6 +77,14 @@ interface VPNStore {
   setSpeeds: (speeds: { up: number; down: number }) => void;
   toggleConnection: () => Promise<void>;
   initListener: () => Promise<() => void>;
+  outletIp: string | null;
+  fetchOutletIp: () => Promise<void>;
+  realIp: string | null;
+  fetchRealIp: () => Promise<void>;
+  speedTestResult: SpeedTestResult | null;
+  runSpeedTest: () => Promise<SpeedTestResult | null>;
+  connections: ConnectionInfo[];
+  refreshConnections: () => Promise<void>;
 }
 
 const defaultServers: Server[] = [];
@@ -100,12 +111,15 @@ function countryToFlagEmoji(code: string): string {
   return String.fromCodePoint(upper.charCodeAt(0) + offset, upper.charCodeAt(1) + offset);
 }
 
-function mapRustProfile(rust: RustSubscriptionProfile): Profile {
+export function mapRustProfile(rust: RustSubscriptionProfile): Profile {
   return {
     id: rust.id,
     name: rust.name,
     url: rust.url,
     lastUpdated: Date.parse(rust.updated_at) || Date.now(),
+    trafficUsed: rust.traffic_used,
+    trafficTotal: rust.traffic_total,
+    trafficExpiry: rust.traffic_expiry,
     servers: rust.servers.map(
       (s: RustServerProfile): Server => ({
         id: s.id,
@@ -143,6 +157,10 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   connectedAt: null,
   logs: [],
   settingsVersion: 0,
+  outletIp: null,
+  realIp: null,
+  speedTestResult: null,
+  connections: [],
   settings: {
     acceptTerms: false,
     routingMode: 'vpn',
@@ -161,6 +179,9 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     blockedProtocols: [],
     language: 'en',
     autoUpdateInterval: 5,
+    antiDpi: true,
+    enableMux: false,
+    minimizeToTray: false,
   },
 
   setStatus: (status) => {
@@ -337,6 +358,45 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     set({ speeds });
   },
 
+  fetchOutletIp: async () => {
+    try {
+      const ip = await invoke<string>('outlet_ip');
+      set({ outletIp: ip });
+    } catch {
+      set({ outletIp: null });
+    }
+  },
+
+  fetchRealIp: async () => {
+    try {
+      const ip = await invoke<string>('get_real_ip');
+      set({ realIp: ip });
+    } catch {
+      set({ realIp: null });
+    }
+  },
+
+  runSpeedTest: async () => {
+    try {
+      const results = await invoke<SpeedTestResult[]>('speed_test');
+      const best = results.length > 0 ? results.reduce((a, b) => (a.delay ?? 999) < (b.delay ?? 999) ? a : b) : null;
+      set({ speedTestResult: best });
+      return best;
+    } catch {
+      set({ speedTestResult: null });
+      return null;
+    }
+  },
+
+  refreshConnections: async () => {
+    try {
+      const conns = await invoke<ConnectionInfo[]>('get_connections');
+      set({ connections: conns });
+    } catch {
+      // VPN not connected — not an error
+    }
+  },
+
   toggleConnection: async () => {
     const { status, activeServer, addLog, settings } = get();
     try {
@@ -365,12 +425,74 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
           transport_host: activeServer?.transportHost ?? null,
           reality_pbk: activeServer?.realityPbk ?? null,
           reality_sid: activeServer?.realitySid ?? null,
+          ping_ms: null,
+          flag: null,
+          wg_local_address: null,
+          wg_allowed_ips: null,
+          wg_dns: null,
+          wg_mtu: null,
+          wg_keepalive: null,
+          username: null,
         };
+        // Send all other servers as alternatives for smart selector
+        const mapServer = (s: Server) => ({
+          id: s.id,
+          name: s.name,
+          protocol: s.protocol ?? 'vless',
+          server: s.server ?? '127.0.0.1',
+          port: s.port ?? 0,
+          uuid: s.uuid ?? null,
+          password: s.password ?? null,
+          method: s.method ?? null,
+          sni: s.sni ?? null,
+          flow: s.flow ?? null,
+          public_key: s.publicKey ?? null,
+          private_key: s.privateKey ?? null,
+          transport_type: s.transportType ?? null,
+          transport_path: s.transportPath ?? null,
+          transport_host: s.transportHost ?? null,
+          reality_pbk: s.realityPbk ?? null,
+          reality_sid: s.realitySid ?? null,
+          ping_ms: null,
+          flag: null,
+          wg_local_address: null,
+          wg_allowed_ips: null,
+          wg_dns: null,
+          wg_mtu: null,
+          wg_keepalive: null,
+          username: null,
+        });
+        const alternativeServers = get().servers
+          .filter((s) => s.id !== activeServer?.id)
+          .slice(0, 20)
+          .map(mapServer);
         await invoke('start_vpn', {
           profile,
+          alternativeServers: alternativeServers,
           routingMode: settings.routingMode,
           proxyPort: settings.proxyPort,
         });
+
+        // Verify IP changed through VPN — poll outlet IP until different from real IP
+        const realIp = get().realIp;
+        const maxAttempts = 15; // 30 seconds (2s interval)
+        let ipChanged = false;
+        for (let i = 0; i < maxAttempts; i++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          try {
+            const vpnIp = await invoke<string>('outlet_ip');
+            if (realIp && vpnIp && !vpnIp.startsWith(realIp.split(' ')[0])) {
+              set({ outletIp: vpnIp });
+              ipChanged = true;
+              break;
+            }
+          } catch {
+            // VPN not ready yet, retry
+          }
+        }
+        if (!ipChanged && realIp) {
+          addLog('VPN connected but IP did not change — check your proxy server', 'warning', 'system');
+        }
       } else {
         addLog('Disconnecting...', 'info', 'system');
         set({ status: 'disconnecting' });
