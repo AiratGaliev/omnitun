@@ -230,7 +230,7 @@ async fn start_vpn(
                         let mgr_arc = manager_arc.clone();
                         tokio::spawn(async move {
                             let client = reqwest::Client::builder()
-                                .timeout(Duration::from_secs(5))
+                                .timeout(Duration::from_secs(2))
                                 .build()
                                 .unwrap_or_default();
                             let url = format!("http://127.0.0.1:{stats_port}/traffic");
@@ -242,23 +242,67 @@ async fn start_vpn(
                                         break;
                                     }
                                 }
-                                // GET /traffic returns streaming newline-delimited JSON.
-                                // Each chunk is a full line like {"up":123,"down":456}\n
+                                // GET /traffic returns newline-delimited JSON lines.
+                                // We do a short-lived GET each second instead of streaming,
+                                // which is more resilient to sing-box restarts.
                                 if let Ok(resp) = client.get(&url).send().await {
-                                    if let Err(e) = parse_traffic_stream(resp, &app_clone).await {
-                                        log(
-                                            &app_clone,
-                                            &app_clone.state::<StdMutex<Logger>>(),
-                                            LogLevel::Warning,
-                                            LogSource::System,
-                                            format!("Traffic poll error: {e}"),
-                                        );
+                                    if let Ok(text) = resp.text().await {
+                                        for line in text.lines() {
+                                            if let Some(up_down) = parse_traffic_line(line) {
+                                                emit_traffic(&app_clone, up_down.0, up_down.1);
+                                            }
+                                        }
                                     }
                                 }
                                 tokio::time::sleep(Duration::from_secs(1)).await;
                             }
                         });
                     }
+
+                    // Background latency scheduler: re-test server pings periodically
+                    // using the configured auto_update_interval from settings (default 30 min).
+                    let app_clone = app.clone();
+                    let mgr_arc_sched = manager_arc.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(15)).await;
+                        loop {
+                            // Read configured interval (minutes → seconds, default 30 min, min 5 min)
+                            let interval_secs = {
+                                if let Some(state) = app_clone.try_state::<Mutex<crate::settings::AppSettings>>() {
+                                    let settings = state.lock().await;
+                                    let minutes = if settings.auto_update_interval < 5 { 5 } else { settings.auto_update_interval };
+                                    minutes as u64 * 60
+                                } else {
+                                    1800
+                                }
+                            };
+                            tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+                            // Stop if disconnected
+                            {
+                                let mgr = mgr_arc_sched.lock().await;
+                                if mgr.status() != crate::vpn::VpnStatus::Connected {
+                                    break;
+                                }
+                            }
+                            let profile_state = app_clone.state::<ProfileState>();
+                            let mut pm = profile_state.manager.lock().await;
+                            let profile_ids: Vec<String> = pm.list().iter().map(|p| p.id.clone()).collect();
+                            for pid in &profile_ids {
+                                let servers = {
+                                    let p = pm.list().iter().find(|p| &p.id == pid);
+                                    match p {
+                                        Some(p) if !p.servers.is_empty() => p.servers.clone(),
+                                        _ => continue,
+                                    }
+                                };
+                                let re_pinged = crate::profile::process_servers(&app_clone, servers).await;
+                                if let Some(profile) = pm.list_mut().iter_mut().find(|p| &p.id == pid) {
+                                    profile.servers = re_pinged;
+                                }
+                            }
+                            let _ = pm.save();
+                        }
+                    });
 
                     Ok(())
                 }
@@ -626,33 +670,6 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
-}
-
-/// Read streaming Clash API `/traffic` lines (newline-delimited JSON)
-/// and emit parsed up/down values to the frontend.
-async fn parse_traffic_stream(
-    mut resp: reqwest::Response,
-    app: &tauri::AppHandle,
-) -> Result<(), String> {
-    let mut buf = String::new();
-    loop {
-        let chunk = resp.chunk().await.map_err(|e| format!("traffic stream error: {e}"))?;
-        match chunk {
-            None => break, // stream ended
-            Some(bytes) => {
-                buf.push_str(&String::from_utf8_lossy(&bytes));
-                // Process complete lines
-                while let Some(newline) = buf.find('\n') {
-                    let line = buf[..newline].trim().to_string();
-                    buf = buf[newline + 1..].to_string();
-                    if let Some(up_down) = parse_traffic_line(&line) {
-                        emit_traffic(app, up_down.0, up_down.1);
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Parse a single Clash traffic line: {"up":123,"down":456}

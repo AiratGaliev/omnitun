@@ -64,7 +64,7 @@ impl ProfileManager {
         }
     }
 
-    fn save(&self) -> Result<(), VpnError> {
+    pub fn save(&self) -> Result<(), VpnError> {
         let json = serde_json::to_string_pretty(&self.profiles).map_err(|e| {
             VpnError::Subscription(format!("Failed to serialize profiles: {e}"))
         })?;
@@ -74,6 +74,10 @@ impl ProfileManager {
 
     pub fn list(&self) -> &[SubscriptionProfile] {
         &self.profiles
+    }
+
+    pub fn list_mut(&mut self) -> &mut Vec<SubscriptionProfile> {
+        &mut self.profiles
     }
 
     pub async fn add(&mut self, app: &AppHandle, name: String, url: String) -> Result<SubscriptionProfile, VpnError> {
@@ -280,12 +284,23 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         set.spawn(async move {
             let addr = format!("{}:{}", server.server, server.port);
             let start = std::time::Instant::now();
-            let reachable = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                tokio::net::TcpStream::connect(&addr),
-            )
-            .await
-            .is_ok_and(|r| r.is_ok());
+            // Retry up to 3 times with 1-second backoff (Karing-style)
+            let mut reachable = false;
+            for attempt in 1..=3 {
+                if attempt > 1 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                if tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    tokio::net::TcpStream::connect(&addr),
+                )
+                .await
+                .is_ok_and(|r| r.is_ok())
+                {
+                    reachable = true;
+                    break;
+                }
+            }
             let ping_ms = start.elapsed().as_millis() as u64;
             drop(permit);
             (server, reachable, ping_ms)
