@@ -13,8 +13,7 @@ import { Logs } from './components/screens/Logs';
 import { About } from './components/screens/About';
 import { Terms } from './components/screens/Terms';
 import { Navigation } from './components/Navigation';
-
-type Tab = 'home' | 'profiles' | 'settings' | 'logs' | 'about';
+import type { Tab } from '@/types.ts';
 
 const pageVariants = {
   initial: { opacity: 0, y: 15, scale: 0.99 },

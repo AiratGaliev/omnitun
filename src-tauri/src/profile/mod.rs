@@ -8,27 +8,41 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Semaphore;
 
-/// Get proxy port to use for subscription fetch: try running proxy first,
-/// then configured port as fallback.
+/// Get proxy port to route subscription fetch through the active proxy.
+/// Returns None in VPN mode — all traffic already goes through TUN, so direct
+/// fetch works and avoids the proxy not listening issue.
 fn proxy_port(app: &AppHandle) -> Option<u16> {
     use crate::settings::AppSettings;
-    // If sing-box is running, use its proxy port
+
+    // Check current routing mode: in VPN mode, all traffic routes through TUN
+    // automatically, no need to proxy the subscription fetch.
+    if let Some(state) = app.try_state::<tokio::sync::Mutex<AppSettings>>() {
+        if let Ok(guard) = state.try_lock() {
+            if guard.routing_mode == "vpn" {
+                return None;
+            }
+        }
+    }
+
+    // Proxy / system-proxy / local-proxy modes: use the proxy port
+    // so the fetch goes through the active outbound.
     if crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-        if let Some(settings) = app.try_state::<tokio::sync::Mutex<AppSettings>>() {
-            if let Ok(settings) = settings.try_lock() {
-                return Some(settings.proxy_port);
+        if let Some(state) = app.try_state::<tokio::sync::Mutex<AppSettings>>() {
+            if let Ok(guard) = state.try_lock() {
+                return Some(guard.proxy_port);
             }
         }
     }
-    // Fallback: always try the configured proxy port — may connect if the
-    // previous sing-box instance is still running, or user has external proxy
-    if let Some(settings) = app.try_state::<tokio::sync::Mutex<AppSettings>>() {
-        if let Ok(settings_guard) = settings.try_lock() {
-            if settings_guard.proxy_port > 0 {
-                return Some(settings_guard.proxy_port);
+
+    // Fallback: try the configured proxy port
+    if let Some(state) = app.try_state::<tokio::sync::Mutex<AppSettings>>() {
+        if let Ok(guard) = state.try_lock() {
+            if guard.proxy_port > 0 {
+                return Some(guard.proxy_port);
             }
         }
     }
+
     None
 }
 
@@ -61,6 +75,33 @@ impl ProfileManager {
                 Ok(())
             }
             Err(e) => Err(VpnError::Io(e)),
+        }
+    }
+
+    /// Run GeoIP enrichment on all servers missing country/city fields.
+    /// This fixes data from old profiles.json that only had flag set.
+    pub async fn enrich_loaded(&mut self) {
+        if !crate::vpn::geoip::is_ready() {
+            return;
+        }
+        let mut changed = false;
+        for profile in &mut self.profiles {
+            for server in &mut profile.servers {
+                if server.country_name.is_some() && server.city_name.is_some() {
+                    continue; // already enriched
+                }
+                if let Some(info) = crate::vpn::geoip::resolve_hostname(&server.server).await {
+                    server.flag = Some(info.country_code.clone());
+                    server.country_name = Some(info.country_name.clone());
+                    if !info.city.is_empty() {
+                        server.city_name = Some(info.city.clone());
+                    }
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            let _ = self.save();
         }
     }
 
@@ -137,10 +178,43 @@ impl ProfileManager {
             .ok_or_else(|| VpnError::Subscription("Profile not found".into()))?;
 
         let url = &self.profiles[idx].url;
-        let mut servers = if url.starts_with("http://") || url.starts_with("https://") {
-            crate::subscription::fetch_subscription(url, proxy_port(app)).await?
-        } else {
-            crate::subscription::parser::parse_subscription(url)?
+        let fetch_result = match url {
+            u if u.starts_with("http://") || u.starts_with("https://") => {
+                crate::subscription::fetch_subscription(u, proxy_port(app)).await
+            }
+            _ => crate::subscription::parser::parse_subscription(url).map_err(|e| {
+                VpnError::Subscription(format!("Parse error: {e}"))
+            }),
+        };
+
+        // On HTTP/parse error: still bump updated_at so the frontend timer
+        // doesn't retry immediately. The user can manually refresh later.
+        let mut servers = match fetch_result {
+            Ok(s) => s,
+            Err(e) => {
+                log(
+                    app,
+                    &app.state::<Mutex<Logger>>(),
+                    LogLevel::Warning,
+                    LogSource::Subscription,
+                    format!("Refresh failed, bumping updated_at: {e}"),
+                );
+                self.profiles[idx].updated_at = chrono::Utc::now().to_rfc3339();
+                // If we have existing servers, enrich them with GeoIP while we wait
+                if !self.profiles[idx].servers.is_empty() {
+                    let existing = std::mem::take(&mut self.profiles[idx].servers);
+                    self.profiles[idx].servers = process_servers(
+                        app,
+                        existing.into_iter().map(|mut s| {
+                            // Reset ping so it gets re-tested
+                            s.ping_ms = None;
+                            s
+                        }).collect(),
+                    ).await;
+                }
+                self.save()?;
+                return Err(VpnError::Subscription(format!("{e}")));
+            }
         };
 
         // Preserve server IDs across refresh — match by (protocol, server, port, uuid, password)
@@ -161,12 +235,14 @@ impl ProfileManager {
             .collect();
         for server in &mut servers {
             let key = format!(
-                "{}://{}:{}@{}:{}",
+                "{}://{}:{}@{}:{}:{}/{}",
                 server.protocol,
                 server.server,
                 server.port,
                 server.uuid.as_deref().unwrap_or(""),
                 server.password.as_deref().unwrap_or(""),
+                server.method.as_deref().unwrap_or(""),
+                server.transport_type.as_deref().unwrap_or(""),
             );
             if let Some(old_id) = old_index.get(&key) {
                 server.id = old_id.clone();
@@ -199,34 +275,44 @@ impl ProfileManager {
     }
 }
 
-/// Remove duplicate servers and test reachability via TCP ping.
+/// Deduplicate servers, apply user filters, run TCP ping, enrich GeoIP flag.
 /// Logs each step (dedup count, testing, unreachable count, final count).
 pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Vec<ServerProfile> {
     let initial_count = servers.len();
     let logger = app.state::<Mutex<Logger>>();
 
-    // Lazy-init GeoIP: try to load existing MMDB; spawn download if missing
+    // Lazy-init GeoIP: load from disk or download synchronously (one-time cost)
     if !crate::vpn::geoip::is_ready() {
         let data_dir = app.path().app_data_dir().ok();
         if let Some(dir) = data_dir {
-            let db_path = dir.join("geoip").join("GeoLite2-Country.mmdb");
+            let geo_dir = dir.join("geoip");
+            let db_path = geo_dir.join("GeoLite2-City.mmdb");
             if db_path.exists() {
                 let _ = crate::vpn::geoip::init(&db_path);
             } else {
-                // Spawn background download — will be ready for next refresh
-                let app_clone = app.clone();
-                tokio::spawn(async move {
-                    let geo_dir = app_clone.path().app_data_dir().unwrap_or_default().join("geoip");
-                    if let Err(e) = crate::vpn::geoip::ensure_downloaded(&geo_dir).await {
-                        log(
-                            &app_clone,
-                            &app_clone.state::<Mutex<Logger>>(),
-                            LogLevel::Warning,
-                            LogSource::System,
-                            format!("GeoIP download failed: {e}"),
-                        );
-                    }
-                });
+                log(
+                    app,
+                    &logger,
+                    LogLevel::Info,
+                    LogSource::System,
+                    "Downloading GeoIP City database (one-time)...".into(),
+                );
+                match crate::vpn::geoip::ensure_downloaded(&geo_dir).await {
+                    Ok(_) => log(
+                        app,
+                        &logger,
+                        LogLevel::Success,
+                        LogSource::System,
+                        "GeoIP database ready".into(),
+                    ),
+                    Err(e) => log(
+                        app,
+                        &logger,
+                        LogLevel::Warning,
+                        LogSource::System,
+                        format!("GeoIP download failed (will retry): {e}"),
+                    ),
+                }
             }
         }
     }
@@ -236,12 +322,14 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
     let mut seen = HashSet::new();
     for s in servers {
         let key = format!(
-            "{}://{}:{}@{}:{}",
+            "{}://{}:{}@{}:{}:{}/{}",
             s.protocol,
             s.server,
             s.port,
             s.uuid.as_deref().unwrap_or(""),
             s.password.as_deref().unwrap_or(""),
+            s.method.as_deref().unwrap_or(""),
+            s.transport_type.as_deref().unwrap_or(""),
         );
         if seen.insert(key) {
             unique.push(s);
@@ -323,15 +411,9 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
             .await
             .expect("semaphore not closed");
 
-        // Resolve country flag from server name (emoji) or IP (GeoIP)
+        // Try emoji flag from server name first (fast, no network)
         if server.flag.is_none() {
-            // 1. Try emoji flag in server name first
-            let flag = emoji_flag_from_name(&server.name)
-                .or_else(|| {
-                    let c = crate::vpn::geoip::resolve(&server.server);
-                    if c != "Unknown" { Some(c) } else { None }
-                });
-            if let Some(f) = flag {
+            if let Some(f) = emoji_flag_from_name(&server.original_name) {
                 server.flag = Some(f);
             }
         }
@@ -366,6 +448,18 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
     while let Some(result) = set.join_next().await {
         if let Ok((mut server, true, ping_ms)) = result {
             server.ping_ms = Some(ping_ms);
+
+            // GeoIP enrichment: set flag + country/city fields + display name
+            // (subscription names often contain garbled emoji, components separate)
+            if let Some(info) = crate::vpn::geoip::resolve_hostname(&server.server).await {
+                server.flag = Some(info.country_code.clone());
+                server.country_name = Some(info.country_name.clone());
+                if !info.city.is_empty() {
+                    server.city_name = Some(info.city.clone());
+                }
+            }
+            // If GeoIP fails, keep flag from emoji extraction or leave unset
+
             alive.push(server);
         }
     }
@@ -401,7 +495,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
                     &logger,
                     LogLevel::Info,
                     LogSource::Subscription,
-                    format!("Fastest server: {} ({} ms)", fastest.name, fastest.ping_ms.unwrap_or(0)),
+                    format!("Fastest server: {} ({} ms)", fastest.display_name(), fastest.ping_ms.unwrap_or(0)),
                 );
             }
             return updated;

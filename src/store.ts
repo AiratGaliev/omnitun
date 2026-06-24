@@ -14,7 +14,6 @@ interface TrafficPayload {
 
 interface RustServerProfile {
   id: string;
-  name: string;
   protocol: string;
   server: string;
   port: number;
@@ -32,6 +31,8 @@ interface RustServerProfile {
   reality_sid?: string;
   ping_ms?: number;
   flag?: string;
+  country_name?: string;
+  city_name?: string;
 }
 
 export interface RustSubscriptionProfile {
@@ -103,12 +104,20 @@ function extractError(payload: VpnStatusPayload): string | undefined {
   return undefined;
 }
 
-/** Convert two-letter country code (US, DE) to emoji flag (🇺🇸, 🇩🇪). */
-function countryToFlagEmoji(code: string): string {
-  if (code.length !== 2) return code;
-  const offset = 0x1f1e6 - 65; // 'A' → 🇦
-  const upper = code.toUpperCase();
-  return String.fromCodePoint(upper.charCodeAt(0) + offset, upper.charCodeAt(1) + offset);
+// Build ISO → country name lookup from world-countries
+import countries from 'world-countries';
+const countryByName: Record<string, string> = {};
+for (const c of countries) {
+  const code = c.cca2;
+  const name = (c.name as { common: string }).common;
+  countryByName[code.toUpperCase()] = name;
+  countryByName[code.toLowerCase()] = name;
+}
+
+/** Resolve country name from ISO code (e.g. "CH" → "Switzerland"). */
+function resolveCountryName(flag: string | undefined | null): string | undefined {
+  if (flag?.length !== 2) return undefined;
+  return countryByName[flag.toUpperCase()];
 }
 
 export function mapRustProfile(rust: RustSubscriptionProfile): Profile {
@@ -121,27 +130,34 @@ export function mapRustProfile(rust: RustSubscriptionProfile): Profile {
     trafficTotal: rust.traffic_total,
     trafficExpiry: rust.traffic_expiry,
     servers: rust.servers.map(
-      (s: RustServerProfile): Server => ({
-        id: s.id,
-        name: s.name,
-        protocol: s.protocol,
-        server: s.server,
-        port: s.port,
-        uuid: s.uuid,
-        password: s.password,
-        method: s.method,
-        sni: s.sni,
-        flow: s.flow,
-        publicKey: s.public_key,
-        privateKey: s.private_key,
-        transportType: s.transport_type,
-        transportPath: s.transport_path,
-        transportHost: s.transport_host,
-        realityPbk: s.reality_pbk,
-        realitySid: s.reality_sid,
-        ping: s.ping_ms,
-        flag: s.flag ? countryToFlagEmoji(s.flag) : undefined,
-      }),
+      (s: RustServerProfile): Server => {
+        const code = s.flag;
+        const cn = s.country_name ?? (code ? resolveCountryName(code) : undefined);
+        const displayName = cn && s.city_name ? `${cn}, ${s.city_name}` : cn ?? `${s.server}:${s.port}`;
+        return {
+          id: s.id,
+          name: displayName,
+          protocol: s.protocol,
+          server: s.server,
+          port: s.port,
+          uuid: s.uuid,
+          password: s.password,
+          method: s.method,
+          sni: s.sni,
+          flow: s.flow,
+          publicKey: s.public_key,
+          privateKey: s.private_key,
+          transportType: s.transport_type,
+          transportPath: s.transport_path,
+          transportHost: s.transport_host,
+          realityPbk: s.reality_pbk,
+          realitySid: s.reality_sid,
+          ping: s.ping_ms,
+          flag: code,
+          countryName: cn,
+          cityName: s.city_name,
+        };
+      },
     ),
   };
 }
@@ -274,7 +290,15 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      // Network may be blocking GitHub raw — log once on first failure, skip spam
       get().addLog(`Failed to refresh profile: ${msg}`, 'error', 'subscription');
+      // Reset lastUpdated so timer doesn't retry every ~55s.
+      // Wait full autoUpdateInterval before next attempt.
+      set((state) => ({
+        profiles: state.profiles.map((p) =>
+          p.id === id ? { ...p, lastUpdated: Date.now() + Math.random() * 60000 } : p,
+        ),
+      }));
       throw e;
     }
   },

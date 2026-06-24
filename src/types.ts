@@ -1,3 +1,5 @@
+export type Tab = 'home' | 'profiles' | 'settings' | 'logs' | 'about';
+
 export type ConnectionStatus =
   | 'disconnected'
   | 'connecting'
@@ -19,6 +21,8 @@ export interface Server {
   id: string;
   name: string;
   flag?: string;
+  countryName?: string;
+  cityName?: string;
   ping?: number;
   protocol?: string;
   server?: string;

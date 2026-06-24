@@ -82,7 +82,7 @@ fn parse_vless(data: &str) -> Option<ServerProfile> {
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
-        name: if name.is_empty() {
+        original_name: if name.is_empty() {
             params.get("remark").cloned().unwrap_or_default()
         } else {
             name
@@ -104,6 +104,8 @@ fn parse_vless(data: &str) -> Option<ServerProfile> {
         reality_sid: params.get("sid").cloned(),
         ping_ms: None,
         flag: None,
+        country_name: None,
+        city_name: None,
         wg_local_address: None,
         wg_allowed_ips: None,
         wg_dns: None,
@@ -132,7 +134,7 @@ fn parse_vmess(data: &str) -> Option<ServerProfile> {
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
-        name: v
+        original_name: v
             .get("ps")
             .and_then(|x| x.as_str())
             .unwrap_or("")
@@ -161,6 +163,8 @@ fn parse_vmess(data: &str) -> Option<ServerProfile> {
         reality_sid: None,
         ping_ms: None,
         flag: None,
+        country_name: None,
+        city_name: None,
         wg_local_address: None,
         wg_allowed_ips: None,
         wg_dns: None,
@@ -190,7 +194,7 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
                         if let Ok(port) = port_str.parse::<u16>() {
                             return Some(ServerProfile {
                                 id: uuid::Uuid::new_v4().to_string(),
-                                name,
+                                original_name: name,
                                 protocol: "shadowsocks".into(),
                                 server: server.to_string(),
                                 port,
@@ -208,6 +212,8 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
                                 reality_sid: None,
                                 ping_ms: None,
                                 flag: None,
+                                country_name: None,
+                                city_name: None,
                                 wg_local_address: None,
                                 wg_allowed_ips: None,
                                 wg_dns: None,
@@ -236,7 +242,7 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
-        name,
+        original_name: name,
         protocol: "shadowsocks".into(),
         server: server.to_string(),
         port,
@@ -254,6 +260,8 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
         reality_sid: None,
         ping_ms: None,
         flag: None,
+        country_name: None,
+        city_name: None,
         wg_local_address: None,
         wg_allowed_ips: None,
         wg_dns: None,
@@ -274,7 +282,7 @@ fn parse_trojan(data: &str) -> Option<ServerProfile> {
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
-        name: if name.is_empty() {
+        original_name: if name.is_empty() {
             params.get("remark").cloned().unwrap_or_default()
         } else {
             name
@@ -296,6 +304,8 @@ fn parse_trojan(data: &str) -> Option<ServerProfile> {
         reality_sid: params.get("sid").cloned(),
         ping_ms: None,
         flag: None,
+        country_name: None,
+        city_name: None,
         wg_local_address: None,
         wg_allowed_ips: None,
         wg_dns: None,
@@ -316,7 +326,7 @@ fn parse_hysteria2(data: &str) -> Option<ServerProfile> {
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
-        name: if name.is_empty() {
+        original_name: if name.is_empty() {
             params.get("remark").cloned().unwrap_or_default()
         } else {
             name
@@ -338,6 +348,8 @@ fn parse_hysteria2(data: &str) -> Option<ServerProfile> {
         reality_sid: None,
         ping_ms: None,
         flag: None,
+        country_name: None,
+        city_name: None,
         wg_local_address: None,
         wg_allowed_ips: None,
         wg_dns: None,
@@ -360,7 +372,7 @@ fn parse_tuic(data: &str) -> Option<ServerProfile> {
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
-        name: if name.is_empty() {
+        original_name: if name.is_empty() {
             params.get("remark").cloned().unwrap_or_default()
         } else {
             name
@@ -382,6 +394,8 @@ fn parse_tuic(data: &str) -> Option<ServerProfile> {
         reality_sid: None,
         ping_ms: None,
         flag: None,
+        country_name: None,
+        city_name: None,
         wg_local_address: None,
         wg_allowed_ips: None,
         wg_dns: None,
@@ -405,7 +419,7 @@ fn parse_wireguard(data: &str) -> Option<ServerProfile> {
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
-        name: if name.is_empty() {
+        original_name: if name.is_empty() {
             params.get("remark").cloned().unwrap_or_default()
         } else {
             name
@@ -427,6 +441,8 @@ fn parse_wireguard(data: &str) -> Option<ServerProfile> {
         reality_sid: None,
         ping_ms: None,
         flag: None,
+        country_name: None,
+        city_name: None,
         wg_local_address: params.get("local_address").or_else(|| params.get("address")).cloned(),
         wg_allowed_ips: params.get("allowed_ips").cloned(),
         wg_dns: params.get("dns").cloned(),
@@ -458,7 +474,7 @@ fn parse_socks(uri: &str) -> Option<ServerProfile> {
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
-        name: if name.is_empty() { server.clone() } else { name },
+        original_name: if name.is_empty() { server.clone() } else { name },
         protocol: "socks".into(),
         server,
         port,
@@ -486,7 +502,7 @@ fn parse_http(uri: &str) -> Option<ServerProfile> {
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
-        name: if name.is_empty() { user.to_string() } else { name },
+        original_name: if name.is_empty() { user.to_string() } else { name },
         protocol: "http".into(),
         server: server.to_string(),
         port,
@@ -504,6 +520,8 @@ fn parse_http(uri: &str) -> Option<ServerProfile> {
         reality_sid: None,
         ping_ms: None,
         flag: None,
+        country_name: None,
+        city_name: None,
         wg_local_address: None,
         wg_allowed_ips: None,
         wg_dns: None,
@@ -574,7 +592,7 @@ mod tests {
         assert_eq!(p.uuid.unwrap(), "b831381d-6324-4d53-ad4f-8cda48b30811");
         assert_eq!(p.flow.unwrap(), "xtls-rprx-vision");
         assert_eq!(p.sni.unwrap(), "127.0.0.2");
-        assert_eq!(p.name, "Test VLESS");
+        assert_eq!(p.original_name, "Test VLESS");
     }
 
     #[test]
@@ -593,7 +611,7 @@ mod tests {
         assert_eq!(p.reality_sid.unwrap(), "1");
         assert_eq!(p.sni.unwrap(), "example.com");
         assert_eq!(p.flow.unwrap(), "xtls-rprx-vision");
-        assert_eq!(p.name, "VLESS Reality WS");
+        assert_eq!(p.original_name, "VLESS Reality WS");
     }
 
     #[test]
@@ -622,7 +640,7 @@ mod tests {
         assert_eq!(p.server, "127.0.0.3");
         assert_eq!(p.port, 8444);
         assert_eq!(p.uuid.unwrap(), "b831381d-6324-4d53-ad4f-8cda48b30811");
-        assert_eq!(p.name, "VMess 127.0.0.3");
+        assert_eq!(p.original_name, "VMess 127.0.0.3");
         assert_eq!(p.method.unwrap(), "auto");
         assert!(p.sni.is_none(), "Empty tls field means no SNI");
     }
@@ -648,7 +666,7 @@ mod tests {
         assert_eq!(p.port, 8446);
         assert_eq!(p.method.unwrap(), "aes-256-gcm");
         assert_eq!(p.password.unwrap(), "omnitun-test-password");
-        assert_eq!(p.name, "Shadowsocks 127.0.0.4");
+        assert_eq!(p.original_name, "Shadowsocks 127.0.0.4");
     }
 
     #[test]
@@ -658,7 +676,7 @@ mod tests {
         let p = parse_uri(&uri).unwrap();
         assert_eq!(p.server, "example.com");
         assert_eq!(p.port, 18443);
-        assert_eq!(p.name, "");
+        assert_eq!(p.original_name, "");
     }
 
     #[test]
@@ -669,7 +687,7 @@ mod tests {
         assert_eq!(p.server, "127.0.0.3");
         assert_eq!(p.port, 8445);
         assert_eq!(p.password.unwrap(), "omnitun-test-password");
-        assert_eq!(p.name, "Trojan 127.0.0.3");
+        assert_eq!(p.original_name, "Trojan 127.0.0.3");
     }
 
     #[test]
@@ -681,7 +699,7 @@ mod tests {
         assert_eq!(p.port, 8447);
         assert_eq!(p.password.unwrap(), "omnitun-test-password");
         assert_eq!(p.sni.unwrap(), "localhost");
-        assert_eq!(p.name, "Hysteria2 127.0.0.4");
+        assert_eq!(p.original_name, "Hysteria2 127.0.0.4");
     }
 
     #[test]
@@ -694,7 +712,7 @@ mod tests {
         assert_eq!(p.uuid.unwrap(), "b831381d-6324-4d53-ad4f-8cda48b30811");
         assert_eq!(p.password.unwrap(), "omnitun-test-password");
         assert_eq!(p.sni.unwrap(), "localhost");
-        assert_eq!(p.name, "TUIC 127.0.0.5");
+        assert_eq!(p.original_name, "TUIC 127.0.0.5");
     }
 
     #[test]

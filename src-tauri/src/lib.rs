@@ -55,7 +55,7 @@ async fn start_vpn(
         &logger,
         LogLevel::Info,
         LogSource::System,
-        format!("Starting VPN connection to {} ({routing_mode} mode, {} server(s) available)...", profile.name, server_count),
+        format!("Starting VPN connection to {} ({routing_mode} mode, {} server(s) available)...", profile.display_name(), server_count),
     );
     emit_status(&app, VpnStatus::Connecting);
 
@@ -95,7 +95,7 @@ async fn start_vpn(
                         &logger,
                         LogLevel::Success,
                         LogSource::Vpn,
-                        format!("VPN connected to {}", profile.name),
+                        format!("VPN connected to {}", profile.display_name()),
                     );
                     emit_status(&app, VpnStatus::Connected);
 
@@ -1220,6 +1220,12 @@ async fn initialize_app(
     let geo_dir = data_dir.join("geoip");
     std::fs::create_dir_all(&geo_dir).map_err(|e| e.to_string())?;
     crate::vpn::geoip::ensure_downloaded(&geo_dir).await?;
+
+    // 3. Enrich loaded profiles with GeoIP data (fix corrupted names)
+    if let Some(profile_state) = app.try_state::<ProfileState>() {
+        let mut pm = profile_state.manager.lock().await;
+        pm.enrich_loaded().await;
+    }
 
     log(
         &app,

@@ -5,6 +5,17 @@ import { toast } from 'sonner';
 import { useVPNStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { SegmentedControl } from '../SegmentedControl';
+import { hasFlag } from 'country-flag-icons';
+import 'country-flag-icons/3x2/flags.css';
+
+/** Render flag via country-flag-icons library. Falls back to globe emoji. */
+function FlagDisplay({ code, className }: { code?: string; className?: string }) {
+  const cc = code?.toUpperCase();
+  if (cc && cc.length === 2 && hasFlag(cc)) {
+    return <span className={`${className ?? ''} flag:${cc}`} />;
+  }
+  return <span className={className ?? ''}>🌐</span>;
+}
 
 function formatProtocol(protocol: string): string {
   const map: Record<string, string> = {
@@ -19,7 +30,12 @@ function formatProtocol(protocol: string): string {
   return map[protocol] ?? protocol.charAt(0).toUpperCase() + protocol.slice(1);
 }
 
-type Tab = 'home' | 'profiles' | 'settings' | 'logs' | 'about';
+/** Get city name; return empty if none available. */
+function serverCity(srv: { cityName?: string }): string {
+  return srv.cityName ?? '';
+}
+
+import type { Tab } from '@/types.ts';
 
 export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => void }) {
   const {
@@ -248,10 +264,13 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     onClick={() => { setIsServerDropdownOpen(!isServerDropdownOpen); }}
                     className="px-5 py-3 bg-zinc-900/60 hover:bg-zinc-800/80 backdrop-blur-xl transition-all rounded-2xl border border-white/10 flex items-center gap-3 z-20 shadow-lg"
                   >
-                    <span className="text-xl drop-shadow-md">{activeServer?.flag}</span>
-                    <span className="font-semibold text-sm text-zinc-100">
-                      {activeServer?.name}
-                    </span>
+                    <FlagDisplay code={activeServer?.flag} className="text-xl drop-shadow-md" />
+                    <div className="flex flex-col items-start">
+                      <span className="font-semibold text-sm text-zinc-100 leading-tight">
+                        {activeServer?.countryName ?? activeServer?.name ?? ''}
+                      </span>
+                      {activeServer && serverCity(activeServer) ? <span className="text-[11px] text-zinc-500 leading-tight">{serverCity(activeServer)}</span> : null}
+                    </div>
                     <div className="flex items-center gap-1.5 ml-3 pl-3 border-l border-white/10">
                       <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.8)]' : 'bg-zinc-600'}`} />
                       <span className="text-xs font-mono text-zinc-400 w-10 text-right">
@@ -293,8 +312,11 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                 }`}
                               >
                                 <div className="flex items-center gap-3">
-                                  <span className="text-lg">{server.flag}</span>
-                                  <span className="text-sm font-medium">{server.name}</span>
+                                  <FlagDisplay code={server.flag} className="text-lg" />
+                                  <div className="flex flex-col items-start">
+                                    <span className="text-sm font-medium leading-tight">{server.countryName ?? server.name}</span>
+                                    {serverCity(server) ? <span className="text-[11px] text-zinc-500 leading-tight">{serverCity(server)}</span> : null}
+                                  </div>
                                 </div>
                                 <div className="flex items-center gap-2">
                                   <span className={`text-[10px] font-mono px-2 py-0.5 rounded-md ${(server.ping ?? 999) < 60 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-yellow-500/10 text-yellow-400'}`}>

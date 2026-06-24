@@ -53,7 +53,6 @@ impl From<VpnError> for String {
 #[derive(Default)]
 pub struct ServerProfile {
     pub id: String,
-    pub name: String,
     pub protocol: String,
     pub server: String,
     pub port: u16,
@@ -74,6 +73,10 @@ pub struct ServerProfile {
     pub ping_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub city_name: Option<String>,
     // WireGuard-specific fields
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wg_local_address: Option<String>,
@@ -86,6 +89,24 @@ pub struct ServerProfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wg_keepalive: Option<u16>,
     pub username: Option<String>,
+    /// Original subscription-provided name (for display fallback). Not serialized.
+    #[serde(skip)]
+    pub original_name: String,
+}
+
+impl ServerProfile {
+    /// Construct a human-readable display name from GeoIP data or fallback to original_name.
+    pub fn display_name(&self) -> String {
+        if let (Some(country), Some(city)) = (&self.country_name, &self.city_name) {
+            format!("{country}, {city}")
+        } else if let Some(country) = &self.country_name {
+            country.clone()
+        } else if !self.original_name.is_empty() {
+            self.original_name.clone()
+        } else {
+            format!("{}:{}", self.server, self.port)
+        }
+    }
 }
 
 

@@ -697,7 +697,7 @@ mod tests {
     fn vless_profile() -> ServerProfile {
         ServerProfile {
             id: "test-1".into(),
-            name: "VLESS 127.0.0.2".into(),
+            original_name: "VLESS 127.0.0.2".into(),
             protocol: "vless".into(),
             server: "127.0.0.2".into(),
             port: 8443,
@@ -711,7 +711,7 @@ mod tests {
     fn vless_tls_profile() -> ServerProfile {
         ServerProfile {
             id: "test-2".into(),
-            name: "VLESS+TLS 127.0.0.2".into(),
+            original_name: "VLESS+TLS 127.0.0.2".into(),
             protocol: "vless".into(),
             server: "127.0.0.2".into(),
             port: 8442,
