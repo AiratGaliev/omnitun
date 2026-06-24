@@ -104,22 +104,6 @@ function extractError(payload: VpnStatusPayload): string | undefined {
   return undefined;
 }
 
-// Build ISO → country name lookup from world-countries
-import countries from 'world-countries';
-const countryByName: Record<string, string> = {};
-for (const c of countries) {
-  const code = c.cca2;
-  const name = (c.name as { common: string }).common;
-  countryByName[code.toUpperCase()] = name;
-  countryByName[code.toLowerCase()] = name;
-}
-
-/** Resolve country name from ISO code (e.g. "CH" → "Switzerland"). */
-function resolveCountryName(flag: string | undefined | null): string | undefined {
-  if (flag?.length !== 2) return undefined;
-  return countryByName[flag.toUpperCase()];
-}
-
 export function mapRustProfile(rust: RustSubscriptionProfile): Profile {
   return {
     id: rust.id,
@@ -132,7 +116,7 @@ export function mapRustProfile(rust: RustSubscriptionProfile): Profile {
     servers: rust.servers.map(
       (s: RustServerProfile): Server => {
         const code = s.flag;
-        const cn = s.country_name ?? (code ? resolveCountryName(code) : undefined);
+        const cn = s.country_name;
         const displayName = cn && s.city_name ? `${cn}, ${s.city_name}` : cn ?? `${s.server}:${s.port}`;
         return {
           id: s.id,
