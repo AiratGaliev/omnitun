@@ -236,7 +236,9 @@ function ProfileItem({
                   {p.trafficExpiry && (
                     <span className="flex items-center gap-1">
                       <span className="text-zinc-500">·</span>
-                      <span>{t('trafficExpiry')}: {p.trafficExpiry}</span>
+                      <span>
+                        {t('trafficExpiry')}: {p.trafficExpiry}
+                      </span>
                     </span>
                   )}
                 </div>

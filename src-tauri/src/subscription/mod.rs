@@ -25,7 +25,10 @@ pub struct SubscriptionProfile {
 
 /// Fetch subscription data from URL and parse into server profiles.
 /// If `proxy_port` is Some, routes the HTTP request through that local proxy.
-pub async fn fetch_subscription(url: &str, proxy_port: Option<u16>) -> Result<Vec<ServerProfile>, VpnError> {
+pub async fn fetch_subscription(
+    url: &str,
+    proxy_port: Option<u16>,
+) -> Result<Vec<ServerProfile>, VpnError> {
     let fetcher = HttpFetcher::new(proxy_port);
     let data = fetcher.fetch(url).await?;
     parser::parse_subscription(&data)
@@ -33,7 +36,10 @@ pub async fn fetch_subscription(url: &str, proxy_port: Option<u16>) -> Result<Ve
 
 /// Fetch subscription traffic usage via HEAD request.
 /// Reads Subscription-Userinfo header: `upload=0; download=12345; total=1073741824; expire=1700000000`
-pub async fn fetch_subscription_traffic(url: &str, proxy_port: Option<u16>) -> Option<(u64, u64, Option<String>)> {
+pub async fn fetch_subscription_traffic(
+    url: &str,
+    proxy_port: Option<u16>,
+) -> Option<(u64, u64, Option<String>)> {
     // Build a client with no auto-redirect to avoid HEAD being converted to GET
     let client = reqwest::Client::builder()
         .user_agent("omnitun/0.1.0")
@@ -49,7 +55,8 @@ pub async fn fetch_subscription_traffic(url: &str, proxy_port: Option<u16>) -> O
                 .user_agent("omnitun/0.1.0")
                 .timeout(std::time::Duration::from_secs(10))
                 .proxy(proxy)
-                .build().ok()?
+                .build()
+                .ok()?
         } else {
             client
         }

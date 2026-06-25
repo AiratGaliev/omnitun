@@ -5,8 +5,8 @@ import { toast } from 'sonner';
 import { invoke } from '@tauri-apps/api/core';
 import { readText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTranslation } from '@/hooks/useTranslation';
-import { useVPNStore, mapRustProfile } from '@/store';
 import type { RustSubscriptionProfile } from '@/store';
+import { mapRustProfile, useVPNStore } from '@/store';
 import * as z from 'zod';
 
 const manualSchema = z.object({
@@ -98,11 +98,13 @@ export function AddProfileOptions({
         content: text,
       });
       const mapped = mapRustProfile(result);
-      useVPNStore.getState().addLog(
-        `Imported "${name}" (${String(mapped.servers.length)} server(s))`,
-        'success',
-        'subscription',
-      );
+      useVPNStore
+        .getState()
+        .addLog(
+          `Imported "${name}" (${String(mapped.servers.length)} server(s))`,
+          'success',
+          'subscription',
+        );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       useVPNStore.getState().addLog(`File import error: ${msg}`, 'error', 'subscription');
@@ -184,7 +186,9 @@ export function AddProfileOptions({
           type="file"
           accept=".txt,.conf,.json,.yaml,.yml,.uri,.srs"
           className="hidden"
-          onChange={(e) => { void handleFileImport(e); }}
+          onChange={(e) => {
+            void handleFileImport(e);
+          }}
         />
       </div>
 

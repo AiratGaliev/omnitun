@@ -82,11 +82,7 @@ impl Logger {
         }
 
         if let Ok(json) = serde_json::to_string(entry) {
-            if let Ok(mut file) = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-            {
+            if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
                 let _ = writeln!(file, "{json}");
             }
         }

@@ -64,10 +64,7 @@ mod tests {
     #[async_trait::async_trait]
     impl SubscriptionFetcher for MockFetcher {
         async fn fetch(&self, _url: &str) -> Result<String, VpnError> {
-            Ok(
-                "vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.2:8443?remark=Test"
-                    .into(),
-            )
+            Ok("vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.2:8443?remark=Test".into())
         }
     }
 

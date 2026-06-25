@@ -172,10 +172,16 @@ pub async fn ensure_downloaded(db_dir: &Path) -> Result<(), String> {
             Ok(resp) => {
                 let bytes = match resp.bytes().await {
                     Ok(b) => b,
-                    Err(e) => { last_err = format!("{e}"); continue; }
+                    Err(e) => {
+                        last_err = format!("{e}");
+                        continue;
+                    }
                 };
                 if bytes.len() < 100_000 {
-                    last_err = format!("response too small ({} bytes) — likely an error page", bytes.len());
+                    last_err = format!(
+                        "response too small ({} bytes) — likely an error page",
+                        bytes.len()
+                    );
                     continue;
                 }
                 std::fs::create_dir_all(db_dir)
@@ -188,7 +194,9 @@ pub async fn ensure_downloaded(db_dir: &Path) -> Result<(), String> {
                 log::info!("GeoIP City database downloaded ({} bytes)", bytes.len());
                 return init(&db_path);
             }
-            Err(e) => { last_err = format!("{e}"); }
+            Err(e) => {
+                last_err = format!("{e}");
+            }
         }
     }
     Err(format!("All GeoIP mirrors failed: {last_err}"))

@@ -135,7 +135,10 @@ fn parse_vmess(data: &str) -> Option<ServerProfile> {
     let v: serde_json::Value = serde_json::from_str(&json_str).ok()?;
 
     let server = v.get("add")?.as_str()?.to_string();
-    let port: u16 = v.get("port")?.as_u64().or_else(|| v.get("port")?.as_str()?.parse().ok())? as u16;
+    let port: u16 = v
+        .get("port")?
+        .as_u64()
+        .or_else(|| v.get("port")?.as_str()?.parse().ok())? as u16;
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
@@ -149,10 +152,7 @@ fn parse_vmess(data: &str) -> Option<ServerProfile> {
         port,
         uuid: v.get("id").and_then(|x| x.as_str()).map(String::from),
         password: None,
-        method: v
-            .get("scy")
-            .and_then(|x| x.as_str())
-            .map(String::from),
+        method: v.get("scy").and_then(|x| x.as_str()).map(String::from),
         sni: v
             .get("tls")
             .and_then(|x| x.as_str())
@@ -188,7 +188,9 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
     if let Some((userinfo_b64, server_port)) = main.split_once('@') {
         let decoded_bytes = base64::engine::general_purpose::STANDARD
             .decode(userinfo_b64.trim())
-            .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(userinfo_b64.trim()))
+            .or_else(|_| {
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(userinfo_b64.trim())
+            })
             .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(userinfo_b64.trim()))
             .ok();
 
@@ -386,7 +388,11 @@ fn parse_tuic(data: &str) -> Option<ServerProfile> {
         server: server.to_string(),
         port,
         uuid: Some(uuid.to_string()),
-        password: if password.is_empty() { None } else { Some(urlencoding_decode(password)) },
+        password: if password.is_empty() {
+            None
+        } else {
+            Some(urlencoding_decode(password))
+        },
         method: None,
         sni: params.get("sni").cloned(),
         flow: None,
@@ -448,11 +454,17 @@ fn parse_wireguard(data: &str) -> Option<ServerProfile> {
         flag: None,
         country_name: None,
         city_name: None,
-        wg_local_address: params.get("local_address").or_else(|| params.get("address")).cloned(),
+        wg_local_address: params
+            .get("local_address")
+            .or_else(|| params.get("address"))
+            .cloned(),
         wg_allowed_ips: params.get("allowed_ips").cloned(),
         wg_dns: params.get("dns").cloned(),
         wg_mtu: params.get("mtu").and_then(|m| m.parse().ok()),
-        wg_keepalive: params.get("keepalive").or_else(|| params.get("persistent_keepalive")).and_then(|k| k.parse().ok()),
+        wg_keepalive: params
+            .get("keepalive")
+            .or_else(|| params.get("persistent_keepalive"))
+            .and_then(|k| k.parse().ok()),
         username: None,
     })
 }
@@ -471,7 +483,20 @@ fn parse_socks(uri: &str) -> Option<ServerProfile> {
         let (srv, prt) = rest.rsplit_once(':')?;
         let port: u16 = prt.parse().ok()?;
         let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
-        (srv.to_string(), port, if user.is_empty() { None } else { Some(user.to_string()) }, if pass.is_empty() { None } else { Some(urlencoding_decode(pass)) })
+        (
+            srv.to_string(),
+            port,
+            if user.is_empty() {
+                None
+            } else {
+                Some(user.to_string())
+            },
+            if pass.is_empty() {
+                None
+            } else {
+                Some(urlencoding_decode(pass))
+            },
+        )
     } else {
         let (srv_host, srv_port) = main.rsplit_once(':').unwrap_or((main, "1080"));
         (srv_host.to_string(), srv_port.parse().ok()?, None, None)
@@ -479,13 +504,21 @@ fn parse_socks(uri: &str) -> Option<ServerProfile> {
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
-        original_name: if name.is_empty() { server.clone() } else { name },
+        original_name: if name.is_empty() {
+            server.clone()
+        } else {
+            name
+        },
         protocol: "socks".into(),
         server,
         port,
         uuid: None,
         password,
-        method: if username.is_some() { Some("username_password".into()) } else { None },
+        method: if username.is_some() {
+            Some("username_password".into())
+        } else {
+            None
+        },
         username,
         ..Default::default()
     })
@@ -500,14 +533,18 @@ fn parse_http(uri: &str) -> Option<ServerProfile> {
     // `None`. This silently broke HTTP proxy servers that require username/
     // password authentication: sing-box would emit a `password` field without
     // a matching `username`, causing the outbound to fail authentication.
-    let stripped = uri.strip_prefix("http://").or_else(|| uri.strip_prefix("https://"))?;
+    let stripped = uri
+        .strip_prefix("http://")
+        .or_else(|| uri.strip_prefix("https://"))?;
     let is_https = uri.starts_with("https://");
 
     let (main, _query, fragment) = split_uri(stripped);
     let name = urlencoding_decode(fragment);
 
     let (userinfo, rest) = main.split_once('@')?;
-    let (server, port_str) = rest.rsplit_once(':').unwrap_or((rest, if is_https { "443" } else { "80" }));
+    let (server, port_str) = rest
+        .rsplit_once(':')
+        .unwrap_or((rest, if is_https { "443" } else { "80" }));
     let port: u16 = port_str.parse().ok()?;
     let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
 
@@ -520,13 +557,25 @@ fn parse_http(uri: &str) -> Option<ServerProfile> {
 
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
-        original_name: if name.is_empty() { user.to_string() } else { name },
+        original_name: if name.is_empty() {
+            user.to_string()
+        } else {
+            name
+        },
         protocol: "http".into(),
         server: server.to_string(),
         port,
         uuid: None,
-        password: if pass.is_empty() { None } else { Some(urlencoding_decode(pass)) },
-        method: if username_opt.is_some() { Some("username_password".into()) } else { None },
+        password: if pass.is_empty() {
+            None
+        } else {
+            Some(urlencoding_decode(pass))
+        },
+        method: if username_opt.is_some() {
+            Some("username_password".into())
+        } else {
+            None
+        },
         sni: None,
         flow: None,
         public_key: None,
@@ -619,7 +668,10 @@ mod tests {
     fn test_parse_vless_with_transport_reality() {
         let uri = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@server.example.com:443?type=ws&path=%2Fws&host=ws.example.com&security=reality&pbk=abcdef123456&sid=1&sni=example.com&flow=xtls-rprx-vision#VLESS+Reality+WS";
         let result = parse_uri(uri);
-        assert!(result.is_some(), "VLESS with transport/reality should parse");
+        assert!(
+            result.is_some(),
+            "VLESS with transport/reality should parse"
+        );
         let p = result.unwrap();
         assert_eq!(p.protocol, "vless");
         assert_eq!(p.server, "server.example.com");
@@ -676,7 +728,8 @@ mod tests {
 
     #[test]
     fn test_parse_shadowsocks_uri() {
-        let userinfo = base64::engine::general_purpose::STANDARD.encode("aes-256-gcm:omnitun-test-password");
+        let userinfo =
+            base64::engine::general_purpose::STANDARD.encode("aes-256-gcm:omnitun-test-password");
         let uri = format!("ss://{}@127.0.0.4:8446#Shadowsocks+127.0.0.4", userinfo);
         let result = parse_uri(&uri);
         assert!(result.is_some(), "Shadowsocks URI should parse");
@@ -691,7 +744,8 @@ mod tests {
 
     #[test]
     fn test_parse_shadowsocks_without_remark() {
-        let userinfo = base64::engine::general_purpose::STANDARD.encode("chacha20-ietf-poly1305:password");
+        let userinfo =
+            base64::engine::general_purpose::STANDARD.encode("chacha20-ietf-poly1305:password");
         let uri = format!("ss://{}@example.com:18443", userinfo);
         let p = parse_uri(&uri).unwrap();
         assert_eq!(p.server, "example.com");
@@ -701,7 +755,8 @@ mod tests {
 
     #[test]
     fn test_parse_trojan_uri() {
-        let uri = "trojan://omnitun-test-password@127.0.0.3:8445?security=none&type=tcp#Trojan+127.0.0.3";
+        let uri =
+            "trojan://omnitun-test-password@127.0.0.3:8445?security=none&type=tcp#Trojan+127.0.0.3";
         let p = parse_uri(uri).unwrap();
         assert_eq!(p.protocol, "trojan");
         assert_eq!(p.server, "127.0.0.3");
@@ -739,7 +794,10 @@ mod tests {
     fn test_parse_subscription_multiple_protocols() {
         let vless = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.2:8443?remark=VLESS+Test";
         let vmess_json = r#"{"v":"2","ps":"VMess Test","add":"127.0.0.3","port":8444,"id":"b831381d-6324-4d53-ad4f-8cda48b30811","aid":0,"scy":"auto","net":"tcp","type":"none","tls":""}"#;
-        let vmess = format!("vmess://{}", base64::engine::general_purpose::STANDARD.encode(vmess_json));
+        let vmess = format!(
+            "vmess://{}",
+            base64::engine::general_purpose::STANDARD.encode(vmess_json)
+        );
         let ss_userinfo = base64::engine::general_purpose::STANDARD.encode("aes-256-gcm:test");
         let ss = format!("ss://{}@127.0.0.4:8446#SS+Test", ss_userinfo);
 
@@ -763,9 +821,21 @@ mod tests {
         assert_eq!(p.protocol, "socks");
         assert_eq!(p.server, "127.0.0.5");
         assert_eq!(p.port, 8451);
-        assert_eq!(p.username.as_deref(), Some("omnitun"), "username must be stored");
-        assert_eq!(p.password.as_deref(), Some("omnitun-test-password"), "password must be stored");
-        assert_eq!(p.method.as_deref(), Some("username_password"), "method must be set when username is present");
+        assert_eq!(
+            p.username.as_deref(),
+            Some("omnitun"),
+            "username must be stored"
+        );
+        assert_eq!(
+            p.password.as_deref(),
+            Some("omnitun-test-password"),
+            "password must be stored"
+        );
+        assert_eq!(
+            p.method.as_deref(),
+            Some("username_password"),
+            "method must be set when username is present"
+        );
     }
 
     #[test]
@@ -787,9 +857,21 @@ mod tests {
         assert_eq!(p.protocol, "http");
         assert_eq!(p.server, "127.0.0.5");
         assert_eq!(p.port, 8452);
-        assert_eq!(p.username.as_deref(), Some("omnitun"), "username MUST be stored (regression fix)");
-        assert_eq!(p.password.as_deref(), Some("omnitun-test-password"), "password must be stored");
-        assert_eq!(p.method.as_deref(), Some("username_password"), "method must be set when username is present");
+        assert_eq!(
+            p.username.as_deref(),
+            Some("omnitun"),
+            "username MUST be stored (regression fix)"
+        );
+        assert_eq!(
+            p.password.as_deref(),
+            Some("omnitun-test-password"),
+            "password must be stored"
+        );
+        assert_eq!(
+            p.method.as_deref(),
+            Some("username_password"),
+            "method must be set when username is present"
+        );
     }
 
     #[test]
@@ -797,7 +879,11 @@ mod tests {
         let uri = "https://omnitun:omnitun-test-password@127.0.0.5:8453#HTTPS+127.0.0.5";
         let p = parse_uri(uri).expect("HTTPS proxy with auth must parse");
         assert_eq!(p.protocol, "http");
-        assert_eq!(p.username.as_deref(), Some("omnitun"), "username must be stored for https too");
+        assert_eq!(
+            p.username.as_deref(),
+            Some("omnitun"),
+            "username must be stored for https too"
+        );
         assert_eq!(p.password.as_deref(), Some("omnitun-test-password"));
     }
 
@@ -824,10 +910,26 @@ mod tests {
         assert_eq!(p.server, "127.0.0.5");
         assert_eq!(p.port, 8449);
         assert!(p.private_key.is_some(), "private_key MUST be stored");
-        assert_eq!(p.public_key.as_deref(), Some("eYA0GeBYRXdJSfXH7voFcHzIGhKg0wURBJIuj6x8AjM="), "public_key must be URL-decoded");
-        assert_eq!(p.wg_local_address.as_deref(), Some("10.0.0.1/24"), "wg_local_address MUST be stored");
-        assert_eq!(p.wg_allowed_ips.as_deref(), Some("0.0.0.0/0"), "wg_allowed_ips MUST be stored");
-        assert_eq!(p.wg_dns.as_deref(), Some("1.1.1.1"), "wg_dns MUST be stored");
+        assert_eq!(
+            p.public_key.as_deref(),
+            Some("eYA0GeBYRXdJSfXH7voFcHzIGhKg0wURBJIuj6x8AjM="),
+            "public_key must be URL-decoded"
+        );
+        assert_eq!(
+            p.wg_local_address.as_deref(),
+            Some("10.0.0.1/24"),
+            "wg_local_address MUST be stored"
+        );
+        assert_eq!(
+            p.wg_allowed_ips.as_deref(),
+            Some("0.0.0.0/0"),
+            "wg_allowed_ips MUST be stored"
+        );
+        assert_eq!(
+            p.wg_dns.as_deref(),
+            Some("1.1.1.1"),
+            "wg_dns MUST be stored"
+        );
         assert_eq!(p.wg_mtu, Some(1280), "wg_mtu MUST be stored");
         assert_eq!(p.wg_keepalive, Some(25), "wg_keepalive MUST be stored");
     }

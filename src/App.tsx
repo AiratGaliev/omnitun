@@ -54,7 +54,11 @@ export default function App() {
       loadProfiles().catch(() => undefined),
       loadSettings().catch(() => undefined),
       invoke('initialize_app').catch(() => {
-        addLog('Background initialization failed (offline?) — app will work without GeoIP', 'warning', 'system');
+        addLog(
+          'Background initialization failed (offline?) — app will work without GeoIP',
+          'warning',
+          'system',
+        );
       }),
       fetchRealIp().catch(() => undefined),
     ]).then(() => {

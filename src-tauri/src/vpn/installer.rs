@@ -1,4 +1,4 @@
-use crate::logging::{log, LogLevel, Logger, LogSource};
+use crate::logging::{log, LogLevel, LogSource, Logger};
 use crate::vpn::VpnError;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -271,7 +271,9 @@ impl Installer {
             }
         }
 
-        Err(VpnError::Install("wintun.dll not found in wintun archive".into()))
+        Err(VpnError::Install(
+            "wintun.dll not found in wintun archive".into(),
+        ))
     }
 }
 
@@ -403,10 +405,7 @@ mod tests {
 
         let result = Installer::extract_zip(&bytes, &temp_dir, "sing-box.exe");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Binary not found"));
+        assert!(result.unwrap_err().to_string().contains("Binary not found"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

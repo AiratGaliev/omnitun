@@ -2,9 +2,9 @@
 ///
 /// Validates config generation, sing-box compatibility, data integrity.
 /// Run: cargo test --test data_driven_test -- --nocapture
-
 use std::path::PathBuf;
 use std::process::Command;
+
 
 fn app_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
@@ -15,17 +15,23 @@ fn app_data_dir() -> PathBuf {
     #[cfg(not(target_os = "windows"))]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".config").join("com.omnitun.desktop")
+        PathBuf::from(home)
+            .join(".config")
+            .join("com.omnitun.desktop")
     }
 }
 
 fn singbox_binary() -> PathBuf {
     let m = app_data_dir().join("binaries").join("sing-box.exe");
-    if m.exists() { return m; }
+    if m.exists() {
+        return m;
+    }
     let p = std::env::var("PATH").unwrap_or_default();
     for dir in p.split(';') {
         let c = PathBuf::from(dir).join("sing-box.exe");
-        if c.exists() { return c; }
+        if c.exists() {
+            return c;
+        }
     }
     PathBuf::from("sing-box.exe")
 }
@@ -49,7 +55,8 @@ fn load_real_profiles() -> Vec<serde_json::Value> {
 fn test_load_and_count() {
     let profiles = load_real_profiles();
     assert!(!profiles.is_empty(), "profiles.json is empty");
-    let total: usize = profiles.iter()
+    let total: usize = profiles
+        .iter()
         .map(|p| p["servers"].as_array().map(|a| a.len()).unwrap_or(0))
         .sum();
     assert!(total > 0, "No servers");
@@ -63,10 +70,12 @@ fn test_all_servers_have_required_fields() {
         for s in p["servers"].as_array().unwrap() {
             let id = s["id"].as_str().unwrap_or("?");
             assert!(s["protocol"].is_string(), "{id}: missing protocol");
-            assert!(s["server"].is_string(),  "{id}: missing server");
-            assert!(s["port"].is_number(),    "{id}: missing port");
-            assert!(s["country_name"].is_string() || s["flag"].is_string(),
-                "{id}: missing both country_name and flag");
+            assert!(s["server"].is_string(), "{id}: missing server");
+            assert!(s["port"].is_number(), "{id}: missing port");
+            assert!(
+                s["country_name"].is_string() || s["flag"].is_string(),
+                "{id}: missing both country_name and flag"
+            );
         }
     }
 }
@@ -77,8 +86,11 @@ fn test_no_orphaned_name_field() {
     let profiles = load_real_profiles();
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
-            assert!(s.get("name").is_none(),
-                "Server {} still has legacy `name` field", s["id"].as_str().unwrap_or("?"));
+            assert!(
+                s.get("name").is_none(),
+                "Server {} still has legacy `name` field",
+                s["id"].as_str().unwrap_or("?")
+            );
         }
     }
 }
@@ -89,10 +101,18 @@ fn test_flag_is_valid_iso_code() {
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
             if let Some(flag) = s["flag"].as_str() {
-                assert_eq!(flag.len(), 2, "Invalid flag '{}' for server {}", flag,
-                    s["id"].as_str().unwrap_or("?"));
-                assert!(flag.chars().all(|c| c.is_ascii_uppercase()),
-                    "Flag '{}' not uppercase", flag);
+                assert_eq!(
+                    flag.len(),
+                    2,
+                    "Invalid flag '{}' for server {}",
+                    flag,
+                    s["id"].as_str().unwrap_or("?")
+                );
+                assert!(
+                    flag.chars().all(|c| c.is_ascii_uppercase()),
+                    "Flag '{}' not uppercase",
+                    flag
+                );
             }
         }
     }
@@ -104,8 +124,12 @@ fn test_ping_ms_within_reasonable_range() {
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
             if let Some(ping) = s["ping_ms"].as_u64() {
-                assert!(ping < 10000, "Suspicious ping {}ms for server {}",
-                    ping, s["id"].as_str().unwrap_or("?"));
+                assert!(
+                    ping < 10000,
+                    "Suspicious ping {}ms for server {}",
+                    ping,
+                    s["id"].as_str().unwrap_or("?")
+                );
             }
         }
     }
@@ -118,14 +142,20 @@ fn test_ping_ms_within_reasonable_range() {
 #[test]
 fn test_build_outbound_all_servers() -> Result<(), Box<dyn std::error::Error>> {
     let profiles = load_real_profiles();
-    let count = profiles.iter()
+    let count = profiles
+        .iter()
         .flat_map(|p| p["servers"].as_array().unwrap().iter())
         .try_fold(0usize, |acc, s| {
-            let server: omnitun_lib::vpn::ServerProfile =
-                serde_json::from_value((*s).clone())?;
-            let outbound = omnitun_lib::vpn::config::build_outbound(&server)
-                .unwrap_or_else(|e| panic!("{}: build_outbound failed: {e}", server.display_name()));
-            assert_eq!(outbound["type"], server.protocol, "{}: type mismatch", server.display_name());
+            let server: omnitun_lib::vpn::ServerProfile = serde_json::from_value((*s).clone())?;
+            let outbound = omnitun_lib::vpn::config::build_outbound(&server).unwrap_or_else(|e| {
+                panic!("{}: build_outbound failed: {e}", server.display_name())
+            });
+            assert_eq!(
+                outbound["type"],
+                server.protocol,
+                "{}: type mismatch",
+                server.display_name()
+            );
             assert_eq!(outbound["server"], server.server);
             assert_eq!(outbound["server_port"], server.port as u64);
             Ok::<_, Box<dyn std::error::Error>>(acc + 1)
@@ -139,13 +169,15 @@ fn test_build_outbound_never_returns_empty_server() -> Result<(), Box<dyn std::e
     let profiles = load_real_profiles();
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
-            let server: omnitun_lib::vpn::ServerProfile =
-                serde_json::from_value((*s).clone())?;
+            let server: omnitun_lib::vpn::ServerProfile = serde_json::from_value((*s).clone())?;
             let outbound = omnitun_lib::vpn::config::build_outbound(&server)
                 .unwrap_or_else(|e| panic!("{}: build_outbound: {e}", server.display_name()));
             let srv = outbound["server"].as_str().unwrap_or("");
-            assert!(!srv.is_empty() && srv != "127.0.0.1",
-                "{}: server resolved to empty/loopback", server.display_name());
+            assert!(
+                !srv.is_empty() && srv != "127.0.0.1",
+                "{}: server resolved to empty/loopback",
+                server.display_name()
+            );
         }
     }
     println!("✓ No empty server values");
@@ -157,17 +189,25 @@ fn test_all_outbounds_have_tls_config_for_trojan() -> Result<(), Box<dyn std::er
     let profiles = load_real_profiles();
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
-            let server: omnitun_lib::vpn::ServerProfile =
-                serde_json::from_value((*s).clone())?;
-            if server.protocol != "trojan" { continue; }
+            let server: omnitun_lib::vpn::ServerProfile = serde_json::from_value((*s).clone())?;
+            if server.protocol != "trojan" {
+                continue;
+            }
             let outbound = omnitun_lib::vpn::config::build_outbound(&server)?;
             let tls = outbound.get("tls");
             if tls.is_none() {
-                println!("⚠  {}: trojan without TLS (possible non-TLS trojan variant)", server.display_name());
+                println!(
+                    "⚠  {}: trojan without TLS (possible non-TLS trojan variant)",
+                    server.display_name()
+                );
                 continue;
             }
-            assert_eq!(tls.and_then(|t| t.get("enabled")).and_then(|e| e.as_bool()), Some(true),
-                "{}: trojan TLS not enabled", server.display_name());
+            assert_eq!(
+                tls.and_then(|t| t.get("enabled")).and_then(|e| e.as_bool()),
+                Some(true),
+                "{}: trojan TLS not enabled",
+                server.display_name()
+            );
         }
     }
     println!("✓ All trojan outbounds have TLS enabled");
@@ -190,14 +230,14 @@ fn test_all_servers_pass_singbox_check() -> Result<(), Box<dyn std::error::Error
     let tmp_dir = std::env::temp_dir().join(format!("omnitun-singbox-{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir)?;
 
-    let servers: Vec<_> = profiles.iter()
+    let servers: Vec<_> = profiles
+        .iter()
         .flat_map(|p| p["servers"].as_array().unwrap().iter())
         .collect();
     let total = servers.len();
 
     for (i, s) in servers.iter().enumerate() {
-        let server: omnitun_lib::vpn::ServerProfile =
-            serde_json::from_value((*s).clone())?;
+        let server: omnitun_lib::vpn::ServerProfile = serde_json::from_value((*s).clone())?;
         let name = server.display_name();
 
         // Build minimal config: one outbound per test
@@ -223,9 +263,13 @@ fn test_all_servers_pass_singbox_check() -> Result<(), Box<dyn std::error::Error
             .arg(&config_path)
             .output()?;
 
-        assert!(output.status.success(),
+        assert!(
+            output.status.success(),
             "{}/{} {name}: sing-box check FAILED\nstderr: {}",
-            i + 1, total, String::from_utf8_lossy(&output.stderr));
+            i + 1,
+            total,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
@@ -239,13 +283,25 @@ fn test_base_template_has_dns() -> Result<(), Box<dyn std::error::Error>> {
     let template: serde_json::Value = serde_json::from_str(include_str!("../config/base.json"))?;
     let dns = template.get("dns");
     assert!(dns.is_some(), "base.json missing DNS section");
-    assert!(dns.and_then(|d| d.get("servers")).and_then(|s| s.as_array()).is_some_and(|s| !s.is_empty()),
-        "base.json has no DNS servers");
-    assert!(dns.and_then(|d| d.get("final")).and_then(|f| f.as_str()).is_some(),
-        "base.json missing DNS final");
+    assert!(
+        dns.and_then(|d| d.get("servers"))
+            .and_then(|s| s.as_array())
+            .is_some_and(|s| !s.is_empty()),
+        "base.json has no DNS servers"
+    );
+    assert!(
+        dns.and_then(|d| d.get("final"))
+            .and_then(|f| f.as_str())
+            .is_some(),
+        "base.json missing DNS final"
+    );
     let route = template.get("route");
-    assert!(route.and_then(|r| r.get("default_domain_resolver")).is_some(),
-        "base.json missing route.default_domain_resolver");
+    assert!(
+        route
+            .and_then(|r| r.get("default_domain_resolver"))
+            .is_some(),
+        "base.json missing route.default_domain_resolver"
+    );
     println!("✓ base.json has DNS and route.default_domain_resolver");
     Ok(())
 }
@@ -253,10 +309,19 @@ fn test_base_template_has_dns() -> Result<(), Box<dyn std::error::Error>> {
 /// Test that base-vpn.json template has DNS (for VPN mode)
 #[test]
 fn test_base_vpn_template_has_dns() -> Result<(), Box<dyn std::error::Error>> {
-    let template: serde_json::Value = serde_json::from_str(include_str!("../config/base-vpn.json"))?;
-    assert!(template.get("dns").is_some(), "base-vpn.json missing DNS section");
-    assert!(template.get("route").and_then(|r| r.get("default_domain_resolver")).is_some(),
-        "base-vpn.json missing route.default_domain_resolver");
+    let template: serde_json::Value =
+        serde_json::from_str(include_str!("../config/base-vpn.json"))?;
+    assert!(
+        template.get("dns").is_some(),
+        "base-vpn.json missing DNS section"
+    );
+    assert!(
+        template
+            .get("route")
+            .and_then(|r| r.get("default_domain_resolver"))
+            .is_some(),
+        "base-vpn.json missing route.default_domain_resolver"
+    );
     println!("✓ base-vpn.json has DNS and route.default_domain_resolver");
     Ok(())
 }
@@ -314,14 +379,17 @@ fn test_display_name_doesnt_show_raw_ip() -> Result<(), Box<dyn std::error::Erro
     let profiles = load_real_profiles();
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
-            let server: omnitun_lib::vpn::ServerProfile =
-                serde_json::from_value((*s).clone())?;
+            let server: omnitun_lib::vpn::ServerProfile = serde_json::from_value((*s).clone())?;
             let name = server.display_name();
 
             // If country_name is set, display must use it (not IP)
             if server.country_name.is_some() {
-                assert_ne!(name, format!("{}:{}", server.server, server.port),
-                    "{}: display_name shows raw IP when country is known", server.display_name());
+                assert_ne!(
+                    name,
+                    format!("{}:{}", server.server, server.port),
+                    "{}: display_name shows raw IP when country is known",
+                    server.display_name()
+                );
             }
         }
     }
@@ -337,7 +405,10 @@ fn test_display_name_doesnt_show_raw_ip() -> Result<(), Box<dyn std::error::Erro
 fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error>> {
     let profiles = load_real_profiles();
     let servers: Vec<omnitun_lib::vpn::ServerProfile> = profiles[0]["servers"]
-        .as_array().unwrap().iter().take(3)
+        .as_array()
+        .unwrap()
+        .iter()
+        .take(3)
         .map(|s| serde_json::from_value(s.clone()).unwrap())
         .collect();
 
@@ -353,9 +424,7 @@ fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error
         }
     }
 
-    let proxy_tags: Vec<String> = servers.iter()
-        .map(|s| format!("proxy-{}", s.id))
-        .collect();
+    let proxy_tags: Vec<String> = servers.iter().map(|s| format!("proxy-{}", s.id)).collect();
     let mut sel = vec!["direct".to_string()];
     sel.extend(proxy_tags);
     outbounds.push(serde_json::json!({"type": "selector", "tag": "proxy", "outbounds": sel}));
@@ -376,21 +445,43 @@ fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error
     });
 
     // Verify correct structure
-    let proxy_sel = config["outbounds"].as_array().unwrap()
-        .iter().find(|o| o["tag"] == "proxy").unwrap();
-    assert_eq!(proxy_sel["type"], "selector", "Proxy outbound must be selector type");
-    assert_eq!(config["route"]["final"], "proxy", "Route must point to selector");
-    assert!(proxy_sel["outbounds"].as_array().map(|a| a.len()).unwrap_or(0) >= 2,
-        "Selector must have at least direct + 1 proxy");
+    let proxy_sel = config["outbounds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["tag"] == "proxy")
+        .unwrap();
+    assert_eq!(
+        proxy_sel["type"], "selector",
+        "Proxy outbound must be selector type"
+    );
+    assert_eq!(
+        config["route"]["final"], "proxy",
+        "Route must point to selector"
+    );
+    assert!(
+        proxy_sel["outbounds"]
+            .as_array()
+            .map(|a| a.len())
+            .unwrap_or(0)
+            >= 2,
+        "Selector must have at least direct + 1 proxy"
+    );
 
     // Verify it passes sing-box check
     let binary = singbox_binary();
     if binary.exists() {
         let tmp = std::env::temp_dir().join("omnitun-batch-test.json");
         std::fs::write(&tmp, serde_json::to_string_pretty(&config)?)?;
-        let out = Command::new(&binary).args(["check", "-c"]).arg(&tmp).output()?;
-        assert!(out.status.success(), "Batch config check failed:\n{}",
-            String::from_utf8_lossy(&out.stderr));
+        let out = Command::new(&binary)
+            .args(["check", "-c"])
+            .arg(&tmp)
+            .output()?;
+        assert!(
+            out.status.success(),
+            "Batch config check failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let _ = std::fs::remove_file(&tmp);
     }
 

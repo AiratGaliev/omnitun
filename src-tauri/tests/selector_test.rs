@@ -26,7 +26,9 @@ fn app_data_dir() -> PathBuf {
     #[cfg(not(target_os = "windows"))]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home).join(".config").join("com.omnitun.desktop")
+        PathBuf::from(home)
+            .join(".config")
+            .join("com.omnitun.desktop")
     }
 }
 
@@ -96,11 +98,7 @@ async fn fetch_outlet_ip(proxy_port: u16, timeout_secs: u64) -> Option<String> {
         .timeout(Duration::from_secs(timeout_secs))
         .build()
         .ok()?;
-    let resp = client
-        .get("http://ifconfig.me/ip")
-        .send()
-        .await
-        .ok()?;
+    let resp = client.get("http://ifconfig.me/ip").send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -112,7 +110,11 @@ async fn fetch_outlet_ip(proxy_port: u16, timeout_secs: u64) -> Option<String> {
 }
 
 /// Fetch outlet IP with retries.
-async fn fetch_outlet_ip_retry(proxy_port: u16, retries: usize, timeout_secs: u64) -> Option<String> {
+async fn fetch_outlet_ip_retry(
+    proxy_port: u16,
+    retries: usize,
+    timeout_secs: u64,
+) -> Option<String> {
     for i in 0..retries {
         let result = fetch_outlet_ip(proxy_port, timeout_secs).await;
         if result.is_some() {
@@ -485,14 +487,10 @@ async fn selector_switch_and_outlet_ip() {
     // Prefer the post-switch direct IP
     match (&proxy_ip, &final_direct_ip) {
         (Some(proxy), Some(direct)) if proxy != direct => {
-            println!(
-                "✓ DIFFERENT — proxy WORKS\n  Direct: {direct}\n  Proxy:  {proxy}"
-            );
+            println!("✓ DIFFERENT — proxy WORKS\n  Direct: {direct}\n  Proxy:  {proxy}");
         }
         (Some(proxy), Some(_direct)) => {
-            eprintln!(
-                "⚠ SAME IP ({proxy}) — proxy may NOT be routing correctly"
-            );
+            eprintln!("⚠ SAME IP ({proxy}) — proxy may NOT be routing correctly");
         }
         (Some(ip), None) => {
             eprintln!("⚠ Only proxy IP fetched ({ip}), direct failed");

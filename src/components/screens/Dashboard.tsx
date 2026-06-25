@@ -7,6 +7,7 @@ import { useTranslation } from '@/hooks/useTranslation.ts';
 import { SegmentedControl } from '../SegmentedControl';
 import { hasFlag } from 'country-flag-icons';
 import 'country-flag-icons/3x2/flags.css';
+import type { Tab } from '@/types.ts';
 
 /** Render flag via country-flag-icons library. Falls back to globe emoji. */
 function FlagDisplay({ code, className }: { code?: string; className?: string }) {
@@ -35,8 +36,6 @@ function serverCity(srv: { cityName?: string }): string {
   return srv.cityName ?? '';
 }
 
-import type { Tab } from '@/types.ts';
-
 export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => void }) {
   const {
     status,
@@ -60,8 +59,12 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
 
   const formatElapsed = (since: number): string => {
     const diff = Math.floor((Date.now() - since) / 1000);
-    const h = Math.floor(diff / 3600).toString().padStart(2, '0');
-    const m = Math.floor((diff % 3600) / 60).toString().padStart(2, '0');
+    const h = Math.floor(diff / 3600)
+      .toString()
+      .padStart(2, '0');
+    const m = Math.floor((diff % 3600) / 60)
+      .toString()
+      .padStart(2, '0');
     const s = (diff % 60).toString().padStart(2, '0');
     return `${h}:${m}:${s}`;
   };
@@ -87,7 +90,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     const interval = setInterval(() => {
       setSessionDuration(formatElapsed(connectedAt));
     }, 1000);
-    return () => { clearInterval(interval); };
+    return () => {
+      clearInterval(interval);
+    };
   }, [status, connectedAt]);
 
   // Reset speeds display when disconnected
@@ -101,8 +106,12 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   useEffect(() => {
     if (status === 'connected') {
       void fetchOutletIp();
-      const ipInterval = setInterval(() => { void fetchOutletIp(); }, 30000);
-      return () => { clearInterval(ipInterval); };
+      const ipInterval = setInterval(() => {
+        void fetchOutletIp();
+      }, 30000);
+      return () => {
+        clearInterval(ipInterval);
+      };
     }
   }, [status, fetchOutletIp]);
 
@@ -125,7 +134,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
         return next.length > 30 ? next.slice(next.length - 30) : next;
       });
     }, 1000);
-    return () => { clearInterval(interval); };
+    return () => {
+      clearInterval(interval);
+    };
   }, [status]);
 
   const handleSpeedTest = async () => {
@@ -168,9 +179,12 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   const sparklinePath = (): string => {
     const data = sparklineData;
     if (data.length < 2) return '';
-    const w = 120, h = 30;
+    const w = 120,
+      h = 30;
     const maxVal = Math.max(...data, 1);
-    const pts = data.map((_v, i) => `${String((i / (data.length - 1)) * w)},${String(h - (_v / maxVal) * h)}`);
+    const pts = data.map(
+      (_v, i) => `${String((i / (data.length - 1)) * w)},${String(h - (_v / maxVal) * h)}`,
+    );
     return `M${pts.join(' L')}`;
   };
 
@@ -238,7 +252,8 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                               ? t('systemProxyModeDesc')
                               : t('proxyModeDesc')}
                         </p>
-                        {(settings.routingMode === 'system-proxy' || settings.routingMode === 'local-proxy') && (
+                        {(settings.routingMode === 'system-proxy' ||
+                          settings.routingMode === 'local-proxy') && (
                           <motion.div className="flex items-center justify-between gap-3 mt-3 bg-zinc-900/80 w-37.5 rounded-xl border border-white/10 p-2 px-4 transition-all shadow-inner focus-within:ring-2 focus-within:ring-emerald-500/30 focus-within:border-emerald-500/50">
                             <span className="text-xs text-zinc-500 font-semibold tracking-wide uppercase">
                               {t('proxyPort')}
@@ -246,7 +261,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                             <input
                               type="number"
                               value={settings.proxyPort || 1080}
-                              onChange={(e) => { updateSettings({ proxyPort: Number(e.target.value) }); }}
+                              onChange={(e) => {
+                                updateSettings({ proxyPort: Number(e.target.value) });
+                              }}
                               disabled={isConnected || isConnecting}
                               className="bg-transparent text-sm tracking-widest text-emerald-400 w-14 focus:outline-none font-mono text-right disabled:opacity-50"
                             />
@@ -261,7 +278,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                   <motion.button
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.98 }}
-                    onClick={() => { setIsServerDropdownOpen(!isServerDropdownOpen); }}
+                    onClick={() => {
+                      setIsServerDropdownOpen(!isServerDropdownOpen);
+                    }}
                     className="px-5 py-3 bg-zinc-900/60 hover:bg-zinc-800/80 backdrop-blur-xl transition-all rounded-2xl border border-white/10 flex items-center gap-3 z-20 shadow-lg"
                   >
                     <FlagDisplay code={activeServer?.flag} className="text-xl drop-shadow-md" />
@@ -269,21 +288,35 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                       <span className="font-semibold text-sm text-zinc-100 leading-tight">
                         {activeServer?.countryName ?? activeServer?.name ?? ''}
                       </span>
-                      {activeServer && serverCity(activeServer) ? <span className="text-[11px] text-zinc-500 leading-tight">{serverCity(activeServer)}</span> : null}
+                      {activeServer && serverCity(activeServer) ? (
+                        <span className="text-[11px] text-zinc-500 leading-tight">
+                          {serverCity(activeServer)}
+                        </span>
+                      ) : null}
                     </div>
                     <div className="flex items-center gap-1.5 ml-3 pl-3 border-l border-white/10">
-                      <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.8)]' : 'bg-zinc-600'}`} />
+                      <div
+                        className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.8)]' : 'bg-zinc-600'}`}
+                      />
                       <span className="text-xs font-mono text-zinc-400 w-10 text-right">
                         {activeServer?.ping} ms
                       </span>
                     </div>
-                    <ChevronDown size={16} className={`ml-1 text-zinc-500 transition-transform duration-300 ${isServerDropdownOpen ? 'rotate-180' : ''}`} />
+                    <ChevronDown
+                      size={16}
+                      className={`ml-1 text-zinc-500 transition-transform duration-300 ${isServerDropdownOpen ? 'rotate-180' : ''}`}
+                    />
                   </motion.button>
 
                   <AnimatePresence>
                     {isServerDropdownOpen && (
                       <>
-                        <div className="fixed inset-0 z-10" onClick={() => { setIsServerDropdownOpen(false); }} />
+                        <div
+                          className="fixed inset-0 z-10"
+                          onClick={() => {
+                            setIsServerDropdownOpen(false);
+                          }}
+                        />
                         <motion.div
                           initial={{ opacity: 0, y: 10, scale: 0.95 }}
                           animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -302,7 +335,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                   setActiveServer(server);
                                   setIsServerDropdownOpen(false);
                                   addLog(`Server changed to ${server.name}`, 'info', 'system');
-                                  toast.success(`${t('serverStr')}${server.name}${t('selectedStr')}`);
+                                  toast.success(
+                                    `${t('serverStr')}${server.name}${t('selectedStr')}`,
+                                  );
                                 }}
                                 disabled={status === 'connecting'}
                                 className={`flex items-center justify-between p-2.5 rounded-xl transition-all ${
@@ -314,15 +349,25 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                 <div className="flex items-center gap-3">
                                   <FlagDisplay code={server.flag} className="text-lg" />
                                   <div className="flex flex-col items-start">
-                                    <span className="text-sm font-medium leading-tight">{server.countryName ?? server.name}</span>
-                                    {serverCity(server) ? <span className="text-[11px] text-zinc-500 leading-tight">{serverCity(server)}</span> : null}
+                                    <span className="text-sm font-medium leading-tight">
+                                      {server.countryName ?? server.name}
+                                    </span>
+                                    {serverCity(server) ? (
+                                      <span className="text-[11px] text-zinc-500 leading-tight">
+                                        {serverCity(server)}
+                                      </span>
+                                    ) : null}
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-2">
-                                  <span className={`text-[10px] font-mono px-2 py-0.5 rounded-md ${(server.ping ?? 999) < 60 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-yellow-500/10 text-yellow-400'}`}>
+                                  <span
+                                    className={`text-[10px] font-mono px-2 py-0.5 rounded-md ${(server.ping ?? 999) < 60 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-yellow-500/10 text-yellow-400'}`}
+                                  >
                                     {server.ping ?? '-'}ms
                                   </span>
-                                  {activeServer?.id === server.id && <Check size={14} strokeWidth={3} />}
+                                  {activeServer?.id === server.id && (
+                                    <Check size={14} strokeWidth={3} />
+                                  )}
                                 </div>
                               </button>
                             ))}
@@ -363,11 +408,23 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     ${isConnecting ? 'animate-pulse border-blue-500 shadow-[0_0_30px_rgba(59,130,246,0.3)]' : ''}
                     ${status === 'error' ? 'border-red-500 shadow-[0_0_30px_rgba(239,68,68,0.3)]' : ''}`}
                 >
-                  <Power size={48} strokeWidth={1.5}
+                  <Power
+                    size={48}
+                    strokeWidth={1.5}
                     className={`mb-2 relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-500' : isConnecting ? 'text-blue-500' : status === 'error' ? 'text-red-500' : 'text-zinc-500 group-hover:text-zinc-300'}`}
                   />
-                  <span className={`text-[10px] font-bold uppercase tracking-[0.2em] relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-500' : isConnecting ? 'text-blue-500' : status === 'error' ? 'text-red-500' : 'text-zinc-500 group-hover:text-zinc-300'}`}>
-                    {status === 'error' ? t('statusError') : isConnected ? t('connected') : status === 'disconnecting' ? t('disconnecting') : status === 'connecting' ? t('connecting') : t('disconnected')}
+                  <span
+                    className={`text-[10px] font-bold uppercase tracking-[0.2em] relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-500' : isConnecting ? 'text-blue-500' : status === 'error' ? 'text-red-500' : 'text-zinc-500 group-hover:text-zinc-300'}`}
+                  >
+                    {status === 'error'
+                      ? t('statusError')
+                      : isConnected
+                        ? t('connected')
+                        : status === 'disconnecting'
+                          ? t('disconnecting')
+                          : status === 'connecting'
+                            ? t('connecting')
+                            : t('disconnected')}
                   </span>
                 </motion.button>
               </div>
@@ -375,7 +432,11 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
               {/* Session timer + outlet IP */}
               <div className="mt-6 text-center h-14">
                 {isConnected && (
-                  <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center text-center">
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="flex flex-col items-center text-center"
+                  >
                     <p className="text-3xl font-light font-mono tracking-tight text-white drop-shadow-sm">
                       {sessionDuration}
                     </p>
@@ -391,7 +452,11 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                   </motion.div>
                 )}
                 {realIp && status !== 'connected' && (
-                  <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex flex-col items-center text-center mt-4">
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="flex flex-col items-center text-center mt-4"
+                  >
                     <p className="text-xs text-zinc-500 font-mono flex items-center gap-1.5">
                       <Globe size={12} className="text-zinc-500" />
                       {realIp}
@@ -410,9 +475,15 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 </p>
                 <div className="flex items-center justify-between">
                   <span className="text-sm font-semibold text-zinc-200">
-                    {isConnected ? (activeServer?.protocol ? formatProtocol(activeServer.protocol) : 'Unknown') : t('standby')}
+                    {isConnected
+                      ? activeServer?.protocol
+                        ? formatProtocol(activeServer.protocol)
+                        : 'Unknown'
+                      : t('standby')}
                   </span>
-                  <span className={`text-xs font-mono px-2 py-1 rounded-md ${isConnected ? 'bg-emerald-500/10 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}>
+                  <span
+                    className={`text-xs font-mono px-2 py-1 rounded-md ${isConnected ? 'bg-emerald-500/10 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}
+                  >
                     {isConnected ? t('stable') : t('idle')}
                   </span>
                 </div>
@@ -446,8 +517,20 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     {/* Sparkline */}
                     {sparklineData.length >= 2 && (
                       <div className="mt-2 flex justify-center opacity-60">
-                        <svg width="120" height="30" viewBox="0 0 120 30" className="overflow-visible">
-                          <path d={sparklinePath()} fill="none" stroke="#10b981" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        <svg
+                          width="120"
+                          height="30"
+                          viewBox="0 0 120 30"
+                          className="overflow-visible"
+                        >
+                          <path
+                            d={sparklinePath()}
+                            fill="none"
+                            stroke="#10b981"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
                         </svg>
                       </div>
                     )}
@@ -469,7 +552,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 <div className="flex flex-col gap-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3">
-                      <div className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-zinc-700'}`} />
+                      <div
+                        className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-zinc-700'}`}
+                      />
                       <span className="text-sm text-zinc-300 font-medium">
                         {isConnected ? t('bypassingLocal') : t('routingDisabled')}
                       </span>
@@ -489,7 +574,11 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                       className="flex items-center justify-center gap-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 rounded-xl py-2 transition-all text-xs font-semibold disabled:opacity-50"
                     >
                       <Gauge size={14} className={isSpeedTesting ? 'animate-spin' : ''} />
-                      {isSpeedTesting ? t('speedTesting') : speedTestResult?.delay ? `${t('speedTestResult')}: ${String(speedTestResult.delay)} ms` : t('speedTest')}
+                      {isSpeedTesting
+                        ? t('speedTesting')
+                        : speedTestResult?.delay
+                          ? `${t('speedTestResult')}: ${String(speedTestResult.delay)} ms`
+                          : t('speedTest')}
                     </button>
                   )}
                 </div>

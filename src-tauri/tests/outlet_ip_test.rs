@@ -16,13 +16,17 @@ fn app_data_dir() -> PathBuf {
 
 fn singbox() -> PathBuf {
     let m = app_data_dir().join("binaries").join("sing-box.exe");
-    if m.exists() { return m; }
+    if m.exists() {
+        return m;
+    }
     PathBuf::from("sing-box.exe")
 }
 
 fn free_port(skip: &[u16]) -> Option<u16> {
     (20000..60000u16).find(|&p| {
-        if skip.contains(&p) { return false; }
+        if skip.contains(&p) {
+            return false;
+        }
         std::net::TcpListener::bind(("127.0.0.1", p)).is_ok()
     })
 }
@@ -37,7 +41,10 @@ fn load_servers() -> Vec<serde_json::Value> {
 async fn outlet_vs_entry_country() {
     let servers = load_servers();
     let bin = singbox();
-    if !bin.exists() { eprintln!("SKIP: no sing-box"); return; }
+    if !bin.exists() {
+        eprintln!("SKIP: no sing-box");
+        return;
+    }
 
     // Build config: each server receives its own inbound port
     let mut obs: Vec<serde_json::Value> = vec![
@@ -51,23 +58,33 @@ async fn outlet_vs_entry_country() {
 
     for (i, sv) in servers.iter().enumerate() {
         let sp: omnitun_lib::vpn::ServerProfile = match serde_json::from_value(sv.clone()) {
-            Ok(s) => s, _ => continue,
+            Ok(s) => s,
+            _ => continue,
         };
-        let p = match free_port(&ports) { Some(x) => x, _ => continue };
+        let p = match free_port(&ports) {
+            Some(x) => x,
+            _ => continue,
+        };
         let tag = format!("s{i}");
         if let Ok(mut ob) = omnitun_lib::vpn::config::build_outbound(&sp) {
             ob["tag"] = serde_json::json!(&tag);
             inbs.push(serde_json::json!({"type": "mixed","tag":format!("in{i}"),
                 "listen":"127.0.0.1","listen_port":p}));
-            ports.push(p); obs.push(ob);
+            ports.push(p);
+            obs.push(ob);
             routes.push(serde_json::json!({"inbound_port":[p],"outbound":tag}));
-            labels.push((i,
+            labels.push((
+                i,
                 sv["flag"].as_str().unwrap_or("?").to_string(),
-                sv["country_name"].as_str().unwrap_or("?").to_string()));
+                sv["country_name"].as_str().unwrap_or("?").to_string(),
+            ));
         }
     }
 
-    if ports.is_empty() { eprintln!("No servers"); return; }
+    if ports.is_empty() {
+        eprintln!("No servers");
+        return;
+    }
     println!("Testing {} servers via sing-box", ports.len());
 
     let cfg = serde_json::json!({
@@ -82,20 +99,38 @@ async fn outlet_vs_entry_country() {
     let cfg_p = dir.join("c.json");
     std::fs::write(&cfg_p, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
 
-    if !Command::new(&bin).args(["check", "-c"]).arg(&cfg_p).output().unwrap().status.success() {
-        let _ = std::fs::remove_dir_all(&dir); return;
+    if !Command::new(&bin)
+        .args(["check", "-c"])
+        .arg(&cfg_p)
+        .output()
+        .unwrap()
+        .status
+        .success()
+    {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
     }
 
-    let child = Command::new(&bin).args(["run", "-c"]).arg(&cfg_p)
-        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let child = Command::new(&bin)
+        .args(["run", "-c"])
+        .arg(&cfg_p)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
     let pid = child.id();
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     // Sequential test (simpler, avoids borrow issues)
-    let _client = reqwest::Client::builder().timeout(Duration::from_secs(6)).build().unwrap();
+    let _client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .build()
+        .unwrap();
 
-    println!("\n{:>3} | {:<8} {:<16} | {:<20} | {:<15} | {}",
-        "#", "Entry", "Server IP", "Exit country", "Exit IP", "Match");
+    println!(
+        "\n{:>3} | {:<8} {:<16} | {:<20} | {:<15} | {}",
+        "#", "Entry", "Server IP", "Exit country", "Exit IP", "Match"
+    );
     println!("{}", "-".repeat(90));
 
     let mut ok = 0u32;
@@ -106,43 +141,102 @@ async fn outlet_vs_entry_country() {
 
         // Fetch exit IP through this server's port
         let proxy = match reqwest::Proxy::http(format!("http://127.0.0.1:{p}")) {
-            Ok(pr) => pr, _ => { fail += 1; println!("{:>3} | {:<8} {:<16} | {:<20}", idx+1, flag, srv_ip, "PROXY ERROR"); continue; }
+            Ok(pr) => pr,
+            _ => {
+                fail += 1;
+                println!(
+                    "{:>3} | {:<8} {:<16} | {:<20}",
+                    idx + 1,
+                    flag,
+                    srv_ip,
+                    "PROXY ERROR"
+                );
+                continue;
+            }
         };
-        let pc = match reqwest::Client::builder().proxy(proxy).timeout(Duration::from_secs(5)).build() {
-            Ok(c) => c, _ => { fail += 1; println!("{:>3} | {:<8} {:<16} | {:<20}", idx+1, flag, srv_ip, "CLIENT ERROR"); continue; }
+        let pc = match reqwest::Client::builder()
+            .proxy(proxy)
+            .timeout(Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            _ => {
+                fail += 1;
+                println!(
+                    "{:>3} | {:<8} {:<16} | {:<20}",
+                    idx + 1,
+                    flag,
+                    srv_ip,
+                    "CLIENT ERROR"
+                );
+                continue;
+            }
         };
 
         let outlet = match pc.get("https://ifconfig.me/ip").send().await {
             Ok(r) if r.status().is_success() => match r.text().await {
-                Ok(t) => { let ip = t.trim().to_string(); if ip.is_empty() { None } else { Some(ip) } }
-                _ => None
-            }
-            _ => None
+                Ok(t) => {
+                    let ip = t.trim().to_string();
+                    if ip.is_empty() {
+                        None
+                    } else {
+                        Some(ip)
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
         };
 
         let (exit_country, exit_ip, matched) = match outlet {
-            Some(ref ip) => {
-                match omnitun_lib::vpn::geoip::resolve_hostname(ip).await {
-                    Some(g) => {
-                        let m = g.country_code == *flag;
-                        if m { ok += 1; } else { fail += 1; }
-                        (format!("{} {}", g.country_code, g.country_name), ip.clone(), m)
+            Some(ref ip) => match omnitun_lib::vpn::geoip::resolve_hostname(ip).await {
+                Some(g) => {
+                    let m = g.country_code == *flag;
+                    if m {
+                        ok += 1;
+                    } else {
+                        fail += 1;
                     }
-                    None => { fail += 1; ("NO GEOIP".into(), ip.clone(), false) }
+                    (
+                        format!("{} {}", g.country_code, g.country_name),
+                        ip.clone(),
+                        m,
+                    )
                 }
+                None => {
+                    fail += 1;
+                    ("NO GEOIP".into(), ip.clone(), false)
+                }
+            },
+            None => {
+                fail += 1;
+                ("TIMEOUT".into(), String::new(), false)
             }
-            None => { fail += 1; ("TIMEOUT".into(), String::new(), false) }
         };
 
-        println!("{:>3} | {:<8} {:<16} | {:<20} | {:<15} | {}",
-            idx+1, flag, srv_ip, exit_country, exit_ip,
-            if matched { "✓" } else { "✗ MISMATCH" });
+        println!(
+            "{:>3} | {:<8} {:<16} | {:<20} | {:<15} | {}",
+            idx + 1,
+            flag,
+            srv_ip,
+            exit_country,
+            exit_ip,
+            if matched { "✓" } else { "✗ MISMATCH" }
+        );
     }
 
-    println!("\n✓ Matched: {}/{}  ✗ Differed/Error: {}/{}",
-        ok, ok+fail, fail, ok+fail);
+    println!(
+        "\n✓ Matched: {}/{}  ✗ Differed/Error: {}/{}",
+        ok,
+        ok + fail,
+        fail,
+        ok + fail
+    );
 
-    let _ = Command::new("taskkill").args(["/f", "/pid", &pid.to_string()])
-        .stdout(Stdio::null()).stderr(Stdio::null()).output();
+    let _ = Command::new("taskkill")
+        .args(["/f", "/pid", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
     let _ = std::fs::remove_dir_all(&dir);
 }
