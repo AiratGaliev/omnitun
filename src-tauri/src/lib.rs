@@ -219,6 +219,16 @@ async fn start_vpn(
                         tokio::spawn(async move {
                             loop {
                                 tokio::time::sleep(Duration::from_secs(2)).await;
+
+                                // Guard: If this watchdog is no longer tracking the active PID, exit.
+                                // This prevents obsolete watchdogs from triggering on old PIDs after a reconnect or manual disconnect.
+                                {
+                                    let mgr = mgr_arc.lock().await;
+                                    if mgr.process_pid() != Some(pid) {
+                                        break;
+                                    }
+                                }
+
                                 if !is_process_alive(pid) {
                                     // Stop if the user disconnected (LAST_PROFILE cleared)
                                     {
