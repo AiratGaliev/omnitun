@@ -1,3 +1,12 @@
+// FIXED:
+//   - Added WireGuard fields (wgLocalAddress, wgAllowedIps, wgDns, wgMtu,
+//     wgKeepalive) and `username` to the `Server` interface.
+//   - These fields previously existed on the Rust `ServerProfile` struct but
+//     were never propagated through the frontend types, so selecting a
+//     WireGuard / SOCKS5-auth / HTTP-auth server from the dashboard caused
+//     `start_vpn` to be called with `null` for all of them — and sing-box
+//     then failed to authenticate or build a valid WireGuard outbound.
+
 export type Tab = 'home' | 'profiles' | 'settings' | 'logs' | 'about';
 
 export type ConnectionStatus =
@@ -39,6 +48,17 @@ export interface Server {
   transportHost?: string;
   realityPbk?: string;
   realitySid?: string;
+  // ── WireGuard-specific fields (must be propagated end-to-end for
+  //    WireGuard servers to connect). ───────────────────────────────────
+  wgLocalAddress?: string;
+  wgAllowedIps?: string;
+  wgDns?: string;
+  wgMtu?: number;
+  wgKeepalive?: number;
+  // ── Username for SOCKS5 / HTTP proxies that use username_password auth.
+  //    Without this, sing-box receives `password` without `username` and
+  //    the proxy connection fails to authenticate. ──────────────────────
+  username?: string;
 }
 
 export interface Profile {

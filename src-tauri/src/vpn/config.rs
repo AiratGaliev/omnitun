@@ -172,7 +172,11 @@ pub fn generate_config(
     // 2. Routing rules — apply user settings
     // Note: GeoIP database was removed in sing-box 1.12, so bypass_ru uses
     // a direct rule-set approach via ip_rules.
-    if let Some(rules) = config.get_mut("route").and_then(|r| r.get_mut("rules")).and_then(|r| r.as_array_mut()) {
+    if let Some(rules) = config
+        .get_mut("route")
+        .and_then(|r| r.get_mut("rules"))
+        .and_then(|r| r.as_array_mut())
+    {
         // Allow LAN: handled by base templates (ip_is_private → direct)
         // No extra rule needed — it's already in base.json / base-vpn.json
 
@@ -180,113 +184,116 @@ pub fn generate_config(
         if settings.bypass_ru {
             // Without GeoIP db, we add CIDR rules for known Russian ranges
             // as a best-effort approach
-            rules.insert(0, json!({
-                "ip_cidr": [
-                    "5.45.192.0/18", "5.57.128.0/17", "5.134.128.0/19",
-                    "5.136.0.0/13", "5.158.96.0/19", "5.166.0.0/14",
-                    "5.175.128.0/17", "5.178.64.0/18", "5.178.80.0/20",
-                    "5.181.108.0/22", "5.200.0.0/16", "5.201.128.0/17",
-                    "5.227.0.0/16", "5.228.0.0/16", "5.250.0.0/17",
-                    "5.252.184.0/22", "5.255.192.0/18",
-                    "31.3.0.0/16", "31.7.0.0/16", "31.8.0.0/15",
-                    "31.15.0.0/16", "31.25.0.0/16", "31.28.32.0/19",
-                    "31.40.0.0/16", "31.41.0.0/16", "31.44.0.0/16",
-                    "31.47.0.0/16", "31.128.0.0/16", "31.129.0.0/16",
-                    "31.130.0.0/15", "31.132.0.0/16", "31.133.0.0/16",
-                    "31.134.0.0/15", "31.148.0.0/16", "31.149.0.0/16",
-                    "31.161.0.0/16", "31.162.0.0/15", "31.170.0.0/16",
-                    "31.171.0.0/16", "31.172.0.0/15", "31.173.0.0/16",
-                    "31.177.0.0/16", "31.180.0.0/15", "31.184.0.0/16",
-                    "31.185.0.0/16", "31.186.0.0/15", "31.192.0.0/16",
-                    "31.193.0.0/16", "31.200.0.0/16", "31.201.0.0/16",
-                    "31.204.0.0/16", "31.205.0.0/16", "31.206.0.0/15",
-                    "31.207.0.0/16", "31.210.0.0/15", "31.216.0.0/16",
-                    "31.217.0.0/16", "31.220.0.0/16", "31.222.0.0/16",
-                    "37.0.0.0/16", "37.1.0.0/16", "37.8.0.0/15",
-                    "37.9.0.0/16", "37.16.0.0/15", "37.18.0.0/16",
-                    "37.19.0.0/16", "37.20.0.0/14", "37.24.0.0/16",
-                    "37.26.0.0/15", "37.28.0.0/16", "37.29.0.0/16",
-                    "37.32.0.0/16", "37.44.0.0/16", "37.46.0.0/15",
-                    "37.48.0.0/16", "37.49.0.0/16", "37.52.0.0/14",
-                    "37.56.0.0/15", "37.58.0.0/16", "37.60.0.0/16",
-                    "37.61.0.0/16", "37.63.0.0/16", "37.72.0.0/16",
-                    "37.73.0.0/16", "37.75.0.0/16", "37.76.0.0/15",
-                    "37.78.0.0/15", "37.98.0.0/16", "37.99.0.0/16",
-                    "37.110.0.0/16", "37.112.0.0/15", "37.114.0.0/16",
-                    "37.122.0.0/16", "37.123.0.0/16", "37.130.0.0/16",
-                    "37.131.0.0/16", "37.139.0.0/16", "37.140.0.0/15",
-                    "37.143.0.0/16", "37.144.0.0/14", "37.150.0.0/16",
-                    "37.151.0.0/16", "37.153.0.0/16", "37.157.0.0/16",
-                    "37.188.0.0/16", "37.190.0.0/16", "37.192.0.0/16",
-                    "37.194.0.0/16", "37.200.0.0/16", "37.203.0.0/16",
-                    "37.204.0.0/16", "37.205.0.0/16", "37.208.0.0/16",
-                    "37.209.0.0/16", "37.210.0.0/16", "37.212.0.0/16",
-                    "37.215.0.0/16", "37.218.0.0/16", "37.220.0.0/16",
-                    "37.221.0.0/16", "37.228.0.0/16", "37.230.0.0/16",
-                    "37.232.0.0/16", "37.233.0.0/16", "37.235.0.0/16",
-                    "37.252.0.0/16", "46.0.0.0/16", "46.3.0.0/16",
-                    "46.8.0.0/16", "46.16.0.0/15", "46.19.0.0/16",
-                    "46.20.0.0/16", "46.21.0.0/16", "46.22.0.0/15",
-                    "46.28.0.0/15", "46.30.0.0/16", "46.31.0.0/16",
-                    "46.34.0.0/16", "46.35.0.0/16", "46.36.0.0/16",
-                    "46.37.0.0/16", "46.38.0.0/16", "46.39.0.0/16",
-                    "46.41.0.0/16", "46.42.0.0/15", "46.44.0.0/16",
-                    "46.45.0.0/16", "46.46.0.0/16", "46.47.0.0/16",
-                    "46.48.0.0/16", "46.50.0.0/16", "46.51.0.0/16",
-                    "46.52.0.0/16", "46.61.0.0/16", "46.62.0.0/16",
-                    "46.63.0.0/16", "46.72.0.0/15", "46.111.0.0/16",
-                    "46.138.0.0/16", "46.146.0.0/15", "46.148.0.0/16",
-                    "46.149.0.0/16", "46.150.0.0/16", "46.151.0.0/16",
-                    "46.158.0.0/15", "46.160.0.0/16", "46.161.0.0/16",
-                    "46.163.0.0/16", "46.164.0.0/16", "46.165.0.0/16",
-                    "46.166.0.0/16", "46.171.0.0/16", "46.172.0.0/16",
-                    "46.173.0.0/16", "46.174.0.0/16", "46.175.0.0/16",
-                    "46.180.0.0/16", "46.181.0.0/16", "46.182.0.0/16",
-                    "46.183.0.0/16", "46.187.0.0/16", "46.188.0.0/16",
-                    "46.189.0.0/16", "46.191.0.0/16", "46.226.0.0/16",
-                    "46.227.0.0/16", "46.229.0.0/16", "46.230.0.0/16",
-                    "46.231.0.0/16", "46.232.0.0/16", "46.233.0.0/16",
-                    "46.235.0.0/16", "46.236.0.0/16", "46.237.0.0/16",
-                    "46.241.0.0/16", "46.242.0.0/16", "46.243.0.0/16",
-                    "46.244.0.0/16", "46.245.0.0/16", "46.246.0.0/16",
-                    "46.247.0.0/16", "46.248.0.0/16", "46.249.0.0/16",
-                    "46.250.0.0/16", "46.251.0.0/16", "46.252.0.0/16",
-                    "46.254.0.0/16", "46.255.0.0/16",
-                    "77.34.0.0/15", "77.37.0.0/16", "77.39.0.0/16",
-                    "77.40.0.0/15", "77.50.0.0/16", "77.51.0.0/16",
-                    "77.52.0.0/16", "77.53.0.0/16", "77.54.0.0/16",
-                    "77.55.0.0/16", "77.56.0.0/16", "77.57.0.0/16",
-                    "77.58.0.0/16", "77.59.0.0/16",
-                    "77.60.0.0/14", "77.64.0.0/15",
-                    "77.66.0.0/16", "77.67.0.0/16",
-                    "77.70.0.0/16", "77.71.0.0/16",
-                    "77.72.0.0/15", "77.74.0.0/16",
-                    "77.75.0.0/16", "77.78.0.0/16",
-                    "77.79.0.0/16", "77.81.0.0/16",
-                    "77.82.0.0/16", "77.83.0.0/16",
-                    "77.84.0.0/16", "77.85.0.0/16",
-                    "77.86.0.0/16", "77.87.0.0/16",
-                    "77.88.0.0/16", "77.90.0.0/16",
-                    "77.91.0.0/15", "77.94.0.0/16",
-                    "77.95.0.0/16", "77.105.0.0/16",
-                    "77.106.0.0/15", "77.108.0.0/15",
-                    "77.120.0.0/16", "77.121.0.0/16",
-                    "77.122.0.0/15", "77.220.0.0/16",
-                    "77.221.0.0/16", "77.222.0.0/16",
-                    "77.223.0.0/16", "77.232.0.0/16",
-                    "77.233.0.0/16", "77.234.0.0/16",
-                    "77.235.0.0/16", "77.236.0.0/16",
-                    "77.237.0.0/16", "77.238.0.0/16",
-                    "77.239.0.0/16", "77.240.0.0/16",
-                    "77.241.0.0/16", "77.242.0.0/16",
-                    "77.243.0.0/16", "77.244.0.0/16",
-                    "77.245.0.0/16", "77.246.0.0/16",
-                    "77.247.0.0/16", "77.248.0.0/16",
-                    "77.249.0.0/16", "77.250.0.0/16",
-                    "77.251.0.0/16"
-                ],
-                "outbound": "direct"
-            }));
+            rules.insert(
+                0,
+                json!({
+                    "ip_cidr": [
+                        "5.45.192.0/18", "5.57.128.0/17", "5.134.128.0/19",
+                        "5.136.0.0/13", "5.158.96.0/19", "5.166.0.0/14",
+                        "5.175.128.0/17", "5.178.64.0/18", "5.178.80.0/20",
+                        "5.181.108.0/22", "5.200.0.0/16", "5.201.128.0/17",
+                        "5.227.0.0/16", "5.228.0.0/16", "5.250.0.0/17",
+                        "5.252.184.0/22", "5.255.192.0/18",
+                        "31.3.0.0/16", "31.7.0.0/16", "31.8.0.0/15",
+                        "31.15.0.0/16", "31.25.0.0/16", "31.28.32.0/19",
+                        "31.40.0.0/16", "31.41.0.0/16", "31.44.0.0/16",
+                        "31.47.0.0/16", "31.128.0.0/16", "31.129.0.0/16",
+                        "31.130.0.0/15", "31.132.0.0/16", "31.133.0.0/16",
+                        "31.134.0.0/15", "31.148.0.0/16", "31.149.0.0/16",
+                        "31.161.0.0/16", "31.162.0.0/15", "31.170.0.0/16",
+                        "31.171.0.0/16", "31.172.0.0/15", "31.173.0.0/16",
+                        "31.177.0.0/16", "31.180.0.0/15", "31.184.0.0/16",
+                        "31.185.0.0/16", "31.186.0.0/15", "31.192.0.0/16",
+                        "31.193.0.0/16", "31.200.0.0/16", "31.201.0.0/16",
+                        "31.204.0.0/16", "31.205.0.0/16", "31.206.0.0/15",
+                        "31.207.0.0/16", "31.210.0.0/15", "31.216.0.0/16",
+                        "31.217.0.0/16", "31.220.0.0/16", "31.222.0.0/16",
+                        "37.0.0.0/16", "37.1.0.0/16", "37.8.0.0/15",
+                        "37.9.0.0/16", "37.16.0.0/15", "37.18.0.0/16",
+                        "37.19.0.0/16", "37.20.0.0/14", "37.24.0.0/16",
+                        "37.26.0.0/15", "37.28.0.0/16", "37.29.0.0/16",
+                        "37.32.0.0/16", "37.44.0.0/16", "37.46.0.0/15",
+                        "37.48.0.0/16", "37.49.0.0/16", "37.52.0.0/14",
+                        "37.56.0.0/15", "37.58.0.0/16", "37.60.0.0/16",
+                        "37.61.0.0/16", "37.63.0.0/16", "37.72.0.0/16",
+                        "37.73.0.0/16", "37.75.0.0/16", "37.76.0.0/15",
+                        "37.78.0.0/15", "37.98.0.0/16", "37.99.0.0/16",
+                        "37.110.0.0/16", "37.112.0.0/15", "37.114.0.0/16",
+                        "37.122.0.0/16", "37.123.0.0/16", "37.130.0.0/16",
+                        "37.131.0.0/16", "37.139.0.0/16", "37.140.0.0/15",
+                        "37.143.0.0/16", "37.144.0.0/14", "37.150.0.0/16",
+                        "37.151.0.0/16", "37.153.0.0/16", "37.157.0.0/16",
+                        "37.188.0.0/16", "37.190.0.0/16", "37.192.0.0/16",
+                        "37.194.0.0/16", "37.200.0.0/16", "37.203.0.0/16",
+                        "37.204.0.0/16", "37.205.0.0/16", "37.208.0.0/16",
+                        "37.209.0.0/16", "37.210.0.0/16", "37.212.0.0/16",
+                        "37.215.0.0/16", "37.218.0.0/16", "37.220.0.0/16",
+                        "37.221.0.0/16", "37.228.0.0/16", "37.230.0.0/16",
+                        "37.232.0.0/16", "37.233.0.0/16", "37.235.0.0/16",
+                        "37.252.0.0/16", "46.0.0.0/16", "46.3.0.0/16",
+                        "46.8.0.0/16", "46.16.0.0/15", "46.19.0.0/16",
+                        "46.20.0.0/16", "46.21.0.0/16", "46.22.0.0/15",
+                        "46.28.0.0/15", "46.30.0.0/16", "46.31.0.0/16",
+                        "46.34.0.0/16", "46.35.0.0/16", "46.36.0.0/16",
+                        "46.37.0.0/16", "46.38.0.0/16", "46.39.0.0/16",
+                        "46.41.0.0/16", "46.42.0.0/15", "46.44.0.0/16",
+                        "46.45.0.0/16", "46.46.0.0/16", "46.47.0.0/16",
+                        "46.48.0.0/16", "46.50.0.0/16", "46.51.0.0/16",
+                        "46.52.0.0/16", "46.61.0.0/16", "46.62.0.0/16",
+                        "46.63.0.0/16", "46.72.0.0/15", "46.111.0.0/16",
+                        "46.138.0.0/16", "46.146.0.0/15", "46.148.0.0/16",
+                        "46.149.0.0/16", "46.150.0.0/16", "46.151.0.0/16",
+                        "46.158.0.0/15", "46.160.0.0/16", "46.161.0.0/16",
+                        "46.163.0.0/16", "46.164.0.0/16", "46.165.0.0/16",
+                        "46.166.0.0/16", "46.171.0.0/16", "46.172.0.0/16",
+                        "46.173.0.0/16", "46.174.0.0/16", "46.175.0.0/16",
+                        "46.180.0.0/16", "46.181.0.0/16", "46.182.0.0/16",
+                        "46.183.0.0/16", "46.187.0.0/16", "46.188.0.0/16",
+                        "46.189.0.0/16", "46.191.0.0/16", "46.226.0.0/16",
+                        "46.227.0.0/16", "46.229.0.0/16", "46.230.0.0/16",
+                        "46.231.0.0/16", "46.232.0.0/16", "46.233.0.0/16",
+                        "46.235.0.0/16", "46.236.0.0/16", "46.237.0.0/16",
+                        "46.241.0.0/16", "46.242.0.0/16", "46.243.0.0/16",
+                        "46.244.0.0/16", "46.245.0.0/16", "46.246.0.0/16",
+                        "46.247.0.0/16", "46.248.0.0/16", "46.249.0.0/16",
+                        "46.250.0.0/16", "46.251.0.0/16", "46.252.0.0/16",
+                        "46.254.0.0/16", "46.255.0.0/16",
+                        "77.34.0.0/15", "77.37.0.0/16", "77.39.0.0/16",
+                        "77.40.0.0/15", "77.50.0.0/16", "77.51.0.0/16",
+                        "77.52.0.0/16", "77.53.0.0/16", "77.54.0.0/16",
+                        "77.55.0.0/16", "77.56.0.0/16", "77.57.0.0/16",
+                        "77.58.0.0/16", "77.59.0.0/16",
+                        "77.60.0.0/14", "77.64.0.0/15",
+                        "77.66.0.0/16", "77.67.0.0/16",
+                        "77.70.0.0/16", "77.71.0.0/16",
+                        "77.72.0.0/15", "77.74.0.0/16",
+                        "77.75.0.0/16", "77.78.0.0/16",
+                        "77.79.0.0/16", "77.81.0.0/16",
+                        "77.82.0.0/16", "77.83.0.0/16",
+                        "77.84.0.0/16", "77.85.0.0/16",
+                        "77.86.0.0/16", "77.87.0.0/16",
+                        "77.88.0.0/16", "77.90.0.0/16",
+                        "77.91.0.0/15", "77.94.0.0/16",
+                        "77.95.0.0/16", "77.105.0.0/16",
+                        "77.106.0.0/15", "77.108.0.0/15",
+                        "77.120.0.0/16", "77.121.0.0/16",
+                        "77.122.0.0/15", "77.220.0.0/16",
+                        "77.221.0.0/16", "77.222.0.0/16",
+                        "77.223.0.0/16", "77.232.0.0/16",
+                        "77.233.0.0/16", "77.234.0.0/16",
+                        "77.235.0.0/16", "77.236.0.0/16",
+                        "77.237.0.0/16", "77.238.0.0/16",
+                        "77.239.0.0/16", "77.240.0.0/16",
+                        "77.241.0.0/16", "77.242.0.0/16",
+                        "77.243.0.0/16", "77.244.0.0/16",
+                        "77.245.0.0/16", "77.246.0.0/16",
+                        "77.247.0.0/16", "77.248.0.0/16",
+                        "77.249.0.0/16", "77.250.0.0/16",
+                        "77.251.0.0/16"
+                    ],
+                    "outbound": "direct"
+                }),
+            );
         }
     }
 
@@ -308,7 +315,7 @@ pub fn write_config(json: &str, config_dir: &Path) -> Result<std::path::PathBuf,
     Ok(config_path)
 }
 
-pub(crate) fn build_outbound(server_profile: &ServerProfile) -> Result<Value, VpnError> {
+pub fn build_outbound(server_profile: &ServerProfile) -> Result<Value, VpnError> {
     match server_profile.protocol.as_str() {
         "vless" => Ok(build_vless(server_profile)),
         "vmess" => Ok(build_vmess(server_profile)),
@@ -360,11 +367,18 @@ fn build_vless(server_profile: &ServerProfile) -> Value {
     if let Some(t_type) = &server_profile.transport_type {
         match t_type.as_str() {
             "ws" => {
+                let host = server_profile
+                    .transport_host
+                    .clone()
+                    .filter(|h| !h.is_empty())
+                    .or_else(|| server_profile.sni.clone())
+                    .filter(|h| !h.is_empty())
+                    .unwrap_or_else(|| server_profile.server.clone());
                 outbound["transport"] = json!({
                     "type": "ws",
                     "path": server_profile.transport_path.clone().unwrap_or_else(|| "/".into()),
                     "headers": {
-                        "Host": server_profile.transport_host.clone().unwrap_or_default()
+                        "Host": host
                     }
                 });
             }
@@ -409,19 +423,31 @@ fn build_trojan(profile: &ServerProfile) -> Value {
         "password": profile.password,
     });
 
-    if let Some(sni) = &profile.sni {
-        set_tls(&mut outbound, sni);
-    }
+    // Trojan requires TLS. If sni is missing or empty, use server IP as fallback.
+    let sni = profile
+        .sni
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&profile.server);
+    set_tls(&mut outbound, sni);
 
     // Transport (WebSocket, gRPC) — same as VLESS
     if let Some(t_type) = &profile.transport_type {
         match t_type.as_str() {
             "ws" => {
+                // Host header fallback: transport_host → sni → server IP
+                let host = profile
+                    .transport_host
+                    .clone()
+                    .filter(|h| !h.is_empty())
+                    .or_else(|| profile.sni.clone())
+                    .filter(|h| !h.is_empty())
+                    .unwrap_or_else(|| profile.server.clone());
                 outbound["transport"] = json!({
                     "type": "ws",
                     "path": profile.transport_path.clone().unwrap_or_else(|| "/".into()),
                     "headers": {
-                        "Host": profile.transport_host.clone().unwrap_or_default()
+                        "Host": host
                     }
                 });
             }
@@ -450,8 +476,12 @@ fn build_shadowsocks(profile: &ServerProfile) -> Value {
 }
 
 fn build_wireguard(profile: &ServerProfile) -> Value {
-    let local_address = profile.wg_local_address.clone().unwrap_or_else(|| "172.16.0.2/32".into());
-    let allowed_ips: Vec<String> = profile.wg_allowed_ips
+    let local_address = profile
+        .wg_local_address
+        .clone()
+        .unwrap_or_else(|| "172.16.0.2/32".into());
+    let allowed_ips: Vec<String> = profile
+        .wg_allowed_ips
         .clone()
         .map(|ips| ips.split(',').map(|s| s.trim().to_string()).collect())
         .unwrap_or_else(|| vec!["0.0.0.0/0".into()]);
@@ -528,7 +558,12 @@ fn build_tuic(profile: &ServerProfile) -> Value {
 /// Uses utls fingerprint randomization (equivalent to karing's TLS fragment / mixed-case SNI).
 fn apply_anti_dpi(outbound: &mut Value) {
     // Only apply to outbounds with TLS
-    if outbound.get("tls").and_then(|t| t.get("enabled")).and_then(|e| e.as_bool()).unwrap_or(false) {
+    if outbound
+        .get("tls")
+        .and_then(|t| t.get("enabled"))
+        .and_then(|e| e.as_bool())
+        .unwrap_or(false)
+    {
         if let Some(tls) = outbound.get_mut("tls") {
             // Add utls with Chrome fingerprint for anti-DPI (supported in sing-box 1.13+)
             if tls.get("utls").is_none() {
@@ -577,11 +612,11 @@ fn build_socks(profile: &ServerProfile) -> Value {
         "server_port": profile.port,
     });
 
+    if let Some(user) = &profile.username {
+        outbound["username"] = json!(user);
+    }
     if let Some(pass) = &profile.password {
         outbound["password"] = json!(pass);
-        if let Some(user) = &profile.username {
-            outbound["username"] = json!(user);
-        }
     }
 
     outbound
@@ -595,11 +630,11 @@ fn build_http(profile: &ServerProfile) -> Value {
         "server_port": profile.port,
     });
 
+    if let Some(user) = &profile.username {
+        outbound["username"] = json!(user);
+    }
     if let Some(pass) = &profile.password {
         outbound["password"] = json!(pass);
-        if let Some(user) = &profile.username {
-            outbound["username"] = json!(user);
-        }
     }
 
     outbound
@@ -728,8 +763,19 @@ mod tests {
 
     #[test]
     fn test_vpn_tun_inbound() {
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &[vless_profile()], &default_settings());
-        assert!(result.is_ok(), "VPN config generation failed: {:?}", result.err());
+        let result = generate_config(
+            vpn_template(),
+            &cache_dir(),
+            1080,
+            "vpn",
+            &[vless_profile()],
+            &default_settings(),
+        );
+        assert!(
+            result.is_ok(),
+            "VPN config generation failed: {:?}",
+            result.err()
+        );
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
         let inbounds = config["inbounds"].as_array().unwrap();
@@ -739,7 +785,14 @@ mod tests {
 
     #[test]
     fn test_vpn_dns_new_format() {
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &[vless_profile()], &default_settings());
+        let result = generate_config(
+            vpn_template(),
+            &cache_dir(),
+            1080,
+            "vpn",
+            &[vless_profile()],
+            &default_settings(),
+        );
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -766,7 +819,14 @@ mod tests {
 
     #[test]
     fn test_vpn_outbound_added() {
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &[vless_tls_profile()], &default_settings());
+        let result = generate_config(
+            vpn_template(),
+            &cache_dir(),
+            1080,
+            "vpn",
+            &[vless_tls_profile()],
+            &default_settings(),
+        );
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -778,7 +838,14 @@ mod tests {
 
     #[test]
     fn test_proxy_listen_port_set() {
-        let result = generate_config(base_template(), &cache_dir(), 9999, "proxy", &[vless_profile()], &default_settings());
+        let result = generate_config(
+            base_template(),
+            &cache_dir(),
+            9999,
+            "proxy",
+            &[vless_profile()],
+            &default_settings(),
+        );
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -792,13 +859,27 @@ mod tests {
             ..vless_profile()
         };
 
-        let result = generate_config(base_template(), &cache_dir(), 10809, "proxy", &[profile], &default_settings());
+        let result = generate_config(
+            base_template(),
+            &cache_dir(),
+            10809,
+            "proxy",
+            &[profile],
+            &default_settings(),
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn test_vpn_config_full_structure() {
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &[vless_profile()], &default_settings());
+        let result = generate_config(
+            vpn_template(),
+            &cache_dir(),
+            1080,
+            "vpn",
+            &[vless_profile()],
+            &default_settings(),
+        );
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -809,7 +890,10 @@ mod tests {
         assert_eq!(tun["auto_route"], true);
         assert_eq!(tun["strict_route"], true);
         assert_eq!(tun["stack"], "mixed");
-        assert!(tun.get("listen_port").is_none(), "TUN must not have listen_port");
+        assert!(
+            tun.get("listen_port").is_none(),
+            "TUN must not have listen_port"
+        );
 
         // === DNS ===
         let dns = &config["dns"];
@@ -846,8 +930,14 @@ mod tests {
         // === Experimental ===
         let exp = &config["experimental"];
         assert!(exp["cache_file"]["enabled"].as_bool().unwrap_or(false));
-        assert!(exp.get("clash_api").is_some(), "clash_api must be added for traffic stats");
-        assert!(exp["clash_api"]["external_controller"].as_str().unwrap_or("").contains("127.0.0.1:"));
+        assert!(
+            exp.get("clash_api").is_some(),
+            "clash_api must be added for traffic stats"
+        );
+        assert!(exp["clash_api"]["external_controller"]
+            .as_str()
+            .unwrap_or("")
+            .contains("127.0.0.1:"));
     }
 
     #[test]
@@ -856,7 +946,14 @@ mod tests {
         settings.custom_dns = true;
         settings.dns_address = "https://9.9.9.9/dns-query".into();
 
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &[vless_profile()], &settings);
+        let result = generate_config(
+            vpn_template(),
+            &cache_dir(),
+            1080,
+            "vpn",
+            &[vless_profile()],
+            &settings,
+        );
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
@@ -875,7 +972,14 @@ mod tests {
         settings.custom_dns = true;
         settings.dns_address = "1.0.0.1".into();
 
-        let result = generate_config(vpn_template(), &cache_dir(), 1080, "vpn", &[vless_profile()], &settings);
+        let result = generate_config(
+            vpn_template(),
+            &cache_dir(),
+            1080,
+            "vpn",
+            &[vless_profile()],
+            &settings,
+        );
         assert!(result.is_ok());
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();

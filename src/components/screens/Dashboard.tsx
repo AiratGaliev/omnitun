@@ -11,7 +11,7 @@ import 'country-flag-icons/3x2/flags.css';
 /** Render flag via country-flag-icons library. Falls back to globe emoji. */
 function FlagDisplay({ code, className }: { code?: string; className?: string }) {
   const cc = code?.toUpperCase();
-  if (cc && cc.length === 2 && hasFlag(cc)) {
+  if (cc?.length === 2 && hasFlag(cc)) {
     return <span className={`${className ?? ''} flag:${cc}`} />;
   }
   return <span className={className ?? ''}>🌐</span>;

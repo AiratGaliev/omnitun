@@ -3,6 +3,24 @@
     "level": "info",
     "timestamp": true
   },
+  "dns": {
+    "servers": [
+      {
+        "type": "https",
+        "tag": "remote",
+        "server": "1.1.1.1",
+        "server_port": 443,
+        "detour": "proxy"
+      },
+      {
+        "type": "https",
+        "tag": "local",
+        "server": "8.8.8.8",
+        "server_port": 443
+      }
+    ],
+    "final": "remote"
+  },
   "inbounds": [
     {
       "type": "mixed",
@@ -29,7 +47,8 @@
       }
     ],
     "final": "proxy",
-    "auto_detect_interface": true
+    "auto_detect_interface": true,
+    "default_domain_resolver": "local"
   },
   "experimental": {
     "cache_file": {

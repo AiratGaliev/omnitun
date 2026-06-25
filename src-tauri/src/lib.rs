@@ -1,27 +1,27 @@
 #![recursion_limit = "512"]
-mod events;
-mod logging;
-mod profile;
+pub mod events;
+pub mod logging;
+pub mod profile;
 pub(crate) mod settings;
-mod subscription;
-mod vpn;
+pub mod subscription;
+pub mod vpn;
 
 use crate::events::emit_status;
 use crate::events::emit_traffic;
-use crate::logging::{log, LogLevel, Logger, LogSource, MAX_LOG_FILES_COUNT};
+use crate::logging::{log, LogLevel, LogSource, Logger, MAX_LOG_FILES_COUNT};
 use crate::profile::ProfileManager;
-use crate::subscription::SubscriptionProfile;
 use crate::settings::{AppSettings, SettingsManager};
+use crate::subscription::SubscriptionProfile;
 use crate::vpn::{ServerProfile, VpnManager, VpnStatus};
 use chrono::Local;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-use tauri::{Emitter, Manager};
-use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
 
 #[cfg(windows)]
@@ -29,6 +29,12 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const PROXY_TIMEOUT_SECS: u64 = 15;
 const PROXY_POLL_MS: u64 = 300;
+
+const IP_URLS: &[&str] = &[
+    "https://ifconfig.me/ip",
+    "https://api.ipify.org",
+    "https://icanhazip.com",
+];
 
 struct VpnState {
     manager: Arc<Mutex<VpnManager>>,
@@ -55,7 +61,13 @@ async fn start_vpn(
         &logger,
         LogLevel::Info,
         LogSource::System,
-        format!("Starting VPN connection to {} ({routing_mode} mode, {} server(s) available)...", profile.display_name(), server_count),
+        format!(
+            "Starting VPN connection to {} ({}:{}, {} server(s) available)...",
+            profile.display_name(),
+            profile.server,
+            profile.port,
+            server_count
+        ),
     );
     emit_status(&app, VpnStatus::Connecting);
 
@@ -67,7 +79,10 @@ async fn start_vpn(
     let mut all_servers = vec![profile.clone()];
     all_servers.extend(alternative_servers);
 
-    match manager.start(&app, proxy_port, &routing_mode, &all_servers, &settings).await {
+    match manager
+        .start(&app, proxy_port, &routing_mode, &all_servers, &settings)
+        .await
+    {
         Ok(_) => {
             log(
                 &app,
@@ -78,7 +93,7 @@ async fn start_vpn(
             );
 
             let result = match manager.process_pid() {
-                Some(pid) => wait_for_alive(pid).await,
+                Some(pid) => wait_for_proxy_ready(pid, proxy_port, &routing_mode).await,
                 None => Err("no PID".into()),
             };
             match result {
@@ -98,6 +113,51 @@ async fn start_vpn(
                         format!("VPN connected to {}", profile.display_name()),
                     );
                     emit_status(&app, VpnStatus::Connected);
+
+                    // Verify proxy actually routes traffic — make real request through it
+                    {
+                        let mut cb = reqwest::Client::builder().timeout(Duration::from_secs(5));
+                        // In VPN mode traffic goes through TUN — no mixed inbound on proxy_port
+                        if routing_mode != "vpn" {
+                            if let Ok(proxy) =
+                                reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}"))
+                            {
+                                cb = cb.proxy(proxy);
+                            }
+                        }
+                        let check_client = cb.build().ok();
+                        if let Some(c) = check_client {
+                            let mut got_response = false;
+                            for url in IP_URLS {
+                                if let Ok(resp) = c.get(*url).send().await {
+                                    if resp.status().is_success() {
+                                        if let Ok(text) = resp.text().await {
+                                            let ip = text.trim().to_string();
+                                            if !ip.is_empty()
+                                                && ip
+                                                    .chars()
+                                                    .all(|c| c.is_ascii_digit() || c == '.')
+                                            {
+                                                got_response = true;
+                                                log(
+                                                    &app,
+                                                    &logger,
+                                                    LogLevel::Info,
+                                                    LogSource::Vpn,
+                                                    format!("Proxy verified (exit IP: {ip})"),
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if !got_response {
+                                log(&app, &logger, LogLevel::Error, LogSource::Vpn,
+                                    "Proxy connection verified but exit IP unavailable — traffic may not be routing through proxy".into());
+                            }
+                        }
+                    }
 
                     // Auto-refresh subscriptions now that proxy is available
                     // (fetch may have failed earlier when not connected)
@@ -130,7 +190,10 @@ async fn start_vpn(
                                             &logger,
                                             LogLevel::Success,
                                             LogSource::Subscription,
-                                            format!("'{name}' refreshed ({} server(s))", profile.servers.len()),
+                                            format!(
+                                                "'{name}' refreshed ({} server(s))",
+                                                profile.servers.len()
+                                            ),
                                         );
                                     }
                                 });
@@ -164,13 +227,6 @@ async fn start_vpn(
                                             break; // intentional stop
                                         }
                                     }
-                                    // Also check via manager status
-                                    {
-                                        let mgr = mgr_arc.lock().await;
-                                        if mgr.status() == crate::vpn::VpnStatus::Disconnected {
-                                            break; // intentional stop
-                                        }
-                                    }
 
                                     let logger = app_clone.state::<StdMutex<Logger>>();
                                     log(
@@ -181,10 +237,10 @@ async fn start_vpn(
                                         "Connection lost — reconnecting...".into(),
                                     );
 
-                                    // Clear stale state
-                                    let _ = mgr_arc.lock().await.stop(&app_clone).await;
-
-                                    // Auto-reconnect up to 3 times
+                                    // Auto-reconnect up to 3 times.
+                                    // Note: we do NOT call mgr.stop() here — the process is already dead,
+                                    // and mgr.stop() would clear the PID guard causing mgr.status()
+                                    // to always return Disconnected.
                                     let last = {
                                         let lock = crate::vpn::LAST_PROFILE.lock().unwrap();
                                         lock.clone()
@@ -192,7 +248,17 @@ async fn start_vpn(
                                     let mut reconnected = false;
                                     if let Some(ref last) = last {
                                         for attempt in 1..=3 {
-                                            tokio::time::sleep(Duration::from_secs(attempt * 2)).await;
+                                            tokio::time::sleep(Duration::from_secs(attempt * 2))
+                                                .await;
+
+                                            // User might have disconnected while we were sleeping
+                                            {
+                                                let lock = crate::vpn::LAST_PROFILE.lock().unwrap();
+                                                if lock.is_none() {
+                                                    break;
+                                                }
+                                            }
+
                                             log(
                                                 &app_clone,
                                                 &logger,
@@ -202,13 +268,11 @@ async fn start_vpn(
                                             );
 
                                             let mgr = mgr_arc.lock().await;
-                                            // User might have disconnected while we were sleeping
-                                            if mgr.status() == crate::vpn::VpnStatus::Disconnected {
-                                                drop(mgr);
-                                                break;
-                                            }
-                                            let settings = app_clone.state::<Mutex<crate::settings::AppSettings>>()
-                                                .lock().await.clone();
+                                            let settings = app_clone
+                                                .state::<Mutex<crate::settings::AppSettings>>()
+                                                .lock()
+                                                .await
+                                                .clone();
                                             let ok = mgr
                                                 .start(
                                                     &app_clone,
@@ -254,12 +318,14 @@ async fn start_vpn(
 
                     // Traffic stats: poll Clash API every second
                     // /traffic returns cumulative bytes — we compute speed as delta/timediff
-                    let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                    let stats_port =
+                        crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
                     if stats_port > 0 {
                         let app_clone = app.clone();
                         let mgr_arc = manager_arc.clone();
                         tokio::spawn(async move {
                             let client = reqwest::Client::builder()
+                                .no_proxy()
                                 .timeout(Duration::from_secs(2))
                                 .build()
                                 .unwrap_or_default();
@@ -286,22 +352,34 @@ async fn start_vpn(
                                                 while let Some(newline) = buf.find('\n') {
                                                     let line = buf[..newline].trim().to_string();
                                                     buf = buf[newline + 1..].to_string();
-                                                    if let Some((up, down)) = parse_traffic_line(&line) {
+                                                    if let Some((up, down)) =
+                                                        parse_traffic_line(&line)
+                                                    {
                                                         let now = std::time::Instant::now();
-                                                        let (speed_up, speed_down) = if let (Some(pu), Some(pd), Some(pt)) = (prev_up, prev_down, prev_time) {
-                                                            let dt = now.saturating_duration_since(pt).as_secs_f64();
-                                                            if dt > 0.001 {
-                                                                (((up - pu) / dt).max(0.0), ((down - pd) / dt).max(0.0))
+                                                        let (speed_up, speed_down) =
+                                                            if let (Some(pu), Some(pd), Some(pt)) =
+                                                                (prev_up, prev_down, prev_time)
+                                                            {
+                                                                let dt = now
+                                                                    .saturating_duration_since(pt)
+                                                                    .as_secs_f64();
+                                                                if dt > 0.001 {
+                                                                    (
+                                                                        ((up - pu) / dt).max(0.0),
+                                                                        ((down - pd) / dt).max(0.0),
+                                                                    )
+                                                                } else {
+                                                                    continue; // too fast, keep prev values
+                                                                }
                                                             } else {
-                                                                continue; // too fast, keep prev values
-                                                            }
-                                                        } else {
-                                                            (0.0, 0.0) // first reading, no delta yet
-                                                        };
+                                                                (0.0, 0.0) // first reading, no delta yet
+                                                            };
                                                         prev_up = Some(up);
                                                         prev_down = Some(down);
                                                         prev_time = Some(now);
-                                                        emit_traffic(&app_clone, speed_up, speed_down);
+                                                        emit_traffic(
+                                                            &app_clone, speed_up, speed_down,
+                                                        );
                                                     }
                                                 }
                                             }
@@ -328,9 +406,15 @@ async fn start_vpn(
                         loop {
                             // Read configured interval (minutes → seconds, default 30 min, min 5 min)
                             let interval_secs = {
-                                if let Some(state) = app_clone.try_state::<Mutex<crate::settings::AppSettings>>() {
+                                if let Some(state) =
+                                    app_clone.try_state::<Mutex<crate::settings::AppSettings>>()
+                                {
                                     let settings = state.lock().await;
-                                    let minutes = if settings.auto_update_interval < 5 { 5 } else { settings.auto_update_interval };
+                                    let minutes = if settings.auto_update_interval < 5 {
+                                        5
+                                    } else {
+                                        settings.auto_update_interval
+                                    };
                                     minutes as u64 * 60
                                 } else {
                                     1800
@@ -346,7 +430,8 @@ async fn start_vpn(
                             }
                             let profile_state = app_clone.state::<ProfileState>();
                             let mut pm = profile_state.manager.lock().await;
-                            let profile_ids: Vec<String> = pm.list().iter().map(|p| p.id.clone()).collect();
+                            let profile_ids: Vec<String> =
+                                pm.list().iter().map(|p| p.id.clone()).collect();
                             for pid in &profile_ids {
                                 let servers = {
                                     let p = pm.list().iter().find(|p| &p.id == pid);
@@ -355,8 +440,11 @@ async fn start_vpn(
                                         _ => continue,
                                     }
                                 };
-                                let re_pinged = crate::profile::process_servers(&app_clone, servers).await;
-                                if let Some(profile) = pm.list_mut().iter_mut().find(|p| &p.id == pid) {
+                                let re_pinged =
+                                    crate::profile::process_servers(&app_clone, servers).await;
+                                if let Some(profile) =
+                                    pm.list_mut().iter_mut().find(|p| &p.id == pid)
+                                {
                                     profile.servers = re_pinged;
                                 }
                             }
@@ -391,10 +479,7 @@ async fn start_vpn(
 }
 
 #[tauri::command]
-async fn stop_vpn(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, VpnState>,
-) -> Result<(), String> {
+async fn stop_vpn(app: tauri::AppHandle, state: tauri::State<'_, VpnState>) -> Result<(), String> {
     let logger = app.state::<StdMutex<Logger>>();
     log(
         &app,
@@ -404,35 +489,61 @@ async fn stop_vpn(
         "Disconnecting VPN...".into(),
     );
 
-    let manager = state.manager.lock().await;
-    match manager.stop(&app).await {
-        Ok(_) => {
-            // Clear last connection so stale watchdogs don't try to reconnect
-            let mut last = crate::vpn::LAST_PROFILE.lock().unwrap();
-            *last = None;
-            log(
-                &app,
-                &logger,
-                LogLevel::Success,
-                LogSource::Vpn,
-                "VPN disconnected".into(),
-            );
-            emit_status(&app, VpnStatus::Disconnected);
-            Ok(())
+    // Step 1: Clear LAST_PROFILE so watchdog stops (must be before kill)
+    {
+        let mut last = crate::vpn::LAST_PROFILE.lock().unwrap();
+        *last = None;
+    }
+
+    // Step 2: Kill sing-box by PID from global atomic (no manager lock needed)
+    let pid = crate::vpn::VPN_PID.swap(0, std::sync::atomic::Ordering::AcqRel);
+    if pid > 0 {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/pid", &pid.to_string(), "/f"])
+                .creation_flags(0x08000000)
+                .output();
+            let _ = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command",
+                    &format!("Start-Process 'taskkill' -Verb RunAs -WindowStyle Hidden -ArgumentList '/pid','{}','/f' | Out-Null", pid)])
+                .creation_flags(0x08000000)
+                .output();
         }
-        Err(e) => {
-            let msg = e.to_string();
-            log(
-                &app,
-                &logger,
-                LogLevel::Error,
-                LogSource::Vpn,
-                format!("Failed to stop VPN: {msg}"),
-            );
-            emit_status(&app, VpnStatus::Error(msg.clone()));
-            Err(msg)
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output();
         }
     }
+
+    // Step 3: Best-effort manager cleanup
+    {
+        if let Ok(mgr) = state.manager.try_lock() {
+            mgr.clear_pid();
+            let logger = app.state::<StdMutex<Logger>>();
+            log(
+                &app,
+                &logger,
+                LogLevel::Info,
+                LogSource::Process,
+                "sing-box state cleaned up".into(),
+            );
+        }
+    }
+
+    // Step 4: Log and emit status
+    log(
+        &app,
+        &logger,
+        LogLevel::Success,
+        LogSource::Vpn,
+        "VPN disconnected".into(),
+    );
+    emit_status(&app, VpnStatus::Disconnected);
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -550,7 +661,10 @@ async fn refresh_subscription(
                 &logger,
                 LogLevel::Success,
                 LogSource::Subscription,
-                format!("Subscription '{}' refreshed ({count} server(s))", profile.name),
+                format!(
+                    "Subscription '{}' refreshed ({count} server(s))",
+                    profile.name
+                ),
             );
             Ok(profile)
         }
@@ -707,9 +821,7 @@ pub fn run() {
             app.manage(Mutex::new(settings));
 
             let mut profile_manager = ProfileManager::new(data_dir);
-            profile_manager
-                .load()
-                .expect("Failed to load profiles");
+            profile_manager.load().expect("Failed to load profiles");
             let profile_state = ProfileState {
                 manager: Arc::new(Mutex::new(profile_manager)),
             };
@@ -720,13 +832,16 @@ pub fn run() {
             let toggle_vpn = MenuItem::with_id(app, "toggle_vpn", "Connect", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
-            let menu = Menu::with_items(app, &[
-                &show,
-                &PredefinedMenuItem::separator(app)?,
-                &toggle_vpn,
-                &PredefinedMenuItem::separator(app)?,
-                &quit,
-            ])?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &show,
+                    &PredefinedMenuItem::separator(app)?,
+                    &toggle_vpn,
+                    &PredefinedMenuItem::separator(app)?,
+                    &quit,
+                ],
+            )?;
 
             let _tray_icon = TrayIconBuilder::new()
                 .tooltip("OmniTun")
@@ -752,8 +867,10 @@ pub fn run() {
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
-                        button_state: MouseButtonState::Up, ..
-                    } = event {
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
                         if let Some(window) = tray.app_handle().get_webview_window("main") {
                             let _ = window.show();
                             let _ = window.set_focus();
@@ -767,10 +884,13 @@ pub fn run() {
                 let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        let minimize = if let Some(state) = app_handle
-                            .try_state::<Mutex<crate::settings::AppSettings>>()
+                        let minimize = if let Some(state) =
+                            app_handle.try_state::<Mutex<crate::settings::AppSettings>>()
                         {
-                            state.try_lock().map(|g| g.minimize_to_tray).unwrap_or(false)
+                            state
+                                .try_lock()
+                                .map(|g| g.minimize_to_tray)
+                                .unwrap_or(false)
                         } else {
                             false
                         };
@@ -826,8 +946,7 @@ fn parse_traffic_line(line: &str) -> Option<(f64, f64)> {
 /// Read clipboard text via arboard (bypasses WebView2 clipboard restrictions).
 #[tauri::command]
 fn read_clipboard_text() -> Result<String, String> {
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|e| format!("Clipboard init: {e}"))?;
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("Clipboard init: {e}"))?;
     clipboard
         .get_text()
         .map_err(|e| format!("Clipboard read: {e}"))
@@ -836,21 +955,15 @@ fn read_clipboard_text() -> Result<String, String> {
 /// Get the user's real IP (before VPN/proxy) with GeoIP location.
 /// Always fetches directly (no proxy) — works whether VPN is connected or not.
 #[tauri::command]
-async fn get_real_ip() -> Result<String, String> {
+async fn get_real_ip(app: tauri::AppHandle) -> Result<String, String> {
+    let _logger = app.state::<StdMutex<Logger>>();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let ip_urls = [
-        "http://checkip.amazonaws.com",
-        "https://api.ipify.org",
-        "https://ifconfig.me/ip",
-        "https://icanhazip.com",
-    ];
-
     let mut ip = String::new();
-    for url in &ip_urls {
+    for url in IP_URLS {
         if let Ok(resp) = client.get(*url).send().await {
             if let Ok(text) = resp.text().await {
                 let trimmed = text.trim().to_string();
@@ -866,26 +979,16 @@ async fn get_real_ip() -> Result<String, String> {
         return Err("Could not determine external IP".into());
     }
 
-    // GeoIP location from ip-api.com
-    let location = match client.get(format!("http://ip-api.com/json/{ip}")).send().await {
-        Ok(resp) => {
-            if let Ok(v) = resp.json::<serde_json::Value>().await {
-                let country = v.get("country").and_then(|c| c.as_str()).unwrap_or("");
-                let city = v.get("city").and_then(|c| c.as_str()).unwrap_or("");
-                if !country.is_empty() && !city.is_empty() {
-                    Some(format!("{}, {}", city, country))
-                } else if !country.is_empty() {
-                    Some(country.to_string())
-                } else {
-                    None
-                }
+    // GeoIP location from local GeoLite2 database (no network call, no rate limit)
+    let location = crate::vpn::geoip::resolve(&ip)
+        .map(|geo| {
+            if !geo.city.is_empty() {
+                format!("{}, {}", geo.city, geo.country_name)
             } else {
-                None
+                geo.country_name
             }
-        }
-        Err(_) => None,
-    }
-    .unwrap_or_default();
+        })
+        .unwrap_or_default();
 
     if !location.is_empty() {
         Ok(format!("{} ({})", ip, location))
@@ -894,54 +997,55 @@ async fn get_real_ip() -> Result<String, String> {
     }
 }
 
-/// Find the active proxy's outlet (external) IP address via checkip.amazonaws.com
+/// Find the active proxy's outlet (external) IP address via IP echo services
 /// Uses the active proxy port when connected in proxy mode so the request
 /// actually goes through the VPN / proxy tunnel.
 #[tauri::command]
-async fn outlet_ip(
-    app: tauri::AppHandle,
-) -> Result<String, String> {
+async fn outlet_ip(app: tauri::AppHandle) -> Result<String, String> {
     let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if stats_port == 0 {
         return Err("VPN not connected".into());
     }
 
-    // If sing-box is running in proxy mode, route the IP check through it
-    let proxy_port = app
-        .try_state::<Mutex<crate::settings::AppSettings>>()
-        .and_then(|state| {
-            state.try_lock().ok().map(|guard| guard.proxy_port)
-        });
+    // Route through proxy only in proxy modes (VPN mode routes all through TUN automatically)
+    let mut use_proxy = false;
+    let mut proxy_port = 0u16;
+    if let Some(state) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
+        if let Ok(guard) = state.try_lock() {
+            if guard.routing_mode != "vpn" {
+                use_proxy = true;
+                proxy_port = guard.proxy_port;
+            }
+        }
+    }
 
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8));
+    let mut client_builder = reqwest::Client::builder().timeout(Duration::from_secs(8));
 
-    if let Some(port) = proxy_port {
-        if let Ok(proxy) = reqwest::Proxy::http(format!("http://127.0.0.1:{port}")) {
+    if use_proxy {
+        if let Ok(proxy) = reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}")) {
             client_builder = client_builder.proxy(proxy);
         }
     }
 
-    let client = client_builder
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = client_builder.build().map_err(|e| e.to_string())?;
 
-    // Try multiple IP check services (some may be blocked depending on region)
-    let ip_urls = [
-        "http://checkip.amazonaws.com",
-        "https://api.ipify.org",
-        "https://ifconfig.me/ip",
-        "https://icanhazip.com",
-    ];
-
+    // Try multiple IP check services. ifconfig.me first (most permissive with rate limits).
+    // 500ms delay between attempts to avoid hitting rate limits on any single service.
     let mut ip = String::new();
-    for url in &ip_urls {
+    for (idx, url) in IP_URLS.iter().enumerate() {
+        if idx > 0 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
         if let Ok(resp) = client.get(*url).send().await {
-            if let Ok(text) = resp.text().await {
-                let trimmed = text.trim().to_string();
-                if !trimmed.is_empty() {
-                    ip = trimmed;
-                    break;
+            if resp.status().is_success() {
+                if let Ok(text) = resp.text().await {
+                    let trimmed = text.trim().to_string();
+                    if !trimmed.is_empty()
+                        && trimmed.chars().all(|c| c.is_ascii_digit() || c == '.')
+                    {
+                        ip = trimmed;
+                        break;
+                    }
                 }
             }
         }
@@ -951,26 +1055,16 @@ async fn outlet_ip(
         return Err("Could not determine external IP".into());
     }
 
-    // Try to get location info from ip-api.com
-    let location = match client.get(format!("http://ip-api.com/json/{ip}")).send().await {
-        Ok(resp) => {
-            if let Ok(v) = resp.json::<serde_json::Value>().await {
-                let country = v.get("country").and_then(|c| c.as_str()).unwrap_or("");
-                let city = v.get("city").and_then(|c| c.as_str()).unwrap_or("");
-                if !country.is_empty() && !city.is_empty() {
-                    Some(format!("{}, {}", city, country))
-                } else if !country.is_empty() {
-                    Some(country.to_string())
-                } else {
-                    None
-                }
+    // GeoIP location from local GeoLite2 database (no network call, no rate limit)
+    let location = crate::vpn::geoip::resolve(&ip)
+        .map(|geo| {
+            if !geo.city.is_empty() {
+                format!("{}, {}", geo.city, geo.country_name)
             } else {
-                None
+                geo.country_name
             }
-        }
-        Err(_) => None,
-    }
-    .unwrap_or_default();
+        })
+        .unwrap_or_default();
 
     if !location.is_empty() {
         Ok(format!("{} ({})", ip, location))
@@ -988,6 +1082,7 @@ async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
     }
 
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())?;
@@ -1013,7 +1108,12 @@ async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
     if let Some(proxies) = groups.get("proxies").and_then(|p| p.as_object()) {
         for (name, proxy) in proxies {
             let ptype = proxy.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            if ptype == "Direct" || ptype == "Reject" || ptype == "Selector" || ptype == "URLTest" || ptype == "Fallback" {
+            if ptype == "Direct"
+                || ptype == "Reject"
+                || ptype == "Selector"
+                || ptype == "URLTest"
+                || ptype == "Fallback"
+            {
                 continue;
             }
             // Test each proxy
@@ -1052,6 +1152,7 @@ async fn get_connections() -> Result<Vec<serde_json::Value>, String> {
     }
 
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(3))
         .build()
         .map_err(|e| e.to_string())?;
@@ -1062,15 +1163,9 @@ async fn get_connections() -> Result<Vec<serde_json::Value>, String> {
         .await
         .map_err(|e| format!("Clash API error: {e}"))?;
 
-    let data: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Parse error: {e}"))?;
+    let data: serde_json::Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
 
-    let connections = data["connections"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let connections = data["connections"].as_array().cloned().unwrap_or_default();
 
     Ok(connections)
 }
@@ -1212,7 +1307,10 @@ async fn initialize_app(
 
     // 1. Ensure sing-box is installed (checks for updates if needed)
     let manager = state.manager.lock().await;
-    let _ = manager.ensure_installed(&app).await.map_err(|e| e.to_string())?;
+    let _ = manager
+        .ensure_installed(&app)
+        .await
+        .map_err(|e| e.to_string())?;
     drop(manager);
 
     // 2. Download GeoIP database
@@ -1225,6 +1323,36 @@ async fn initialize_app(
     if let Some(profile_state) = app.try_state::<ProfileState>() {
         let mut pm = profile_state.manager.lock().await;
         pm.enrich_loaded().await;
+    }
+
+    // 4. Detect and log real IP (no proxy, direct connection)
+    {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .ok();
+        if let Some(c) = client {
+            for url in IP_URLS {
+                if let Ok(resp) = c.get(*url).send().await {
+                    if resp.status().is_success() {
+                        if let Ok(text) = resp.text().await {
+                            let ip = text.trim().to_string();
+                            if !ip.is_empty() && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
+                            {
+                                log(
+                                    &app,
+                                    &logger,
+                                    LogLevel::Info,
+                                    LogSource::System,
+                                    format!("Real IP: {ip}"),
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     log(
@@ -1242,13 +1370,13 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
         let output = std::process::Command::new("tasklist")
-            .args(["/fi", &format!("PID eq {pid}"), "/nh"])
+            .args(["/fi", &format!("PID eq {pid}"), "/fo", "csv", "/nh"])
             .creation_flags(CREATE_NO_WINDOW)
             .output();
         match output {
             Ok(o) => {
                 let out = String::from_utf8_lossy(&o.stdout);
-                !out.contains("INFO: No tasks")
+                out.contains(&format!("\"{}\"", pid))
             }
             Err(_) => false,
         }
@@ -1263,19 +1391,81 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
     }
 }
 
-/// Wait until a process PID is alive by polling `is_process_alive`.
-async fn wait_for_alive(pid: u32) -> Result<u32, String> {
+/// Wait until sing-box is actually ready to accept traffic, not just spawned.
+///
+/// Replaces the previous `wait_for_alive(pid)` call in `start_vpn`. The old
+/// version returned as soon as `tasklist` showed the PID existed — which
+/// happens ~50–100 ms after `CreateProcess`, long before sing-box has bound
+/// the proxy inbound. This caused the dashboard to show "Connected" while
+/// sing-box was still initializing, leading to dropped first-packet errors
+/// and the integration test in `tests/selector_test.rs` failing with
+/// "Clash API not reachable" after only a 1-second wait.
+///
+/// Behavior by routing mode:
+/// - **`vpn`**: there is no inbound port to probe (TUN interface is brought
+///   up by sing-box internally and isn't a TCP listener we can poll from
+///   user space). Fall back to PID-liveness polling — same as before — but
+///   also wait an extra 500 ms grace period so the TUN has time to settle.
+/// - **`proxy` / `system-proxy` / `local-proxy`**: actively TCP-connect to
+///   `127.0.0.1:{proxy_port}` until the connect succeeds or the deadline
+///   expires. If the PID dies at any point, return early with an error so
+///   the caller can read sing-box's stderr log.
+async fn wait_for_proxy_ready(
+    pid: u32,
+    proxy_port: u16,
+    routing_mode: &str,
+) -> Result<u32, String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(PROXY_TIMEOUT_SECS);
     let mut attempts = 0u32;
 
-    loop {
-        attempts += 1;
-        if is_process_alive(pid) {
+    // VPN mode: no inbound TCP port to probe. Wait for PID + a small grace
+    // period for the TUN interface to come up.
+    if routing_mode == "vpn" {
+        loop {
+            attempts += 1;
+            if !is_process_alive(pid) {
+                return Err(format!(
+                    "sing-box (PID {pid}) exited before TUN was ready (after {attempts} attempt(s))"
+                ));
+            }
+            // PID is alive — give the TUN interface a brief grace period to
+            // finish coming up before we declare "Connected".
+            tokio::time::sleep(Duration::from_millis(500)).await;
             return Ok(attempts);
         }
+    }
+
+    // Proxy modes: poll TCP connect to the mixed inbound port.
+    loop {
+        attempts += 1;
+
+        if !is_process_alive(pid) {
+            return Err(format!(
+                "sing-box (PID {pid}) exited before the proxy port was ready (after {attempts} attempt(s))"
+            ));
+        }
+
+        // Try to TCP-connect to the proxy inbound. A successful connect
+        // means sing-box has bound the port and is accepting connections.
+        match tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio::net::TcpStream::connect(format!("127.0.0.1:{proxy_port}")),
+        )
+        .await
+        {
+            Ok(Ok(_stream)) => {
+                // Port is accepting connections. sing-box is ready.
+                return Ok(attempts);
+            }
+            _ => {
+                // Not ready yet (connection refused / timeout). Keep polling
+                // until the deadline.
+            }
+        }
+
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
-                "timed out after {attempts} attempt(s) waiting for PID {pid}"
+                "timed out after {attempts} attempt(s) waiting for proxy port {proxy_port} (PID {pid})"
             ));
         }
         tokio::time::sleep(Duration::from_millis(PROXY_POLL_MS)).await;
@@ -1296,10 +1486,94 @@ mod tests {
         assert!(!is_process_alive(999_999_999));
     }
 
+    /// `wait_for_proxy_ready` in proxy modes returns Ok once the inbound
+    /// port is accepting TCP connections. We bind a TcpListener on a free
+    /// port ourselves and call the function — it should succeed quickly.
     #[tokio::test]
-    async fn test_wait_for_alive_self() {
-        let result = wait_for_alive(std::process::id()).await;
-        assert!(result.is_ok());
+    async fn test_wait_for_proxy_ready_succeeds_when_port_open() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let pid = std::process::id();
+
+        // Spawn an accept loop so the listener stays alive during the poll.
+        let accept_handle = tokio::spawn(async move {
+            // Accept and immediately drop — we just need the port open.
+            loop {
+                if listener.accept().await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let result = wait_for_proxy_ready(pid, port, "local-proxy").await;
+        assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
         assert!(result.unwrap() > 0);
+        accept_handle.abort();
+    }
+
+    /// `wait_for_proxy_ready` returns Err when the target port never opens.
+    /// We use the current process's PID (which is alive) and a port that's
+    /// extremely unlikely to be open — the function should time out.
+    ///
+    /// To keep the test fast, we temporarily lower the deadline by
+    /// hijacking PROXY_TIMEOUT_SECS via a short-circuit on a known-closed
+    /// port. Since we can't change the const, we just accept that this
+    /// test will run for up to PROXY_TIMEOUT_SECS (15 s). To avoid slowing
+    /// down `cargo test`, this test is marked `#[ignore]` — run it with
+    /// `cargo test test_wait_for_proxy_ready_times_out -- --ignored`.
+    #[tokio::test]
+    #[ignore = "slow: waits up to 15 s for the timeout; run with --ignored"]
+    async fn test_wait_for_proxy_ready_times_out_when_port_closed() {
+        // Bind + immediately drop to get a port that was free a moment ago
+        // — very unlikely to be reused by another process during the test.
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let pid = std::process::id();
+
+        let result = wait_for_proxy_ready(pid, port, "local-proxy").await;
+        assert!(result.is_err(), "expected Err, got Ok");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("timed out"),
+            "expected error to mention 'timed out', got: {err}"
+        );
+    }
+
+    /// `wait_for_proxy_ready` returns Err when the PID is dead, even in
+    /// VPN mode (where we can't probe a port). We use PID 999_999_999
+    /// which is guaranteed not to exist.
+    #[tokio::test]
+    async fn test_wait_for_proxy_ready_vpn_mode_dead_pid() {
+        let result = wait_for_proxy_ready(999_999_999, 0, "vpn").await;
+        assert!(result.is_err(), "expected Err for dead PID, got Ok");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("exited"),
+            "expected error to mention 'exited', got: {err}"
+        );
+    }
+
+    /// `wait_for_proxy_ready` returns Err when the PID is dead in proxy
+    /// mode too — should fail fast (within one poll cycle) instead of
+    /// waiting for the full timeout.
+    #[tokio::test]
+    async fn test_wait_for_proxy_ready_proxy_mode_dead_pid() {
+        let start = tokio::time::Instant::now();
+        let result = wait_for_proxy_ready(999_999_999, 65535, "local-proxy").await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "expected Err for dead PID, got Ok");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("exited"),
+            "expected error to mention 'exited', got: {err}"
+        );
+        // Should fail fast — under 2 seconds — not wait for the full 15 s.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "expected fast failure, took {elapsed:?}"
+        );
     }
 }

@@ -1,4 +1,9 @@
-// src-tauri/src/subscription/parser.rs
+// FIXED:
+//   - parse_http now correctly stores `username` field (was hardcoded to None,
+//     which broke HTTP proxy servers with authentication).
+//   - parse_socks already stored `username` correctly (verified).
+//
+// All other functions are unchanged from the original codebase.
 
 use crate::vpn::{ServerProfile, VpnError};
 use std::collections::HashMap;
@@ -489,6 +494,12 @@ fn parse_socks(uri: &str) -> Option<ServerProfile> {
 fn parse_http(uri: &str) -> Option<ServerProfile> {
     // http://user:pass@server:port#Remark
     // https://user:pass@server:port#Remark
+    //
+    // FIXED: previously this function extracted `user` from the URI but never
+    // stored it in the ServerProfile — the `username` field was hardcoded to
+    // `None`. This silently broke HTTP proxy servers that require username/
+    // password authentication: sing-box would emit a `password` field without
+    // a matching `username`, causing the outbound to fail authentication.
     let stripped = uri.strip_prefix("http://").or_else(|| uri.strip_prefix("https://"))?;
     let is_https = uri.starts_with("https://");
 
@@ -500,6 +511,13 @@ fn parse_http(uri: &str) -> Option<ServerProfile> {
     let port: u16 = port_str.parse().ok()?;
     let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, ""));
 
+    // Build the username Option once and reuse it for both `username` and `method`.
+    let username_opt: Option<String> = if user.is_empty() {
+        None
+    } else {
+        Some(urlencoding_decode(user))
+    };
+
     Some(ServerProfile {
         id: uuid::Uuid::new_v4().to_string(),
         original_name: if name.is_empty() { user.to_string() } else { name },
@@ -508,7 +526,7 @@ fn parse_http(uri: &str) -> Option<ServerProfile> {
         port,
         uuid: None,
         password: if pass.is_empty() { None } else { Some(urlencoding_decode(pass)) },
-        method: if user.is_empty() { None } else { Some("username_password".into()) },
+        method: if username_opt.is_some() { Some("username_password".into()) } else { None },
         sni: None,
         flow: None,
         public_key: None,
@@ -527,7 +545,9 @@ fn parse_http(uri: &str) -> Option<ServerProfile> {
         wg_dns: None,
         wg_mtu: None,
         wg_keepalive: None,
-        username: None,
+        // FIX: store the username so HTTP-proxy servers with auth actually
+        // authenticate instead of failing silently.
+        username: username_opt,
     })
 }
 
@@ -729,5 +749,86 @@ mod tests {
         assert_eq!(servers[0].protocol, "vless");
         assert_eq!(servers[1].protocol, "vmess");
         assert_eq!(servers[2].protocol, "shadowsocks");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // NEW regression tests for the bugs fixed in this revision
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_socks5_with_auth_stores_username() {
+        // Regression: SOCKS5 with auth must store BOTH username AND password.
+        let uri = "socks5://omnitun:omnitun-test-password@127.0.0.5:8451#SOCKS5+127.0.0.5";
+        let p = parse_uri(uri).expect("SOCKS5 with auth must parse");
+        assert_eq!(p.protocol, "socks");
+        assert_eq!(p.server, "127.0.0.5");
+        assert_eq!(p.port, 8451);
+        assert_eq!(p.username.as_deref(), Some("omnitun"), "username must be stored");
+        assert_eq!(p.password.as_deref(), Some("omnitun-test-password"), "password must be stored");
+        assert_eq!(p.method.as_deref(), Some("username_password"), "method must be set when username is present");
+    }
+
+    #[test]
+    fn test_parse_socks5_without_auth_has_no_username() {
+        let uri = "socks5://127.0.0.5:8451#SOCKS5+noauth";
+        let p = parse_uri(uri).expect("SOCKS5 without auth must parse");
+        assert_eq!(p.protocol, "socks");
+        assert!(p.username.is_none(), "username must be None when no auth");
+        assert!(p.password.is_none(), "password must be None when no auth");
+        assert!(p.method.is_none(), "method must be None when no auth");
+    }
+
+    #[test]
+    fn test_parse_http_proxy_with_auth_stores_username() {
+        // Regression: previously parse_http extracted `user` from the URI but
+        // stored `username: None`, which silently broke HTTP-proxy auth.
+        let uri = "http://omnitun:omnitun-test-password@127.0.0.5:8452#HTTP+127.0.0.5";
+        let p = parse_uri(uri).expect("HTTP proxy with auth must parse");
+        assert_eq!(p.protocol, "http");
+        assert_eq!(p.server, "127.0.0.5");
+        assert_eq!(p.port, 8452);
+        assert_eq!(p.username.as_deref(), Some("omnitun"), "username MUST be stored (regression fix)");
+        assert_eq!(p.password.as_deref(), Some("omnitun-test-password"), "password must be stored");
+        assert_eq!(p.method.as_deref(), Some("username_password"), "method must be set when username is present");
+    }
+
+    #[test]
+    fn test_parse_https_proxy_with_auth_stores_username() {
+        let uri = "https://omnitun:omnitun-test-password@127.0.0.5:8453#HTTPS+127.0.0.5";
+        let p = parse_uri(uri).expect("HTTPS proxy with auth must parse");
+        assert_eq!(p.protocol, "http");
+        assert_eq!(p.username.as_deref(), Some("omnitun"), "username must be stored for https too");
+        assert_eq!(p.password.as_deref(), Some("omnitun-test-password"));
+    }
+
+    #[test]
+    fn test_parse_http_proxy_without_auth_has_no_username() {
+        // HTTP without user:pass is unusual, but should still parse cleanly
+        // when explicitly containing `@` (empty user).
+        // http://@127.0.0.5:8452 — this is an edge case; we accept it.
+        let uri = "http://@127.0.0.5:8452#noauth";
+        let p = parse_uri(uri).expect("HTTP proxy with empty auth must parse");
+        assert_eq!(p.protocol, "http");
+        assert!(p.username.is_none(), "username must be None when no auth");
+        assert!(p.password.is_none(), "password must be None when no auth");
+        assert!(p.method.is_none(), "method must be None when no auth");
+    }
+
+    #[test]
+    fn test_parse_wireguard_stores_all_fields() {
+        // Regression: WireGuard outbounds require private_key, public_key,
+        // local_address, allowed_ips — all must be preserved end-to-end.
+        let uri = "wireguard://OExDcGJ4RUZ1d2NMT2VnVjdacmluWldGM3lMc0JwS3hMZw==@127.0.0.5:8449?public_key=eYA0GeBYRXdJSfXH7voFcHzIGhKg0wURBJIuj6x8AjM%3D&local_address=10.0.0.1/24&allowed_ips=0.0.0.0/0&dns=1.1.1.1&mtu=1280&keepalive=25#WireGuard+test";
+        let p = parse_uri(uri).expect("WireGuard URI must parse");
+        assert_eq!(p.protocol, "wireguard");
+        assert_eq!(p.server, "127.0.0.5");
+        assert_eq!(p.port, 8449);
+        assert!(p.private_key.is_some(), "private_key MUST be stored");
+        assert_eq!(p.public_key.as_deref(), Some("eYA0GeBYRXdJSfXH7voFcHzIGhKg0wURBJIuj6x8AjM="), "public_key must be URL-decoded");
+        assert_eq!(p.wg_local_address.as_deref(), Some("10.0.0.1/24"), "wg_local_address MUST be stored");
+        assert_eq!(p.wg_allowed_ips.as_deref(), Some("0.0.0.0/0"), "wg_allowed_ips MUST be stored");
+        assert_eq!(p.wg_dns.as_deref(), Some("1.1.1.1"), "wg_dns MUST be stored");
+        assert_eq!(p.wg_mtu, Some(1280), "wg_mtu MUST be stored");
+        assert_eq!(p.wg_keepalive, Some(25), "wg_keepalive MUST be stored");
     }
 }

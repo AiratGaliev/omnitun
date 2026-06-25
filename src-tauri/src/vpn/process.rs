@@ -5,8 +5,8 @@
 
 use crate::vpn::VpnError;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 #[cfg(windows)]
@@ -27,24 +27,30 @@ impl ProcessManager {
         }
     }
 
-    pub fn pid(&self) -> std::sync::MutexGuard<'_, Option<u32>> {
-        self.pid.lock().unwrap()
+    pub fn pid(&self) -> Option<u32> {
+        *self.pid.lock().unwrap()
     }
 
+    /// Take the PID from the guard and return it, leaving None.
+    /// Used by stop_vpn to atomically get+clear the PID under the outer lock.
+    pub fn clear_pid(&self) -> Option<u32> {
+        self.pid.lock().unwrap().take()
+    }
+
+    /// Check if a PID is tracked (process may be stale — use status() for real liveness).
+    #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.pid.lock().unwrap().is_some()
     }
 
     pub async fn start(&self, config_path: &Path, elevated: bool) -> Result<(), VpnError> {
-        {
-            let mut pid_guard = self.pid.lock().unwrap();
-            if let Some(pid) = *pid_guard {
-                // Process crash recovery: stale PID that no longer exists
-                if !crate::is_process_alive(pid) {
-                    *pid_guard = None; // clear stale PID
-                } else {
-                    return Err(VpnError::Process("VPN is already running".into()));
-                }
+        let existing_pid = *self.pid.lock().unwrap();
+        if let Some(pid) = existing_pid {
+            // Process crash recovery: stale PID that no longer exists
+            if !crate::is_process_alive(pid) {
+                *self.pid.lock().unwrap() = None; // clear stale PID
+            } else {
+                return Err(VpnError::Process("VPN is already running".into()));
             }
         }
 
@@ -54,6 +60,7 @@ impl ProcessManager {
 
         let new_pid = self.launch(config_str, elevated).await?;
         *self.pid.lock().unwrap() = Some(new_pid);
+        crate::vpn::VPN_PID.store(new_pid, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -67,41 +74,34 @@ impl ProcessManager {
             return Ok(());
         }
 
-        // Windows: parallel kill — try both non-elevated and elevated simultaneously
+        // Windows: fire-and-forget kill by PID only (no /im — avoids nuking batch test instances)
         #[cfg(target_os = "windows")]
         {
-            let pid = pid.unwrap();
-
-            // Fire both killers in parallel
+            let p = pid.unwrap();
+            // Fire both non-elevated and elevated kill in parallel, then return
             let _ = std::process::Command::new("taskkill")
-                .args(["/f", "/im", "sing-box.exe"])
+                .args(["/pid", &p.to_string(), "/f"])
                 .creation_flags(CREATE_NO_WINDOW)
                 .output();
 
+            // Elevated kill via PowerShell (handles UAC-elevated processes)
             let _ = std::process::Command::new("powershell")
                 .args(["-NoProfile", "-Command",
-                    &format!("Start-Process 'taskkill' -Verb RunAs -WindowStyle Hidden -ArgumentList '/f','/im','sing-box.exe' | Out-Null")])
+                    &format!("Start-Process 'taskkill' -Verb RunAs -WindowStyle Hidden -ArgumentList '/pid','{}','/f' | Out-Null", p)])
                 .creation_flags(CREATE_NO_WINDOW)
                 .output();
 
-            // Quick poll: up to 2 seconds total
-            for _ in 0..20 {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                if !crate::is_process_alive(pid) {
-                    return Ok(());
-                }
-            }
-
-            return Err(VpnError::Process(
-                format!("sing-box PID {pid} alive after taskkill")
-            ));
+            crate::vpn::VPN_PID.store(0, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
         }
 
         // Unix: SIGTERM → wait → SIGKILL
         #[cfg(not(target_os = "windows"))]
         {
             let pid = pid.unwrap();
-            let _ = std::process::Command::new("kill").arg(pid.to_string()).output();
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .output();
             tokio::time::sleep(Duration::from_secs(3)).await;
 
             if !crate::is_process_alive(pid) {
@@ -150,11 +150,15 @@ impl ProcessManager {
 
                 let launcher_content = format!(
                     r#"$p = Start-Process -FilePath '{}' -ArgumentList 'run','-c','{}' -PassThru -WindowStyle Hidden -RedirectStandardError '{}'; $p.Id | Out-File -FilePath '{}' -Encoding ASCII"#,
-                    binary, config_path, log_path_stderr.to_str().unwrap_or("NUL"), pid_file_str,
+                    binary,
+                    config_path,
+                    log_path_stderr.to_str().unwrap_or("NUL"),
+                    pid_file_str,
                 );
 
-                std::fs::write(&launcher_path, &launcher_content)
-                    .map_err(|e| VpnError::Process(format!("Failed to write launcher script: {e}")))?;
+                std::fs::write(&launcher_path, &launcher_content).map_err(|e| {
+                    VpnError::Process(format!("Failed to write launcher script: {e}"))
+                })?;
 
                 let output = std::process::Command::new("powershell")
                     .args([
@@ -212,14 +216,14 @@ impl ProcessManager {
                 let child = std::process::Command::new(binary)
                     .args(["run", "-c", config_path])
                     // Redirect stdout/stderr to separate log files for crash diagnostics
-                    .stdout(std::fs::File::create(&log_path_stdout).ok().unwrap_or_else(|| {
-                        std::fs::File::create("/dev/null").unwrap()
-                    }))
-                    .stderr(std::process::Stdio::from(
-                        std::fs::File::create(&log_path_stderr).ok().unwrap_or_else(|| {
-                            std::fs::File::create("/dev/null").unwrap()
-                        })
-                    ))
+                    .stdout(match std::fs::File::create(&log_path_stdout) {
+                        Ok(f) => f.into(),
+                        Err(_) => std::process::Stdio::null(),
+                    })
+                    .stderr(match std::fs::File::create(&log_path_stderr) {
+                        Ok(f) => std::process::Stdio::from(f),
+                        Err(_) => std::process::Stdio::null(),
+                    })
                     .creation_flags(CREATE_NO_WINDOW)
                     .spawn()
                     .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;
@@ -241,7 +245,7 @@ impl ProcessManager {
                     .args([binary, "run", "-c", config_path])
                     .stdout(std::fs::File::create(&log_path).ok())
                     .stderr(std::process::Stdio::from(
-                        std::fs::File::create(&log_path).ok().unwrap()
+                        std::fs::File::create(&log_path).ok().unwrap(),
                     ))
                     .spawn()
                     .or_else(|_| {
@@ -249,7 +253,7 @@ impl ProcessManager {
                             .args(["-n", binary, "run", "-c", config_path])
                             .stdout(std::fs::File::create(&log_path).ok())
                             .stderr(std::process::Stdio::from(
-                                std::fs::File::create(&log_path).ok().unwrap()
+                                std::fs::File::create(&log_path).ok().unwrap(),
                             ))
                             .spawn()
                     })
@@ -263,7 +267,7 @@ impl ProcessManager {
                     .args(["run", "-c", config_path])
                     .stdout(std::fs::File::create(&log_path).ok())
                     .stderr(std::process::Stdio::from(
-                        std::fs::File::create(&log_path).ok().unwrap()
+                        std::fs::File::create(&log_path).ok().unwrap(),
                     ))
                     .spawn()
                     .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;

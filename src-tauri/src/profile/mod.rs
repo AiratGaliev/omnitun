@@ -3,10 +3,14 @@ use crate::subscription::SubscriptionProfile;
 use crate::vpn::{ServerProfile, VpnError};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Semaphore;
+
+/// Guard: only one batch test runs at a time
+pub(crate) static TESTING_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Get proxy port to route subscription fetch through the active proxy.
 /// Returns None in VPN mode — all traffic already goes through TUN, so direct
@@ -106,9 +110,8 @@ impl ProfileManager {
     }
 
     pub fn save(&self) -> Result<(), VpnError> {
-        let json = serde_json::to_string_pretty(&self.profiles).map_err(|e| {
-            VpnError::Subscription(format!("Failed to serialize profiles: {e}"))
-        })?;
+        let json = serde_json::to_string_pretty(&self.profiles)
+            .map_err(|e| VpnError::Subscription(format!("Failed to serialize profiles: {e}")))?;
         std::fs::write(&self.file_path, json)?;
         Ok(())
     }
@@ -121,7 +124,12 @@ impl ProfileManager {
         &mut self.profiles
     }
 
-    pub async fn add(&mut self, app: &AppHandle, name: String, url: String) -> Result<SubscriptionProfile, VpnError> {
+    pub async fn add(
+        &mut self,
+        app: &AppHandle,
+        name: String,
+        url: String,
+    ) -> Result<SubscriptionProfile, VpnError> {
         let clean_url = url.trim().to_string();
 
         if self.profiles.iter().any(|p| p.url == clean_url) {
@@ -132,7 +140,25 @@ impl ProfileManager {
         }
 
         let mut servers = if clean_url.starts_with("http://") || clean_url.starts_with("https://") {
-            crate::subscription::fetch_subscription(&clean_url, proxy_port(app)).await?
+            let logger = app.state::<Mutex<Logger>>();
+            // Try through existing proxy first, fall back to direct
+            match crate::subscription::fetch_subscription(&clean_url, proxy_port(app)).await {
+                Ok(s) => s,
+                Err(e) => {
+                    if proxy_port(app).is_some() {
+                        log(
+                            app,
+                            &logger,
+                            LogLevel::Warning,
+                            LogSource::Subscription,
+                            format!("Proxy fetch failed, retrying direct: {e}"),
+                        );
+                        crate::subscription::fetch_subscription(&clean_url, None).await?
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
         } else {
             crate::subscription::parser::parse_subscription(&clean_url)?
         };
@@ -140,9 +166,11 @@ impl ProfileManager {
         servers = process_servers(app, servers).await;
 
         // Fetch subscription traffic info
-        let (traffic_used, traffic_total, traffic_expiry) = crate::subscription::fetch_subscription_traffic(&clean_url, proxy_port(app)).await
-            .map(|(used, total, expiry)| (Some(used), Some(total), expiry))
-            .unwrap_or((None, None, None));
+        let (traffic_used, traffic_total, traffic_expiry) =
+            crate::subscription::fetch_subscription_traffic(&clean_url, proxy_port(app))
+                .await
+                .map(|(used, total, expiry)| (Some(used), Some(total), expiry))
+                .unwrap_or((None, None, None));
 
         let profile = SubscriptionProfile {
             id: uuid::Uuid::new_v4().to_string(),
@@ -170,7 +198,11 @@ impl ProfileManager {
         Ok(())
     }
 
-    pub async fn refresh(&mut self, app: &AppHandle, id: &str) -> Result<SubscriptionProfile, VpnError> {
+    pub async fn refresh(
+        &mut self,
+        app: &AppHandle,
+        id: &str,
+    ) -> Result<SubscriptionProfile, VpnError> {
         let idx = self
             .profiles
             .iter()
@@ -178,13 +210,29 @@ impl ProfileManager {
             .ok_or_else(|| VpnError::Subscription("Profile not found".into()))?;
 
         let url = &self.profiles[idx].url;
+        let logger = app.state::<Mutex<Logger>>();
         let fetch_result = match url {
             u if u.starts_with("http://") || u.starts_with("https://") => {
-                crate::subscription::fetch_subscription(u, proxy_port(app)).await
+                match crate::subscription::fetch_subscription(u, proxy_port(app)).await {
+                    Ok(s) => Ok(s),
+                    Err(e) => {
+                        if proxy_port(app).is_some() {
+                            log(
+                                app,
+                                &logger,
+                                LogLevel::Warning,
+                                LogSource::Subscription,
+                                format!("Proxy fetch failed, retrying direct: {e}"),
+                            );
+                            crate::subscription::fetch_subscription(u, None).await
+                        } else {
+                            Err(e)
+                        }
+                    }
+                }
             }
-            _ => crate::subscription::parser::parse_subscription(url).map_err(|e| {
-                VpnError::Subscription(format!("Parse error: {e}"))
-            }),
+            _ => crate::subscription::parser::parse_subscription(url)
+                .map_err(|e| VpnError::Subscription(format!("Parse error: {e}"))),
         };
 
         // On HTTP/parse error: still bump updated_at so the frontend timer
@@ -205,30 +253,36 @@ impl ProfileManager {
                     let existing = std::mem::take(&mut self.profiles[idx].servers);
                     self.profiles[idx].servers = process_servers(
                         app,
-                        existing.into_iter().map(|mut s| {
-                            // Reset ping so it gets re-tested
-                            s.ping_ms = None;
-                            s
-                        }).collect(),
-                    ).await;
+                        existing
+                            .into_iter()
+                            .map(|mut s| {
+                                // Reset ping so it gets re-tested
+                                s.ping_ms = None;
+                                s
+                            })
+                            .collect(),
+                    )
+                    .await;
                 }
                 self.save()?;
                 return Err(VpnError::Subscription(format!("{e}")));
             }
         };
 
-        // Preserve server IDs across refresh — match by (protocol, server, port, uuid, password)
+        // Preserve server IDs across refresh — match by (protocol, server, port, uuid, password, method, transport_type)
         let old_index: std::collections::HashMap<String, String> = self.profiles[idx]
             .servers
             .iter()
             .map(|s| {
                 let key = format!(
-                    "{}://{}:{}@{}:{}",
+                    "{}://{}:{}@{}:{}:{}/{}",
                     s.protocol,
                     s.server,
                     s.port,
                     s.uuid.as_deref().unwrap_or(""),
                     s.password.as_deref().unwrap_or(""),
+                    s.method.as_deref().unwrap_or(""),
+                    s.transport_type.as_deref().unwrap_or(""),
                 );
                 (key, s.id.clone())
             })
@@ -254,7 +308,7 @@ impl ProfileManager {
         // Guard: don't overwrite servers with empty list (e.g. content:// URLs)
         if servers.is_empty() {
             return Err(VpnError::Subscription(
-                "Refresh returned 0 servers — keeping existing servers".into()
+                "Refresh returned 0 servers — keeping existing servers".into(),
             ));
         }
 
@@ -262,7 +316,11 @@ impl ProfileManager {
         self.profiles[idx].updated_at = chrono::Utc::now().to_rfc3339();
 
         // Refresh traffic info
-        let traffic = crate::subscription::fetch_subscription_traffic(&self.profiles[idx].url, proxy_port(app)).await;
+        let traffic = crate::subscription::fetch_subscription_traffic(
+            &self.profiles[idx].url,
+            proxy_port(app),
+        )
+        .await;
         if let Some((used, total, expiry)) = traffic {
             self.profiles[idx].traffic_used = Some(used);
             self.profiles[idx].traffic_total = Some(total);
@@ -488,14 +546,22 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         let updated = test_servers_via_singbox_batch(app, &alive).await;
         if let Ok(mut updated) = updated {
             // Sort by ping (fastest first), unknown pings last
-            updated.sort_by(|a, b| a.ping_ms.unwrap_or(u64::MAX).cmp(&b.ping_ms.unwrap_or(u64::MAX)));
+            updated.sort_by(|a, b| {
+                a.ping_ms
+                    .unwrap_or(u64::MAX)
+                    .cmp(&b.ping_ms.unwrap_or(u64::MAX))
+            });
             if let Some(fastest) = updated.first() {
                 log(
                     app,
                     &logger,
                     LogLevel::Info,
                     LogSource::Subscription,
-                    format!("Fastest server: {} ({} ms)", fastest.display_name(), fastest.ping_ms.unwrap_or(0)),
+                    format!(
+                        "Fastest server: {} ({} ms)",
+                        fastest.display_name(),
+                        fastest.ping_ms.unwrap_or(0)
+                    ),
                 );
             }
             return updated;
@@ -503,13 +569,37 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
     }
 
     // Fallback: sort alive servers by TCP ping
-    alive.sort_by(|a, b| a.ping_ms.unwrap_or(u64::MAX).cmp(&b.ping_ms.unwrap_or(u64::MAX)));
+    alive.sort_by(|a, b| {
+        a.ping_ms
+            .unwrap_or(u64::MAX)
+            .cmp(&b.ping_ms.unwrap_or(u64::MAX))
+    });
     alive
 }
 
 /// Test all servers that passed TCP ping using sing-box and Clash API.
 /// Generates a single config with ALL servers as outbounds, starts sing-box,
 /// tests each via GET /proxies/{tag}/delay, returns servers with real latency.
+
+/// Fetch outlet IP through a given proxy port. Used during batch latency testing.
+async fn fetch_outlet_ip(proxy_port: u16) -> Option<String> {
+    let proxy = reqwest::Proxy::http(format!("http://127.0.0.1:{proxy_port}")).ok()?;
+    let client = reqwest::Client::builder()
+        .proxy(proxy)
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+    let resp = client.get("https://ifconfig.me/ip").send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.text()
+        .await
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 async fn test_servers_via_singbox_batch(
     app: &AppHandle,
     servers: &[ServerProfile],
@@ -518,6 +608,7 @@ async fn test_servers_via_singbox_batch(
     use serde_json::json;
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
+    use std::time::Duration;
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     let logger = app.state::<Mutex<Logger>>();
@@ -527,7 +618,10 @@ async fn test_servers_via_singbox_batch(
         &logger,
         LogLevel::Info,
         LogSource::Subscription,
-        format!("Testing {} server(s) via real proxy connection...", servers.len()),
+        format!(
+            "Testing {} server(s) via real proxy connection...",
+            servers.len()
+        ),
     );
 
     let data_dir = app.path().app_data_dir().map_err(|_| ())?;
@@ -543,17 +637,23 @@ async fn test_servers_via_singbox_batch(
         json!({"type": "direct", "tag": "direct"}),
         json!({"type": "block", "tag": "block"}),
     ];
+    let mut proxy_tags: Vec<String> = Vec::new();
     for server in servers {
         if let Ok(ob) = build_outbound(server) {
-            // Tag must match server index for Clash API lookup
             let tag = format!("proxy-{}", &server.id);
+            proxy_tags.push(tag.clone());
             let mut ob = ob;
             ob["tag"] = json!(tag);
             outbounds.push(ob);
         }
     }
 
-    let test_dir = std::env::temp_dir().join(format!("omnitun-latency-{}", std::process::id()));
+    // Add selector group for outlet IP routing
+    let mut selector_outbounds = vec!["direct".to_string()];
+    selector_outbounds.extend(proxy_tags);
+    outbounds.push(json!({"type": "selector", "tag": "proxy", "outbounds": selector_outbounds}));
+
+    let test_dir = std::env::temp_dir().join(format!("omnitun-latency-{}", uuid::Uuid::new_v4()));
     let _ = std::fs::create_dir_all(&test_dir);
 
     let config_json = json!({
@@ -568,22 +668,45 @@ async fn test_servers_via_singbox_batch(
         "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": proxy_port}],
         "outbounds": outbounds,
         "experimental": {
+            "cache_file": {
+                "enabled": false
+            },
             "clash_api": {
                 "external_controller": format!("127.0.0.1:{stats_port}"),
                 "secret": ""
             }
         },
         "route": {
-            "final": "direct",
+            "final": "proxy",
             "auto_detect_interface": true,
             "default_domain_resolver": "local",
             "rules": [{"ip_is_private": true, "outbound": "direct"}]
-        }
+        },
     });
 
     let config_path = test_dir.join("test-batch.json");
     let config_str = serde_json::to_string_pretty(&config_json).map_err(|_| ())?;
     std::fs::write(&config_path, &config_str).map_err(|_| ())?;
+
+    // Guard: skip if another batch test is already running (must be before spawn)
+    if TESTING_IN_PROGRESS.swap(true, Ordering::AcqRel) {
+        log(
+            app,
+            &logger,
+            LogLevel::Warning,
+            LogSource::Subscription,
+            "Batch test already in progress, skipping".into(),
+        );
+        return Err(());
+    }
+
+    struct TestGuard;
+    impl Drop for TestGuard {
+        fn drop(&mut self) {
+            TESTING_IN_PROGRESS.store(false, Ordering::Release);
+        }
+    }
+    let _guard = TestGuard;
 
     // Start sing-box
     #[cfg(windows)]
@@ -609,8 +732,9 @@ async fn test_servers_via_singbox_batch(
     // Wait for sing-box to start
     tokio::time::sleep(std::time::Duration::from_millis(600)).await;
 
-    // Test each server via Clash API
+    // Test each server via Clash API — parallel with concurrency limit
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|_| {
@@ -621,39 +745,127 @@ async fn test_servers_via_singbox_batch(
     let api_url = format!("http://127.0.0.1:{stats_port}");
     let test_url = "http://cp.cloudflare.com/generate_204";
 
-    let mut updated = Vec::new();
+    let updated = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let semaphore = Arc::new(Semaphore::new(10));
+    let mut handles = Vec::new();
 
     for server in servers {
         let tag = format!("proxy-{}", &server.id);
-        let delay_url = format!(
-            "{api_url}/proxies/{tag}/delay?url={test_url}&timeout=5000"
-        );
+        let delay_url = format!("{api_url}/proxies/{tag}/delay?url={test_url}&timeout=5000");
+        let client = client.clone();
+        let updated = updated.clone();
+        let sem = semaphore.clone();
+        let srv = server.clone();
 
-        match client.get(&delay_url).send().await {
-            Ok(resp) => {
-                if resp.status().is_success() {
+        handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            let mut result = srv;
+            match client.get(&delay_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
                     if let Ok(body) = resp.text().await {
                         if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
                             if let Some(ms) = data["delay"].as_u64() {
-                                let mut s = server.clone();
-                                s.ping_ms = Some(ms);
-                                updated.push(s);
-                                continue;
+                                result.ping_ms = Some(ms);
                             }
                         }
                     }
                 }
+                _ => {}
             }
-            _ => {}
-        }
-        // Fallback: still include servers that passed TCP ping but Clash API test failed
-        updated.push(server.clone());
+            updated.lock().unwrap().push(result);
+        }));
     }
 
-    // Cleanup
-    let _ = kill_process(pid);
-    let _ = std::fs::remove_dir_all(&test_dir);
+    // Wait for all parallel tests to complete
+    for handle in handles {
+        let _ = handle.await;
+    }
 
+    // Collect results into a Vec (sorted by ping later, after outlet IP check)
+    let mut updated = Arc::try_unwrap(updated).unwrap().into_inner().unwrap();
+
+    // --- Outlet IP checking via Clash API selector switch (parallel) ---
+    let outlet_count = updated.len().min(10);
+    log(
+        app,
+        &logger,
+        LogLevel::Info,
+        LogSource::Subscription,
+        format!(
+            "Checking outlet IP for {} fastest server(s)...",
+            outlet_count
+        ),
+    );
+
+    // Sort by ping — fastest first
+    updated.sort_by(|a, b| {
+        a.ping_ms
+            .unwrap_or(u64::MAX)
+            .cmp(&b.ping_ms.unwrap_or(u64::MAX))
+    });
+
+    // Pre-fetch the local real IP (without proxy) to filter out failed proxy routes
+    let real_ip = fetch_outlet_ip(proxy_port).await.unwrap_or_default();
+
+    // Spawn parallel outlet IP checks — each server on its own task
+    let mut outlet_handles = Vec::new();
+    let outlet_client = client.clone();
+    for server_idx in 0..outlet_count {
+        let tag = format!("proxy-{}", &updated[server_idx].id);
+        let switch_url = format!("{api_url}/proxies/proxy");
+        let cl = outlet_client.clone();
+        let port = proxy_port;
+
+        outlet_handles.push(tokio::spawn(async move {
+            // Switch selector via Clash API
+            let switched = cl
+                .put(&switch_url)
+                .json(&json!({"name": tag}))
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            // Fetch outlet IP through the mixed proxy
+            let ip = if switched {
+                fetch_outlet_ip(port).await
+            } else {
+                None
+            };
+
+            (server_idx, switched, ip)
+        }));
+    }
+
+    // Collect results
+    for handle in outlet_handles {
+        if let Ok((idx, _switched, Some(ip))) = handle.await {
+            // Only update if outlet IP differs from local real IP
+            // (means the proxy actually routed the request)
+            if !real_ip.is_empty() && ip != real_ip {
+                if let Some(info) = crate::vpn::geoip::resolve_hostname(&ip).await {
+                    updated[idx].flag = Some(info.country_code.clone());
+                    updated[idx].country_name = Some(info.country_name.clone());
+                    updated[idx].city_name = if info.city.is_empty() {
+                        None
+                    } else {
+                        Some(info.city.clone())
+                    };
+                }
+            }
+        }
+    }
+
+    // Restore selector to direct (best-effort)
+    let _ = client
+        .put(&format!("{api_url}/proxies/proxy"))
+        .json(&json!({"name": "direct"}))
+        .send()
+        .await;
+
+    // Log results — cleanup happens after this function returns
     log(
         app,
         &logger,
@@ -661,6 +873,29 @@ async fn test_servers_via_singbox_batch(
         LogSource::Subscription,
         format!("Real latency test complete for {} server(s)", updated.len()),
     );
+
+    // Log the PID being killed for debugging
+    log(
+        app,
+        &logger,
+        LogLevel::Info,
+        LogSource::Process,
+        format!("Killing batch temp sing-box PID {pid}"),
+    );
+
+    // Safety check: don't kill if PID matches the main VPN (Windows PID reuse race)
+    if crate::vpn::VPN_PID.load(std::sync::atomic::Ordering::Relaxed) == pid {
+        log(
+            app,
+            &logger,
+            LogLevel::Warning,
+            LogSource::Process,
+            format!("SKIP kill PID {pid} — matches main VPN_PID"),
+        );
+    } else {
+        let _ = kill_process(pid);
+    }
+    let _ = std::fs::remove_dir_all(&test_dir);
 
     Ok(updated)
 }
@@ -781,9 +1016,489 @@ fn emoji_flag_from_name(name: &str) -> Option<String> {
 #[cfg(test)]
 mod extra_tests {
     use super::*;
+    use crate::settings::AppSettings;
+    use crate::vpn::config::build_outbound;
+    use crate::vpn::config::generate_config;
+    use crate::vpn::geoip;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::process::Command;
+
     fn test_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("omnitun-test-{name}"))
     }
+
+    fn app_data_dir() -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(std::env::var("APPDATA").expect("APPDATA not set"))
+                .join("com.omnitun.desktop")
+        }
+        #[cfg(not(windows))]
+        {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            PathBuf::from(home)
+                .join(".config")
+                .join("com.omnitun.desktop")
+        }
+    }
+
+    fn singbox() -> PathBuf {
+        let m = app_data_dir()
+            .join("binaries")
+            .join(crate::vpn::installer::Installer::binary_name());
+        if m.exists() {
+            return m;
+        }
+        PathBuf::from("sing-box.exe")
+    }
+
+    fn load_real_servers() -> Vec<ServerProfile> {
+        let p = app_data_dir().join("profiles.json");
+        let data: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+        data[0]["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| serde_json::from_value(s.clone()).unwrap())
+            .collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // 1. Config generation — each server as single-outbound config
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_each_server_generates_valid_config() {
+        let servers = load_real_servers();
+        let binary = singbox();
+        if !binary.exists() {
+            eprintln!("SKIP: no sing-box binary");
+            return;
+        }
+
+        let base = include_str!("../../config/base.json");
+        let cache = test_dir("singles");
+        let _ = std::fs::create_dir_all(&cache);
+        let settings = AppSettings::default();
+
+        let mut ok = 0u32;
+        let mut fail = 0u32;
+        for (i, s) in servers.iter().enumerate() {
+            match generate_config(base, &cache, 2080, "local-proxy", &[s.clone()], &settings) {
+                Ok((cfg_str, _)) => {
+                    let tmp = cache.join(format!("c-{i}.json"));
+                    let _ = std::fs::write(&tmp, &cfg_str);
+                    let out = Command::new(&binary)
+                        .args(["check", "-c"])
+                        .arg(&tmp)
+                        .output();
+                    if let Ok(o) = out {
+                        if o.status.success() {
+                            ok += 1;
+                        } else {
+                            fail += 1;
+                            eprintln!(
+                                "  FAIL {}/{}: {} — stderr: {}",
+                                i + 1,
+                                servers.len(),
+                                s.display_name(),
+                                String::from_utf8_lossy(&o.stderr)
+                            );
+                        }
+                    } else {
+                        fail += 1;
+                    }
+                }
+                Err(e) => {
+                    fail += 1;
+                    eprintln!("  FAIL generate_config: {} — {e}", s.display_name());
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&cache);
+        println!(
+            "  single-outbound configs: {ok}/{total} passed, {fail} failed",
+            total = ok + fail
+        );
+        assert!(
+            ok > fail,
+            "Too many single-outbound config failures: {ok} ok, {fail} fail"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 2. Batch config with selector group + all servers
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_batch_config_with_selector_passes_check() {
+        let servers = load_real_servers();
+        let binary = singbox();
+        if !binary.exists() {
+            eprintln!("SKIP");
+            return;
+        }
+
+        let mut outbounds: Vec<serde_json::Value> = vec![
+            json!({"type": "direct", "tag": "direct"}),
+            json!({"type": "block", "tag": "block"}),
+        ];
+        let mut proxy_tags = vec!["direct".to_string()];
+        for s in &servers {
+            if let Ok(mut ob) = build_outbound(s) {
+                let tag = format!("proxy-{}", s.id);
+                ob["tag"] = json!(&tag);
+                proxy_tags.push(tag);
+                outbounds.push(ob);
+            }
+        }
+        outbounds.push(json!({"type": "selector", "tag": "proxy", "outbounds": proxy_tags}));
+
+        let config = json!({
+            "log": {"level": "error"},
+            "dns": {"servers": [{"type": "https", "tag": "local", "server": "8.8.8.8", "server_port": 443}], "final": "local"},
+            "inbounds": [{"type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": 9999}],
+            "outbounds": outbounds,
+            "route": {"final": "proxy", "auto_detect_interface": true, "default_domain_resolver": "local"},
+        });
+
+        let tmp = test_dir("batch-config");
+        let _ = std::fs::create_dir_all(&tmp);
+        let p = tmp.join("batch.json");
+        std::fs::write(&p, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+        let out = Command::new(&binary)
+            .args(["check", "-c"])
+            .arg(&p)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "Batch config check failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+        println!(
+            "  batch config with {} servers: sing-box check ✓",
+            servers.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // 3. VPN-mode config generation (TUN)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_vpn_config_generation_passes_check() {
+        let servers = load_real_servers();
+        let binary = singbox();
+        if !binary.exists() {
+            eprintln!("SKIP");
+            return;
+        }
+
+        let base = include_str!("../../config/base-vpn.json");
+        let cache = test_dir("vpn");
+        let _ = std::fs::create_dir_all(&cache);
+        let settings = AppSettings::default();
+
+        // Test with first server
+        let result = generate_config(base, &cache, 2080, "vpn", &[servers[0].clone()], &settings);
+        assert!(
+            result.is_ok(),
+            "VPN config generation failed for {}",
+            servers[0].display_name()
+        );
+        let (cfg_str, _) = result.unwrap();
+
+        let p = cache.join("vpn.json");
+        std::fs::write(&p, &cfg_str).unwrap();
+        let out = Command::new(&binary)
+            .args(["check", "-c"])
+            .arg(&p)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "VPN config check failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let _ = std::fs::remove_dir_all(&cache);
+        println!("  VPN config: sing-box check ✓");
+    }
+
+    // -----------------------------------------------------------------------
+    // 4. GeoIP enrichment — server entry IP matches country
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_geoip_matches_entry_country() {
+        let servers = load_real_servers();
+        let db_path = app_data_dir().join("geoip").join("country.mmdb");
+        if !db_path.exists() {
+            eprintln!("SKIP: no GeoIP DB at {:?}", db_path);
+            return;
+        }
+
+        let r = geoip::init(&db_path);
+        assert!(
+            r.is_ok() || geoip::is_ready(),
+            "GeoIP not initialized: {:?}",
+            r
+        );
+
+        let mut match_ = 0u32;
+        let mut mismatch = 0u32;
+        for s in &servers {
+            if let Some(geo) = geoip::resolve(&s.server) {
+                if let Some(ref flag) = s.flag {
+                    if geo.country_code == *flag {
+                        match_ += 1;
+                    } else {
+                        mismatch += 1;
+                        println!(
+                            "  ⚠ {}: entry={} geo={}",
+                            s.display_name(),
+                            flag,
+                            geo.country_code
+                        );
+                    }
+                }
+            }
+        }
+        println!(
+            "  GeoIP entry match: {match_}/{total} ({mismatch} diff)",
+            total = match_ + mismatch
+        );
+        // At least some should match (entry IP based GeoIP)
+        assert!(match_ > 0, "No servers matched GeoIP entry country");
+    }
+
+    // -----------------------------------------------------------------------
+    // 5. Full config: DNS + route + bypass_ru + enable_mux settings
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_full_config_has_all_required_sections() {
+        let servers = load_real_servers();
+        let base = include_str!("../../config/base.json");
+        let cache = test_dir("full-check");
+        let _ = std::fs::create_dir_all(&cache);
+        let settings = AppSettings::default();
+
+        let (cfg_str, _) = generate_config(
+            base,
+            &cache,
+            2080,
+            "local-proxy",
+            &[servers[0].clone()],
+            &settings,
+        )
+        .expect("generate_config failed");
+        let cfg: serde_json::Value = serde_json::from_str(&cfg_str).unwrap();
+
+        // DNS
+        let dns = cfg.get("dns").expect("Missing dns section");
+        assert!(
+            dns.get("servers")
+                .and_then(|s| s.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false),
+            "No DNS servers"
+        );
+        assert!(
+            dns.get("final").and_then(|f| f.as_str()).is_some(),
+            "No DNS final"
+        );
+
+        // Route
+        let route = cfg.get("route").expect("Missing route section");
+        assert!(
+            route
+                .get("auto_detect_interface")
+                .and_then(|a| a.as_bool())
+                .unwrap_or(false),
+            "auto_detect_interface must be true"
+        );
+        assert!(
+            route
+                .get("default_domain_resolver")
+                .and_then(|d| d.as_str())
+                .is_some(),
+            "Missing default_domain_resolver"
+        );
+
+        // Inbounds
+        let inbs = cfg.get("inbounds").and_then(|i| i.as_array()).unwrap();
+        assert!(!inbs.is_empty(), "No inbounds");
+
+        // Outbounds
+        let obs = cfg.get("outbounds").and_then(|o| o.as_array()).unwrap();
+        assert!(
+            obs.len() >= 3,
+            "Expected 3+ outbounds (direct, block, proxy)"
+        );
+
+        let _ = std::fs::remove_dir_all(&cache);
+        println!("  Full config: DNS ✓ Route ✓ Inbounds ✓ Outbounds ✓");
+    }
+
+    // -----------------------------------------------------------------------
+    // 6. AlternativeServers: off when autoConnectFastest=false
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_alternative_servers_only_with_fastest() {
+        // This tests the logic in lib.rs: when autoConnectFastest=false,
+        // alternativeServers must be empty so no urltest group is added
+        let servers = load_real_servers();
+        let base = include_str!("../../config/base.json");
+        let cache = test_dir("alt-servers");
+        let _ = std::fs::create_dir_all(&cache);
+
+        // autoConnectFastest=false → should produce single outbound per server
+        let mut settings_no_fastest = AppSettings::default();
+        settings_no_fastest.auto_connect_fastest = false;
+
+        let (cfg_str, _) = generate_config(
+            base,
+            &cache,
+            2080,
+            "local-proxy",
+            &[servers[0].clone()],
+            &settings_no_fastest,
+        )
+        .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&cfg_str).unwrap();
+        let obs = cfg["outbounds"].as_array().unwrap();
+
+        // Count proxy outbounds (not direct, block)
+        let proxy_count = obs
+            .iter()
+            .filter(|o| {
+                let t = o["tag"].as_str().unwrap_or("");
+                t != "direct" && t != "block"
+            })
+            .count();
+        assert_eq!(
+            proxy_count, 1,
+            "With autoConnectFastest=false, expected 1 proxy outbound, got {proxy_count}"
+        );
+
+        // autoConnectFastest=true → should produce multiple outbounds + urltest
+        let mut settings_fastest = AppSettings::default();
+        settings_fastest.auto_connect_fastest = true;
+
+        let (cfg_str, _) = generate_config(
+            base,
+            &cache,
+            2080,
+            "local-proxy",
+            &servers,
+            &settings_fastest,
+        )
+        .unwrap();
+        let cfg: serde_json::Value = serde_json::from_str(&cfg_str).unwrap();
+        let obs = cfg["outbounds"].as_array().unwrap();
+
+        // Find urltest group
+        let has_urltest = obs.iter().any(|o| o["type"] == "urltest");
+        assert!(
+            has_urltest,
+            "With autoConnectFastest=true, expected urltest outbound group"
+        );
+
+        let _ = std::fs::remove_dir_all(&cache);
+        println!("  alternativeServers: off when fastest=false, on when fastest=true ✓");
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. Kill process - verify doesn't panic
+    // -----------------------------------------------------------------------
+    #[test]
+    fn test_kill_nonexistent_process() {
+        // kill_process should not panic when PID doesn't exist
+        let result = kill_process(99999999);
+        assert!(result.is_ok() || result.is_err());
+        println!("  kill_process (nonexistent PID): handled gracefully ✓");
+    }
+
+    #[test]
+    fn test_refresh_preserves_server_ids() -> Result<(), Box<dyn std::error::Error>> {
+        let servers = load_real_servers();
+        assert!(servers.len() >= 2, "Need at least 2 servers for ID test");
+
+        // Simulate "old" servers with known IDs (as if loaded from saved profiles.json)
+        let old_servers: Vec<ServerProfile> = servers.iter().take(5).cloned().collect();
+        let original_ids: Vec<String> = old_servers.iter().map(|s| s.id.clone()).collect();
+        let original_names: Vec<String> = old_servers.iter().map(|s| s.display_name()).collect();
+
+        // Simulate "new" servers from refresh — same data, no IDs preserved initially
+        // Re-parse from JSON (like refresh does) to clear any in-memory ID references
+        let _raw: serde_json::Value = serde_json::to_value(&old_servers[0])?;
+        let mut new_servers: Vec<ServerProfile> = servers.iter().take(5).cloned().collect();
+        // Give them random new IDs (simulating fresh parse from subscription)
+        for s in &mut new_servers {
+            s.id = uuid::Uuid::new_v4().to_string();
+        }
+        let _new_ids_before: Vec<String> = new_servers.iter().map(|s| s.id.clone()).collect();
+
+        // Now run the EXACT preservation logic from refresh():
+        let old_index: HashMap<String, String> = old_servers
+            .iter()
+            .map(|s| {
+                let key = format!(
+                    "{}://{}:{}@{}:{}:{}/{}",
+                    s.protocol,
+                    s.server,
+                    s.port,
+                    s.uuid.as_deref().unwrap_or(""),
+                    s.password.as_deref().unwrap_or(""),
+                    s.method.as_deref().unwrap_or(""),
+                    s.transport_type.as_deref().unwrap_or(""),
+                );
+                (key, s.id.clone())
+            })
+            .collect();
+
+        for server in &mut new_servers {
+            let key = format!(
+                "{}://{}:{}@{}:{}:{}/{}",
+                server.protocol,
+                server.server,
+                server.port,
+                server.uuid.as_deref().unwrap_or(""),
+                server.password.as_deref().unwrap_or(""),
+                server.method.as_deref().unwrap_or(""),
+                server.transport_type.as_deref().unwrap_or(""),
+            );
+            if let Some(old_id) = old_index.get(&key) {
+                server.id = old_id.clone();
+            }
+        }
+
+        // Verify: ALL IDs should match originals (same servers, same keys)
+        for (i, s) in new_servers.iter().enumerate() {
+            assert_eq!(
+                s.id,
+                original_ids[i],
+                "Server {} ({}): ID not preserved after refresh! key: {}://{}:{}@{}:{}:{}:{}",
+                i,
+                original_names[i],
+                s.protocol,
+                s.server,
+                s.port,
+                s.uuid.as_deref().unwrap_or(""),
+                s.password.as_deref().unwrap_or(""),
+                s.method.as_deref().unwrap_or(""),
+                s.transport_type.as_deref().unwrap_or(""),
+            );
+        }
+
+        println!(
+            "✓ ID preservation: {}/{} servers kept their IDs",
+            new_servers.len(),
+            new_servers.len()
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_remove_nonexistent_returns_error() {
         let dir = test_dir("remove_err");

@@ -3,22 +3,24 @@ pub mod geoip;
 pub mod installer;
 mod process;
 
-use crate::logging::{log, LogLevel, Logger, LogSource};
+use crate::logging::{log, LogLevel, LogSource, Logger};
 use crate::settings::AppSettings;
 use installer::Installer;
 use process::ProcessManager;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 /// Current Clash API port (0 = not running). Set by config.rs on each start.
 pub(crate) static CLASH_API_PORT: AtomicU16 = AtomicU16::new(0);
+pub(crate) static VPN_PID: AtomicU32 = AtomicU32::new(0);
 
 /// Last connected profile — stored for auto-reconnect on watchdog exit.
-pub(crate) static LAST_PROFILE: std::sync::Mutex<Option<LastConnection>> = std::sync::Mutex::new(None);
+pub(crate) static LAST_PROFILE: std::sync::Mutex<Option<LastConnection>> =
+    std::sync::Mutex::new(None);
 
 /// Data needed to re-establish a connection after unexpected exit.
 #[derive(Clone)]
@@ -49,8 +51,7 @@ impl From<VpnError> for String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServerProfile {
     pub id: String,
     pub protocol: String,
@@ -108,7 +109,6 @@ impl ServerProfile {
         }
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -175,7 +175,10 @@ impl VpnManager {
             &logger,
             LogLevel::Info,
             LogSource::Vpn,
-            format!("Starting in {routing_mode} mode with {} server(s)...", profiles.len()),
+            format!(
+                "Starting in {routing_mode} mode with {} server(s)...",
+                profiles.len()
+            ),
         );
         self.ensure_installed(app_handle).await?;
 
@@ -191,8 +194,14 @@ impl VpnManager {
         } else {
             include_str!("../../config/base.json")
         };
-        let (config_json, _stats_port) =
-            config::generate_config(base_template, &self.config_dir, proxy_port, routing_mode, profiles, settings)?;
+        let (config_json, _stats_port) = config::generate_config(
+            base_template,
+            &self.config_dir,
+            proxy_port,
+            routing_mode,
+            profiles,
+            settings,
+        )?;
         let config_path = config::write_config(&config_json, &self.config_dir)?;
         log(
             app_handle,
@@ -255,7 +264,7 @@ impl VpnManager {
         // Reset Clash API port so fetcher goes direct
         crate::vpn::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Relaxed);
 
-        // Disable system proxy
+        // Disable system proxy — best effort, don't block on it
         if let Ok(mut sysproxy) = sysproxy::Sysproxy::get_system_proxy() {
             if sysproxy.enable {
                 sysproxy.enable = false;
@@ -275,14 +284,22 @@ impl VpnManager {
     }
 
     pub fn process_pid(&self) -> Option<u32> {
-        *self.process_mgr.pid()
+        self.process_mgr.pid()
+    }
+
+    /// Atomically get + clear the tracked PID. Used by stop_vpn under the outer lock.
+    pub fn clear_pid(&self) -> Option<u32> {
+        self.process_mgr.clear_pid()
     }
 
     pub fn status(&self) -> VpnStatus {
-        if self.process_mgr.is_running() {
-            VpnStatus::Connected
-        } else {
-            VpnStatus::Disconnected
+        if let Some(pid) = self.process_mgr.pid() {
+            if crate::is_process_alive(pid) {
+                return VpnStatus::Connected;
+            }
+            // Process died but PID wasn't cleared yet — clean up
+            self.process_mgr.clear_pid();
         }
+        VpnStatus::Disconnected
     }
 }
