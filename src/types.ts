@@ -59,6 +59,7 @@ export interface Server {
   //    Without this, sing-box receives `password` without `username` and
   //    the proxy connection fails to authenticate. ──────────────────────
   username?: string;
+  behindCdn?: boolean;
 }
 
 export interface Profile {

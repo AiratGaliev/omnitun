@@ -404,6 +404,11 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         );
     }
 
+    // 1b. Detect CDN-routed servers (unstable outlet IP)
+    for s in &mut unique {
+        s.behind_cdn = crate::vpn::is_cdn_server(s);
+    }
+
     // 2. Apply user filters (country, protocol) from settings
     if let Some(settings) = app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>() {
         let settings_guard = settings.lock().await;

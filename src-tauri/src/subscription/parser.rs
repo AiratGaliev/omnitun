@@ -117,6 +117,7 @@ fn parse_vless(data: &str) -> Option<ServerProfile> {
         wg_mtu: None,
         wg_keepalive: None,
         username: None,
+        behind_cdn: false,
     })
 }
 
@@ -176,6 +177,7 @@ fn parse_vmess(data: &str) -> Option<ServerProfile> {
         wg_mtu: None,
         wg_keepalive: None,
         username: None,
+        behind_cdn: false,
     })
 }
 
@@ -227,6 +229,7 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
                                 wg_mtu: None,
                                 wg_keepalive: None,
                                 username: None,
+                                behind_cdn: false,
                             });
                         }
                     }
@@ -275,6 +278,7 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
         wg_mtu: None,
         wg_keepalive: None,
         username: None,
+        behind_cdn: false,
     })
 }
 
@@ -319,6 +323,7 @@ fn parse_trojan(data: &str) -> Option<ServerProfile> {
         wg_mtu: None,
         wg_keepalive: None,
         username: None,
+        behind_cdn: false,
     })
 }
 
@@ -363,6 +368,7 @@ fn parse_hysteria2(data: &str) -> Option<ServerProfile> {
         wg_mtu: None,
         wg_keepalive: None,
         username: None,
+        behind_cdn: false,
     })
 }
 
@@ -413,6 +419,7 @@ fn parse_tuic(data: &str) -> Option<ServerProfile> {
         wg_mtu: None,
         wg_keepalive: None,
         username: None,
+        behind_cdn: false,
     })
 }
 
@@ -466,6 +473,7 @@ fn parse_wireguard(data: &str) -> Option<ServerProfile> {
             .or_else(|| params.get("persistent_keepalive"))
             .and_then(|k| k.parse().ok()),
         username: None,
+        behind_cdn: false,
     })
 }
 
@@ -597,6 +605,7 @@ fn parse_http(uri: &str) -> Option<ServerProfile> {
         // FIX: store the username so HTTP-proxy servers with auth actually
         // authenticate instead of failing silently.
         username: username_opt,
+        behind_cdn: false,
     })
 }
 

@@ -93,6 +93,29 @@ pub struct ServerProfile {
     /// Original subscription-provided name (for display fallback). Not serialized.
     #[serde(skip)]
     pub original_name: String,
+    /// Whether this server routes through a CDN (detected from transport_host domain).
+    /// CDN-routed servers have unstable outlet IPs (different per request).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub behind_cdn: bool,
+}
+
+/// Serde helper: skip serializing `behind_cdn` when false.
+fn is_false(v: &bool) -> bool {
+    !v
+}
+
+/// Check if the server likely routes through a CDN (unstable outlet IP).
+pub fn is_cdn_server(s: &ServerProfile) -> bool {
+    if let Some(ref host) = s.transport_host {
+        let lower = host.to_lowercase();
+        lower.contains("fastly")
+            || lower.contains("cloudflare")
+            || lower.contains("cloudfront")
+            || lower.contains("akamai")
+            || lower.contains("cdn.")
+    } else {
+        false
+    }
 }
 
 impl ServerProfile {

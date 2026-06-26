@@ -86,6 +86,7 @@ interface RustServerProfile {
   // NOTE: `original_name` has `#[serde(skip)]` on the Rust side, so it is
   // NOT present in the JSON. The display name is derived from
   // country_name / city_name in `mapRustProfile`.
+  behind_cdn?: boolean;
 }
 
 export interface RustSubscriptionProfile {
@@ -203,6 +204,7 @@ export function mapRustProfile(rust: RustSubscriptionProfile): Profile {
         wgMtu: s.wg_mtu ?? undefined,
         wgKeepalive: s.wg_keepalive ?? undefined,
         username: s.username ?? undefined,
+        behindCdn: s.behind_cdn ?? undefined,
       };
     }),
   };

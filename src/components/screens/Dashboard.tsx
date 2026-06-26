@@ -351,6 +351,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                   <div className="flex flex-col items-start">
                                     <span className="text-sm font-medium leading-tight">
                                       {server.countryName ?? server.name}
+                                      {server.behindCdn && (
+                                        <span className="ml-1.5 text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono">CDN</span>
+                                      )}
                                     </span>
                                     {serverCity(server) ? (
                                       <span className="text-[11px] text-zinc-500 leading-tight">
