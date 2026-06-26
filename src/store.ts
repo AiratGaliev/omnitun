@@ -293,10 +293,24 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     set({ status });
   },
   setActiveServer: (server) => {
+    const prev = get().activeServer;
     set({ activeServer: server });
+    if (server.id !== prev?.id) {
+      get().addLog(
+        `[store] activeServer: ${prev?.name ?? 'null'} → ${server.name} (${server.id.slice(0, 8)})`,
+        'info', 'system',
+      );
+    }
   },
   setServers: (servers) => {
+    const prev = get().servers;
     set({ servers });
+    if (prev.length !== servers.length) {
+      get().addLog(
+        `[store] servers: ${String(prev.length)} → ${String(servers.length)}`,
+        'info', 'system',
+      );
+    }
   },
   setConnectedAt: (timestamp) => {
     set({ connectedAt: timestamp });
@@ -364,8 +378,9 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         const newProfiles = state.profiles.map((p) => (p.id === id ? { ...p, ...updated } : p));
         const allServers = newProfiles.flatMap((p) => p.servers);
         const activeServerStillExists = allServers.some((s) => s.id === state.activeServer?.id);
-        // Auto-select fastest when setting is enabled or current server is gone
-        const autoSelect = state.settings.autoConnectFastest || !activeServerStillExists;
+        // Auto-select fastest only when enabled. When disabled, never swap
+        // even if the current server ID is gone — user picks manually.
+        const autoSelect = state.settings.autoConnectFastest;
         const oldActiveName = state.activeServer?.name ?? state.activeServer?.server ?? 'none';
         const newActiveServer = autoSelect
           ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
@@ -410,15 +425,26 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       const profiles = results.map(mapRustProfile);
       const allServers = profiles.flatMap((p) => p.servers);
       const state = get();
+      const oldActive = state.activeServer;
       const activeServerStillExists = allServers.some((s) => s.id === state.activeServer?.id);
-      const autoSelect = !state.activeServer || !activeServerStillExists;
+      // On first load (no active server): always pick fastest.
+      // On subsequent loads: only auto-select when smart selection is enabled.
+      const autoSelect = !state.activeServer
+        || (state.settings.autoConnectFastest && !activeServerStillExists);
+      const newActive = autoSelect
+        ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
+        : state.activeServer;
       set({
         profiles,
         servers: allServers,
-        activeServer: autoSelect
-          ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
-          : state.activeServer,
+        activeServer: newActive,
       });
+      if (newActive?.id !== oldActive?.id) {
+        get().addLog(
+          `[loadProfiles] activeServer changed: ${oldActive?.name ?? 'null'} → ${newActive?.name ?? 'null'} (autoSelect=${String(autoSelect)})`,
+          'info', 'system',
+        );
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Unknown error';
       get().addLog(`Failed to load profiles: ${msg}`, 'warning', 'subscription');
@@ -530,6 +556,13 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
 
   toggleConnection: async () => {
     const { status, activeServer, addLog, settings } = get();
+    // Log the server we're connecting to
+    const connectServerName = activeServer?.name ?? 'null';
+    const connectServerId = activeServer?.id.slice(0, 8) ?? 'null';
+    addLog(
+      `[toggle] connect requested — server: ${connectServerName} (${connectServerId}) proto=${activeServer?.protocol ?? '?'} addr=${activeServer?.server ?? '?'}:${String(activeServer?.port ?? '?')}`,
+      'info', 'system',
+    );
     try {
       if (status === 'disconnected' || status === 'error') {
         addLog(`Connecting to ${activeServer?.name ?? 'Default'}...`, 'info', 'system');
@@ -632,6 +665,13 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
           status: newStatus,
           connectedAt: newStatus === 'connected' ? Date.now() : null,
         });
+        if (newStatus === 'connected') {
+          const srv = get().activeServer;
+          get().addLog(
+            `[status] Connected — activeServer: ${srv?.name ?? 'null'} (${srv?.id.slice(0, 8) ?? 'null'}) addr=${srv?.server ?? '?'}:${String(srv?.port ?? '?')}`,
+            'info', 'system',
+          );
+        }
       }
     });
 

@@ -18,6 +18,7 @@ use chrono::Local;
 use std::os::windows::process::CommandExt;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -1010,14 +1011,17 @@ async fn get_real_ip(app: tauri::AppHandle) -> Result<String, String> {
 /// Find the active proxy's outlet (external) IP address via IP echo services
 /// Uses the active proxy port when connected in proxy mode so the request
 /// actually goes through the VPN / proxy tunnel.
+/// Track previous outlet IP so we log changes from Rust directly.
+static PREV_OUTLET_IP: StdMutex<Option<String>> = StdMutex::new(None);
+
 #[tauri::command]
 async fn outlet_ip(app: tauri::AppHandle) -> Result<String, String> {
-    let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    let stats_port = crate::vpn::CLASH_API_PORT.load(Ordering::Relaxed);
     if stats_port == 0 {
         return Err("VPN not connected".into());
     }
 
-    // Route through proxy only in proxy modes (VPN mode routes all through TUN automatically)
+    // Route through proxy only in proxy modes
     let mut use_proxy = false;
     let mut proxy_port = 0u16;
     if let Some(state) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
@@ -1039,8 +1043,6 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<String, String> {
 
     let client = client_builder.build().map_err(|e| e.to_string())?;
 
-    // Try multiple IP check services. ifconfig.me first (most permissive with rate limits).
-    // 500ms delay between attempts to avoid hitting rate limits on any single service.
     let mut ip = String::new();
     for (idx, url) in IP_URLS.iter().enumerate() {
         if idx > 0 {
@@ -1065,7 +1067,25 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<String, String> {
         return Err("Could not determine external IP".into());
     }
 
-    // GeoIP location from local GeoLite2 database (no network call, no rate limit)
+    // Log outlet IP change from Rust side (directly to logs-*.jsonl)
+    {
+        let mut prev = PREV_OUTLET_IP.lock().unwrap();
+        if prev.as_deref() != Some(&ip) {
+            let logger = app.state::<StdMutex<Logger>>();
+            log(
+                &app,
+                &logger,
+                LogLevel::Info,
+                LogSource::System,
+                format!(
+                    "[rust] outletIp: {} → {ip}",
+                    prev.as_deref().unwrap_or("null")
+                ),
+            );
+            *prev = Some(ip.clone());
+        }
+    }
+
     let location = crate::vpn::geoip::resolve(&ip)
         .map(|geo| {
             if !geo.city.is_empty() {

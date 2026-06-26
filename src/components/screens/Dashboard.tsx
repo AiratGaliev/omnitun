@@ -446,7 +446,13 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     {outletIp && (
                       <p className="text-xs text-zinc-400 font-mono mt-2 flex items-center gap-1.5">
                         <Globe size={12} className="text-emerald-500" />
-                        {outletIp}
+                        <span>{outletIp.split(' ')[0]}</span>
+                        {activeServer?.flag && (
+                          <span className={`flag:${activeServer.flag.toUpperCase()} text-[11px]`} />
+                        )}
+                        {activeServer?.countryName && (
+                          <span className="text-zinc-500">{activeServer.countryName}</span>
+                        )}
                       </p>
                     )}
                   </motion.div>

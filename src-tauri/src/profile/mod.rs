@@ -531,8 +531,10 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         format!("{} server(s) passed and saved", alive.len()),
     );
 
-    // 4. Real latency test via Clash API — start a temporary sing-box with all servers as outbounds
-    if !alive.is_empty() {
+    // 4. Real latency test via Clash API — start a temporary sing-box with all servers as outbounds.
+    //    Skip if main VPN is running (separate sing-box instances crash the main process on Windows).
+    let main_vpn_running = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
+    if !alive.is_empty() && !main_vpn_running {
         // Используем параллельную проверку если серверов больше 20
         let updated = if alive.len() > 20 {
             test_servers_via_singbox_parallel(app, &alive).await
