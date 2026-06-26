@@ -611,6 +611,14 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
                 );
             }
             return updated;
+        } else {
+            log(
+                app,
+                &logger,
+                LogLevel::Warning,
+                LogSource::Subscription,
+                "Real latency test via sing-box failed — falling back to TCP ping results".into(),
+            );
         }
     }
 
@@ -628,18 +636,25 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
 /// tests each via GET /proxies/{tag}/delay, returns servers with real latency.
 ///
 /// Fetch outlet IP through a given proxy port. Uses multiple IP echo services
-/// as fallbacks to avoid rate-limiting issues during batch testing (50+ servers).
+/// concurrently via `tokio::select!` — takes the first successful response
+/// within the total timeout, avoiding sequential 4s×N waits.
 ///
 /// IMPORTANT: uses `Proxy::all` (not `Proxy::http`) so HTTPS URLs like
 /// `https://ifconfig.me/ip` are properly wrapped in HTTP CONNECT tunnels
 /// through the sing-box mixed inbound.
 async fn fetch_outlet_ip(proxy_port: u16) -> Option<String> {
-    let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}")).ok()?;
-    let client = reqwest::Client::builder()
+    let proxy = match reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}")) {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+    let client = match reqwest::Client::builder()
         .proxy(proxy)
-        .timeout(std::time::Duration::from_secs(4))
+        .timeout(std::time::Duration::from_secs(6))
         .build()
-        .ok()?;
+    {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
 
     let ip_urls = [
         "https://ifconfig.me/ip",
@@ -647,6 +662,9 @@ async fn fetch_outlet_ip(proxy_port: u16) -> Option<String> {
         "https://icanhazip.com",
     ];
 
+    // Sequential with per-URL timeout — concurrent requests through the
+    // same proxy port create CONNECT tunnel contention in sing-box,
+    // causing spurious failures. Sequential is slower but more reliable.
     for url in ip_urls {
         if let Ok(resp) = client.get(url).send().await {
             if resp.status().is_success() {
@@ -877,10 +895,11 @@ async fn test_servers_via_singbox_parallel(
                     .cmp(&b.ping_ms.unwrap_or(u64::MAX))
             });
 
-            // Последовательная проверка outlet IP внутри батча
+            // Последовательная проверка outlet IP — проверяем все серверы, кроме
+            // уже помеченных keyword как CDN (им outlet IP не нужен для детекции).
             let real_ip = fetch_outlet_ip(proxy_port).await.unwrap_or_default();
 
-            for srv in &mut updated {
+            for srv in updated.iter_mut().filter(|s| !s.behind_cdn) {
                 let tag = format!("proxy-{}", &srv.id);
 
                 let switched = client
@@ -892,14 +911,6 @@ async fn test_servers_via_singbox_parallel(
                     .unwrap_or(false);
 
                 if !switched {
-                    let logger = app_clone.state::<Mutex<Logger>>();
-                    log(
-                        &app_clone,
-                        &logger,
-                        LogLevel::Warning,
-                        LogSource::Subscription,
-                        format!("[cdn] switch failed for {}", tag),
-                    );
                     continue;
                 }
 
@@ -1170,15 +1181,14 @@ async fn test_servers_via_singbox_batch(
     // --- Outlet IP checking via Clash API selector switch (sequential) ---
     // IMPORTANT: must be sequential — parallel tasks race on the same global
     // singleton selector and produce garbage results.
-    let outlet_count = updated.len().min(10);
     log(
         app,
         &logger,
         LogLevel::Info,
         LogSource::Subscription,
         format!(
-            "Checking outlet IP for {} fastest server(s)...",
-            outlet_count
+            "Checking outlet IP for {} server(s)...",
+            updated.iter().filter(|s| !s.behind_cdn).count(),
         ),
     );
 
@@ -1192,8 +1202,11 @@ async fn test_servers_via_singbox_batch(
     // Pre-fetch the local real IP (without proxy) to filter out failed proxy routes
     let real_ip = fetch_outlet_ip(proxy_port).await.unwrap_or_default();
 
-    // Sequential outlet IP check (no race condition on the selector)
-    for server_idx in 0..outlet_count {
+    // Sequential outlet IP check — skip servers already flagged as CDN by keyword
+    for server_idx in 0..updated.len() {
+        if updated[server_idx].behind_cdn {
+            continue;
+        }
         let srv = &mut updated[server_idx];
         let tag = format!("proxy-{}", &srv.id);
         let switch_url = format!("{api_url}/proxies/proxy");

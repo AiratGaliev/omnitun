@@ -140,6 +140,8 @@ interface VPNStore {
   runSpeedTest: () => Promise<SpeedTestResult | null>;
   connections: ConnectionInfo[];
   refreshConnections: () => Promise<void>;
+  _healthCheckTimer: ReturnType<typeof setInterval> | null;
+  _isReconnecting: boolean;
 }
 
 const defaultServers: Server[] = [];
@@ -253,6 +255,55 @@ function toRustServerProfile(s: Server | null, fallbackName: string): Record<str
   };
 }
 
+/// Pick the best replacement server when the current one dies.
+/// Priority: same country → fastest any country (respecting user filters).
+function pickReplacementServer(
+  servers: Server[],
+  currentServer: Server | null,
+  settings: Settings,
+): Server | null {
+  const currentCountry = currentServer?.flag;
+
+  let candidates = [...servers];
+
+  // Apply user filters
+  if (settings.allowedCountries.length > 0) {
+    candidates = candidates.filter((s) => s.flag && settings.allowedCountries.includes(s.flag));
+  }
+  if (settings.blockedCountries.length > 0) {
+    candidates = candidates.filter((s) => !s.flag || !settings.blockedCountries.includes(s.flag));
+  }
+  if (settings.allowedProtocols.length > 0) {
+    candidates = candidates.filter(
+      (s) => s.protocol && settings.allowedProtocols.includes(s.protocol),
+    );
+  }
+  if (settings.blockedProtocols.length > 0) {
+    candidates = candidates.filter(
+      (s) => !s.protocol || !settings.blockedProtocols.includes(s.protocol),
+    );
+  }
+  if (settings.blockCdnNodes) {
+    candidates = candidates.filter((s) => !s.behindCdn);
+  }
+
+  // Exclude the dead server itself
+  candidates = candidates.filter((s) => s.id !== currentServer?.id);
+
+  // Prefer same country, fastest ping
+  if (currentCountry) {
+    const sameCountry = candidates
+      .filter((s) => s.flag === currentCountry)
+      .sort((a, b) => (a.ping ?? 9999) - (b.ping ?? 9999));
+    if (sameCountry.length > 0) return sameCountry[0];
+  }
+
+  // Fallback: fastest available
+  return candidates.length > 0
+    ? candidates.sort((a, b) => (a.ping ?? 9999) - (b.ping ?? 9999))[0]
+    : null;
+}
+
 export const useVPNStore = create<VPNStore>((set, get) => ({
   status: 'disconnected',
   activeServer: null,
@@ -268,6 +319,8 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   realIp: null,
   speedTestResult: null,
   connections: [],
+  _healthCheckTimer: null,
+  _isReconnecting: false,
   settings: {
     acceptTerms: false,
     routingMode: 'vpn',
@@ -301,7 +354,8 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     if (server.id !== prev?.id) {
       get().addLog(
         `[store] activeServer: ${prev?.name ?? 'null'} → ${server.name} (${server.id.slice(0, 8)})`,
-        'info', 'system',
+        'info',
+        'system',
       );
     }
   },
@@ -311,7 +365,8 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     if (prev.length !== servers.length) {
       get().addLog(
         `[store] servers: ${String(prev.length)} → ${String(servers.length)}`,
-        'info', 'system',
+        'info',
+        'system',
       );
     }
   },
@@ -432,8 +487,8 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       const activeServerStillExists = allServers.some((s) => s.id === state.activeServer?.id);
       // On first load (no active server): always pick fastest.
       // On subsequent loads: only auto-select when smart selection is enabled.
-      const autoSelect = !state.activeServer
-        || (state.settings.autoConnectFastest && !activeServerStillExists);
+      const autoSelect =
+        !state.activeServer || (state.settings.autoConnectFastest && !activeServerStillExists);
       const newActive = autoSelect
         ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
         : state.activeServer;
@@ -445,7 +500,8 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       if (newActive?.id !== oldActive?.id) {
         get().addLog(
           `[loadProfiles] activeServer changed: ${oldActive?.name ?? 'null'} → ${newActive?.name ?? 'null'} (autoSelect=${String(autoSelect)})`,
-          'info', 'system',
+          'info',
+          'system',
         );
       }
     } catch (e: unknown) {
@@ -558,13 +614,18 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   },
 
   toggleConnection: async () => {
-    const { status, activeServer, addLog, settings } = get();
+    const { status, activeServer, servers, addLog, settings, _isReconnecting } = get();
+    if (_isReconnecting) {
+      addLog('[toggle] reconnect in progress — ignoring toggle', 'warning', 'system');
+      return;
+    }
     // Log the server we're connecting to
     const connectServerName = activeServer?.name ?? 'null';
     const connectServerId = activeServer?.id.slice(0, 8) ?? 'null';
     addLog(
       `[toggle] connect requested — server: ${connectServerName} (${connectServerId}) proto=${activeServer?.protocol ?? '?'} addr=${activeServer?.server ?? '?'}:${String(activeServer?.port ?? '?')}`,
-      'info', 'system',
+      'info',
+      'system',
     );
     try {
       if (status === 'disconnected' || status === 'error') {
@@ -586,7 +647,12 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         // build a `urltest` group and auto-select the fastest outbound.
         // Previously this was always an empty array, which silently
         // disabled the autoConnectFastest feature.
-        const altServers: ReturnType<typeof toRustServerProfile>[] = [];
+        const altServers: ReturnType<typeof toRustServerProfile>[] =
+          settings.autoConnectFastest && activeServer
+            ? servers
+                .filter((s) => s.id !== activeServer.id)
+                .map((s) => toRustServerProfile(s, 'Default'))
+            : [];
 
         await invoke('start_vpn', {
           profile,
@@ -635,6 +701,98 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   },
 
   initListener: async () => {
+    // ── Internal health check helpers ─────────────────────────────────────
+    const startHealthCheck = () => {
+      if (get()._healthCheckTimer) return; // already running
+
+      const timer = setInterval(() => {
+        void (async () => {
+          const state = useVPNStore.getState();
+          if (state.status !== 'connected' || state._isReconnecting || !state.activeServer) {
+            return;
+          }
+
+          let alive = false;
+          try {
+            alive = await invoke<boolean>('check_proxy_health');
+          } catch {
+            // Treat invoke failure as dead (VPN probably stopped)
+          }
+          if (alive) return;
+
+          // Server appears dead — find replacement
+          const replacement = pickReplacementServer(
+            state.servers,
+            state.activeServer,
+            state.settings,
+          );
+
+          if (!replacement) {
+            state.addLog(
+              'Current server died and no replacement available — disconnecting',
+              'error',
+              'system',
+            );
+            set({ _isReconnecting: true });
+            try {
+              await invoke('stop_vpn');
+            } catch {
+              /* OK */
+            }
+            set({ status: 'disconnected', _isReconnecting: false, connectedAt: null });
+            return;
+          }
+
+          state.addLog(
+            `Server ${state.activeServer.name} died → reconnecting to ${replacement.name} (${replacement.flag ?? '?'})`,
+            'warning',
+            'system',
+          );
+
+          set({ _isReconnecting: true });
+          try {
+            await invoke('stop_vpn');
+            set({ activeServer: replacement, status: 'connecting' });
+
+            const profile = toRustServerProfile(replacement, 'Default');
+            const altServers: ReturnType<typeof toRustServerProfile>[] = state.settings
+              .autoConnectFastest
+              ? state.servers
+                  .filter((s) => s.id !== replacement.id)
+                  .map((s) => toRustServerProfile(s, 'Default'))
+              : [];
+            await invoke('start_vpn', {
+              profile,
+              alternativeServers: altServers,
+              routingMode: state.settings.routingMode,
+              proxyPort: state.settings.proxyPort,
+            });
+
+            useVPNStore
+              .getState()
+              .addLog(`Reconnected to ${replacement.name}`, 'success', 'system');
+          } catch (e: unknown) {
+            const msg = e instanceof Error ? e.message : String(e);
+            useVPNStore.getState().addLog(`Reconnect failed: ${msg}`, 'error', 'system');
+            set({ status: 'error' });
+          } finally {
+            set({ _isReconnecting: false });
+          }
+        })();
+      }, 30000);
+
+      set({ _healthCheckTimer: timer });
+    };
+
+    const stopHealthCheck = () => {
+      const timer = get()._healthCheckTimer;
+      if (timer) {
+        clearInterval(timer);
+        set({ _healthCheckTimer: null });
+      }
+    };
+
+    // ── Initial load ─────────────────────────────────────────────────────
     try {
       const rawStatus = await invoke('get_vpn_status');
       if (typeof rawStatus === 'string') {
@@ -643,7 +801,6 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Unknown error';
       get().addLog(`Failed to get initial VPN status: ${msg}`, 'warning', 'system');
-      // Stay disconnected — it's the default initial state
       set({ status: 'disconnected' });
     }
 
@@ -662,6 +819,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       const errorMsg = extractError(payload);
       if (errorMsg) {
         set({ status: 'error', connectedAt: null });
+        stopHealthCheck();
       } else {
         const newStatus = mapVpnStatus(payload);
         set({
@@ -672,8 +830,13 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
           const srv = get().activeServer;
           get().addLog(
             `[status] Connected — activeServer: ${srv?.name ?? 'null'} (${srv?.id.slice(0, 8) ?? 'null'}) addr=${srv?.server ?? '?'}:${String(srv?.port ?? '?')}`,
-            'info', 'system',
+            'info',
+            'system',
           );
+          startHealthCheck();
+        } else {
+          // Disconnected / connecting → stop pinging
+          stopHealthCheck();
         }
       }
     });
@@ -690,6 +853,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     });
 
     return () => {
+      stopHealthCheck();
       unlisten();
       unlistenLogs();
       unlistenTraffic();

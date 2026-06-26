@@ -177,8 +177,20 @@ pub fn generate_config(
         .and_then(|r| r.get_mut("rules"))
         .and_then(|r| r.as_array_mut())
     {
-        // Allow LAN: handled by base templates (ip_is_private → direct)
-        // No extra rule needed — it's already in base.json / base-vpn.json
+        // Allow LAN: add/remove ip_is_private → direct rule based on setting.
+        // Base templates have inconsistent defaults (proxy mode has it, VPN mode doesn't),
+        // so we manage it explicitly here.
+        let private_rule = json!({"ip_is_private": true, "outbound": "direct"});
+        let private_idx = rules.iter().position(|r| {
+            r.get("ip_is_private") == Some(&serde_json::Value::Bool(true))
+        });
+        match (settings.allow_lan, private_idx) {
+            (true, None) => rules.insert(0, private_rule),
+            (false, Some(idx)) => {
+                rules.remove(idx);
+            }
+            _ => {} // already correct
+        }
 
         // Bypass RU: route Russian traffic direct using geoip (via simple rules)
         if settings.bypass_ru {

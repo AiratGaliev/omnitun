@@ -102,25 +102,12 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     }
   }, [status, setSpeeds]);
 
-  const behindCdn = activeServer?.behindCdn;
-
-  // Fetch outlet IP when connected
+  // Fetch outlet IP once when connected (initial verification, no polling)
   useEffect(() => {
     if (status === 'connected') {
       void fetchOutletIp();
-      // For CDN-routed servers (Workers/WARP), outlet IP changes on every
-      // request — polling would spam the UI with meaningless IP changes.
-      if (behindCdn) {
-        return;
-      }
-      const ipInterval = setInterval(() => {
-        void fetchOutletIp();
-      }, 30000);
-      return () => {
-        clearInterval(ipInterval);
-      };
     }
-  }, [status, fetchOutletIp, behindCdn]);
+  }, [status, fetchOutletIp]);
 
   // Feed sparkline from speeds — triggered by traffic monitor updates
   // We read speeds directly from the store inside setSparklineData to avoid deps issues
@@ -359,7 +346,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                     <span className="text-sm font-medium leading-tight">
                                       {server.countryName ?? server.name}
                                       {server.behindCdn && (
-                                        <span className="ml-1.5 text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono">CDN</span>
+                                        <span className="ml-1.5 text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono">
+                                          CDN
+                                        </span>
                                       )}
                                     </span>
                                     {serverCity(server) ? (

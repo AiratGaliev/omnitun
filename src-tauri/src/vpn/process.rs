@@ -74,17 +74,19 @@ impl ProcessManager {
             return Ok(());
         }
 
-        // Windows: fire-and-forget kill by PID only (no /im — avoids nuking batch test instances)
+        let p = pid.unwrap();
+
+        // Windows: fire-and-forget kill by PID only (no /im — avoids nuking batch test instances).
+        // Then poll for process exit with timeout so callers (e.g. reconnect) can safely
+        // start a new instance without port/config conflicts.
         #[cfg(target_os = "windows")]
         {
-            let p = pid.unwrap();
-            // Fire both non-elevated and elevated kill in parallel, then return
+            // Fire both non-elevated and elevated kill
             let _ = std::process::Command::new("taskkill")
                 .args(["/pid", &p.to_string(), "/f"])
                 .creation_flags(CREATE_NO_WINDOW)
                 .output();
 
-            // Elevated kill via PowerShell (handles UAC-elevated processes)
             let _ = std::process::Command::new("powershell")
                 .args(["-NoProfile", "-Command",
                     &format!("Start-Process 'taskkill' -Verb RunAs -WindowStyle Hidden -ArgumentList '/pid','{}','/f' | Out-Null", p)])
@@ -92,6 +94,17 @@ impl ProcessManager {
                 .output();
 
             crate::vpn::VPN_PID.store(0, std::sync::atomic::Ordering::Relaxed);
+
+            // Poll for process exit — cumulative ~3s max
+            for delay_ms in [200u64, 300, 500, 1000, 1000] {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                if !crate::is_process_alive(p) {
+                    return Ok(());
+                }
+            }
+
+            // Process still alive after 3s — log warning but don't block
+            eprintln!("[warn] sing-box PID {p} still alive 3s after taskkill");
             Ok(())
         }
 

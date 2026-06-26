@@ -160,48 +160,6 @@ async fn start_vpn(
                         }
                     }
 
-                    // Auto-refresh subscriptions now that proxy is available
-                    // (fetch may have failed earlier when not connected)
-                    {
-                        let profile_state = app.state::<ProfileState>();
-                        let subs = {
-                            let mgr = profile_state.manager.lock().await;
-                            mgr.list().to_vec()
-                        };
-                        for sub in &subs {
-                            if !sub.url.is_empty() {
-                                let app_clone = app.clone();
-                                let id = sub.id.clone();
-                                let name = sub.name.clone();
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(Duration::from_secs(3)).await;
-                                    let logger = app_clone.state::<StdMutex<Logger>>();
-                                    log(
-                                        &app_clone,
-                                        &logger,
-                                        LogLevel::Info,
-                                        LogSource::Subscription,
-                                        format!("Auto-refreshing '{name}' via active proxy..."),
-                                    );
-                                    let state = app_clone.state::<ProfileState>();
-                                    let mut pm = state.manager.lock().await;
-                                    if let Ok(profile) = pm.refresh(&app_clone, &id).await {
-                                        log(
-                                            &app_clone,
-                                            &logger,
-                                            LogLevel::Success,
-                                            LogSource::Subscription,
-                                            format!(
-                                                "'{name}' refreshed ({} server(s))",
-                                                profile.servers.len()
-                                            ),
-                                        );
-                                    }
-                                });
-                            }
-                        }
-                    }
-
                     // Save for auto-reconnect on unexpected exit
                     {
                         let mut last = crate::vpn::LAST_PROFILE.lock().unwrap();
@@ -931,6 +889,7 @@ pub fn run() {
             get_real_ip,
             outlet_ip,
             speed_test,
+            check_proxy_health,
             get_connections,
             import_subscription_content,
             import_subscription_file,
@@ -1100,6 +1059,31 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<String, String> {
         Ok(format!("{} ({})", ip, location))
     } else {
         Ok(ip)
+    }
+}
+
+/// Quick health check for the active proxy via Clash API delay endpoint.
+/// Returns true if the "proxy" outbound/group responds to a delay probe.
+#[tauri::command]
+async fn check_proxy_health() -> Result<bool, String> {
+    let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    if stats_port == 0 {
+        return Ok(false);
+    }
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(7))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let delay_url = format!(
+        "http://127.0.0.1:{stats_port}/proxies/proxy/delay?url=http://cp.cloudflare.com/generate_204&timeout=5000"
+    );
+
+    match client.get(&delay_url).send().await {
+        Ok(resp) if resp.status().is_success() => Ok(true),
+        _ => Ok(false),
     }
 }
 
