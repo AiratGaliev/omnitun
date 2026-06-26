@@ -16,9 +16,9 @@ use crate::vpn::{ServerProfile, VpnManager, VpnStatus};
 use chrono::Local;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};

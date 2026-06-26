@@ -3,7 +3,9 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 /// Lazily-initialized MaxMind GeoLite2 City reader.
-static READER: OnceLock<maxminddb::Reader<Vec<u8>>> = OnceLock::new();
+static CITY_READER: OnceLock<maxminddb::Reader<Vec<u8>>> = OnceLock::new();
+/// Lazily-initialized MaxMind GeoLite2 ASN reader.
+static ASN_READER: OnceLock<maxminddb::Reader<Vec<u8>>> = OnceLock::new();
 
 /// Rich result from GeoIP lookup.
 #[derive(Debug, Clone)]
@@ -15,35 +17,101 @@ pub struct GeoIpResult {
     pub city: String,
 }
 
-/// Initialise the GeoIP reader from a local City MMDB file.
-pub fn init(db_path: &Path) -> Result<(), String> {
-    // If the file exists but is corrupt, remove it so it gets re-downloaded later
+/// Initialise the City GeoIP reader from a local MMDB file.
+pub fn init_city(db_path: &Path) -> Result<(), String> {
     let data = match std::fs::read(db_path) {
         Ok(d) => d,
         Err(e) => {
             let _ = std::fs::remove_file(db_path);
-            return Err(format!("Failed to read GeoIP database {:?}: {e}", db_path));
+            return Err(format!(
+                "Failed to read GeoIP City database {:?}: {e}",
+                db_path
+            ));
         }
     };
     match maxminddb::Reader::from_source(data) {
         Ok(reader) => {
-            let _ = READER.set(reader);
+            let _ = CITY_READER.set(reader);
             Ok(())
         }
         Err(e) => {
-            // Corrupt file — delete so ensure_downloaded retries
             let _ = std::fs::remove_file(db_path);
-            Err(format!("Failed to parse GeoIP database: {e}"))
+            Err(format!("Failed to parse GeoIP City database: {e}"))
+        }
+    }
+}
+
+/// Initialise the ASN GeoIP reader from a local MMDB file.
+pub fn init_asn(db_path: &Path) -> Result<(), String> {
+    let data = match std::fs::read(db_path) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = std::fs::remove_file(db_path);
+            return Err(format!(
+                "Failed to read GeoIP ASN database {:?}: {e}",
+                db_path
+            ));
+        }
+    };
+    match maxminddb::Reader::from_source(data) {
+        Ok(reader) => {
+            let _ = ASN_READER.set(reader);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(db_path);
+            Err(format!("Failed to parse GeoIP ASN database: {e}"))
         }
     }
 }
 
 pub fn is_ready() -> bool {
-    READER.get().is_some()
+    CITY_READER.get().is_some()
+}
+
+/// Check if the ASN database reader is initialised.
+pub fn is_asn_ready() -> bool {
+    ASN_READER.get().is_some()
+}
+
+/// Check if an IP address belongs to a known CDN provider by ASN.
+///
+/// Uses the GeoLite2-ASN.mmdb database (offline, ~2µs lookup).
+/// Known CDN ASNs:
+///   - 13335, 209242, 203898, 394536, 395747, 132892, 398088  Cloudflare
+///   - 54113  Fastly
+///   - 16509, 14618  Amazon CloudFront (AWS)
+///   - 132203 Tencent Cloud CDN
+pub fn is_cdn_asn(ip: &str) -> bool {
+    let addr: IpAddr = match ip.parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+
+    let reader = match ASN_READER.get() {
+        Some(r) => r,
+        None => return false,
+    };
+
+    if let Ok(asn_info) = reader.lookup::<maxminddb::geoip2::Asn>(addr) {
+        if let Some(asn) = asn_info.autonomous_system_number {
+            return matches!(
+                asn,
+                // Cloudflare (main + WARP/Workers pools)
+                13335 | 209242 | 203898 | 394536 | 395747 | 132892 | 398088
+                // Fastly
+                | 54113
+                // Amazon CloudFront (AWS)
+                | 16509 | 14618
+                // Tencent Cloud CDN
+                | 132203
+            );
+        }
+    }
+    false
 }
 
 /// Mock country data for test/private IPs (127.0.0.x Docker test servers).
-/// These IPs are not in the real GeoIP database, but we need them for local testing.
 fn mock_lookup(ip: &str) -> Option<GeoIpResult> {
     match ip {
         "127.0.0.1" => Some(GeoIpResult {
@@ -78,15 +146,12 @@ fn mock_lookup(ip: &str) -> Option<GeoIpResult> {
 /// Resolve GeoIP info for the given IP address.
 /// Returns None when the reader isn't ready, the input is a hostname, or the IP isn't in the DB.
 pub fn resolve(ip: &str) -> Option<GeoIpResult> {
-    // 1. Check mock entries for test/private IPs first
     if let Some(mock) = mock_lookup(ip) {
         return Some(mock);
     }
 
-    // 2. Check if reader is ready
-    let reader = READER.get()?;
+    let reader = CITY_READER.get()?;
 
-    // 3. Parse IP
     let addr: IpAddr = ip.parse().ok()?;
 
     let entry = reader.lookup::<maxminddb::geoip2::City>(addr).ok()?;
@@ -125,12 +190,10 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
 
 /// Try to resolve a hostname to an IP address, then do GeoIP lookup.
 pub async fn resolve_hostname(host: &str) -> Option<GeoIpResult> {
-    // Try parsing as IP first
     if let Ok(ip) = host.parse::<IpAddr>() {
         return resolve(&ip.to_string());
     }
 
-    // Try DNS resolution
     let addr_str = format!("{host}:0");
     let result = tokio::net::lookup_host(&addr_str).await;
     match result {
@@ -145,19 +208,13 @@ pub async fn resolve_hostname(host: &str) -> Option<GeoIpResult> {
     }
 }
 
-/// Download and initialise the City database.
+/// Download GeoIP databases (City + ASN) from GitHub release mirrors.
 pub async fn ensure_downloaded(db_dir: &Path) -> Result<(), String> {
-    let db_path = db_dir.join("GeoLite2-City.mmdb");
+    std::fs::create_dir_all(db_dir)
+        .map_err(|e| format!("Failed to create geoip directory: {e}"))?;
 
-    if db_path.exists() {
-        return init(&db_path);
-    }
-
-    // Try multiple mirrors — use GitHub release assets (not raw files) which work in more regions
-    let urls = [
-        "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb",
-        "https://cdn.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-City.mmdb",
-    ];
+    let city_path = db_dir.join("GeoLite2-City.mmdb");
+    let asn_path = db_dir.join("GeoLite2-ASN.mmdb");
 
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -165,9 +222,38 @@ pub async fn ensure_downloaded(db_dir: &Path) -> Result<(), String> {
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
+    // Download City database (if not exists)
+    if !city_path.exists() {
+        let city_urls = [
+            "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb",
+            "https://cdn.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-City.mmdb",
+        ];
+        download_db(&client, &city_path, &city_urls, "City").await?;
+    }
+    let _ = init_city(&city_path);
+
+    // Download ASN database (if not exists)
+    if !asn_path.exists() {
+        let asn_urls = [
+            "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-ASN.mmdb",
+            "https://cdn.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-ASN.mmdb",
+        ];
+        download_db(&client, &asn_path, &asn_urls, "ASN").await?;
+    }
+    let _ = init_asn(&asn_path);
+
+    Ok(())
+}
+
+async fn download_db(
+    client: &reqwest::Client,
+    target_path: &Path,
+    urls: &[&str],
+    label: &str,
+) -> Result<(), String> {
     let mut last_err = String::new();
-    for url in &urls {
-        log::info!("Downloading GeoIP City database from {} ...", url);
+    for url in urls {
+        log::info!("Downloading GeoIP {} database from {} ...", label, url);
         match client.get(*url).send().await {
             Ok(resp) => {
                 let bytes = match resp.bytes().await {
@@ -184,22 +270,24 @@ pub async fn ensure_downloaded(db_dir: &Path) -> Result<(), String> {
                     );
                     continue;
                 }
-                std::fs::create_dir_all(db_dir)
-                    .map_err(|e| format!("Failed to create geoip directory: {e}"))?;
-                let tmp_path = db_dir.join("GeoLite2-City.mmdb.tmp");
+                let tmp_path = target_path.with_extension("mmdb.tmp");
                 std::fs::write(&tmp_path, &bytes)
-                    .map_err(|e| format!("Failed to write GeoIP database: {e}"))?;
-                std::fs::rename(&tmp_path, &db_path)
-                    .map_err(|e| format!("Failed to finalize GeoIP database: {e}"))?;
-                log::info!("GeoIP City database downloaded ({} bytes)", bytes.len());
-                return init(&db_path);
+                    .map_err(|e| format!("Failed to write GeoIP {} database: {e}", label))?;
+                std::fs::rename(&tmp_path, target_path)
+                    .map_err(|e| format!("Failed to finalize GeoIP {} database: {e}", label))?;
+                log::info!(
+                    "GeoIP {} database downloaded ({} bytes)",
+                    label,
+                    bytes.len()
+                );
+                return Ok(());
             }
             Err(e) => {
                 last_err = format!("{e}");
             }
         }
     }
-    Err(format!("All GeoIP mirrors failed: {last_err}"))
+    Err(format!("All GeoIP {} mirrors failed: {}", label, last_err))
 }
 
 #[cfg(test)]
@@ -223,7 +311,6 @@ mod tests {
 
     #[test]
     fn test_mock_ip() {
-        // Mock entries for test IPs
         let us = resolve("127.0.0.1");
         assert!(us.is_some());
         assert_eq!(us.unwrap().country_code, "US");
@@ -235,7 +322,6 @@ mod tests {
 
     #[test]
     fn test_private_ip_no_mock() {
-        // Private IP without mock entry
         assert!(resolve("192.168.1.1").is_none());
         assert!(resolve("10.0.0.1").is_none());
     }

@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { useVPNStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
-import { Plus } from 'lucide-react';
+import { CloudOff, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import * as z from 'zod';
+import { SettingItem } from './SettingItem';
 
 const countrySchema = z.object({
   code: z.string().min(2).max(3),
@@ -92,6 +93,16 @@ export function FilteringSettings() {
 
   return (
     <div className="space-y-4">
+      <SettingItem
+        icon={<CloudOff size={20} className="text-blue-400" />}
+        title={t('blockCdnNodes')}
+        description={t('blockCdnNodesDesc')}
+        checked={settings.blockCdnNodes}
+        onChange={(checked) => {
+          updateSettings({ blockCdnNodes: checked });
+        }}
+      />
+
       <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-2xl p-6 shadow-sm">
         <h3 className="font-semibold text-sm text-zinc-100 tracking-wide mb-1">
           {t('geoNodeRules')}

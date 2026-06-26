@@ -25,6 +25,7 @@ pub struct AppSettings {
     pub anti_dpi: bool,
     pub enable_mux: bool,
     pub minimize_to_tray: bool,
+    pub block_cdn_nodes: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +59,7 @@ impl Default for AppSettings {
             anti_dpi: true,
             enable_mux: false,
             minimize_to_tray: false,
+            block_cdn_nodes: false,
         }
     }
 }

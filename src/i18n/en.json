@@ -167,5 +167,7 @@
   "speedTesting": "Testing...",
   "speedTestResult": "Latency",
   "minimizeToTray": "Minimize to Tray",
-  "minimizeToTrayDesc": "Minimize app to system tray instead of closing."
+  "minimizeToTrayDesc": "Minimize app to system tray instead of closing.",
+  "blockCdnNodes": "Block CDN / Dynamic IP Nodes",
+  "blockCdnNodesDesc": "Hide Cloudflare Workers and WARP nodes whose exit IP changes constantly."
 }

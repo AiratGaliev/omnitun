@@ -167,5 +167,7 @@
   "speedTesting": "Тестирование...",
   "speedTestResult": "Задержка",
   "minimizeToTray": "Сворачивать в трей",
-  "minimizeToTrayDesc": "Сворачивать приложение в системный трей вместо закрытия."
+  "minimizeToTrayDesc": "Сворачивать приложение в системный трей вместо закрытия.",
+  "blockCdnNodes": "Блокировать CDN / Dynamic IP узлы",
+  "blockCdnNodesDesc": "Скрывать Cloudflare Workers и WARP, выходной IP которых постоянно меняется."
 }

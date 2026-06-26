@@ -8,7 +8,6 @@ use crate::settings::AppSettings;
 use installer::Installer;
 use process::ProcessManager;
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -107,45 +106,16 @@ fn is_false(v: &bool) -> bool {
 
 // ─── CDN detection ─────────────────────────────────────────────────────────
 
-/// Known CDN provider CIDR ranges (IPv4). Used by `is_cdn_server` to check if a
-/// resolved server IP belongs to a CDN network.
-const CDN_CIDRS: &[(&str, u8)] = &[
-    // Cloudflare — https://www.cloudflare.com/ips-v4
-    ("173.245.48.0", 20),
-    ("103.21.244.0", 22),
-    ("103.22.200.0", 22),
-    ("103.31.4.0", 22),
-    ("141.101.64.0", 18),
-    ("108.162.192.0", 18),
-    ("190.93.240.0", 20),
-    ("188.114.96.0", 20),
-    ("197.234.240.0", 22),
-    ("198.41.128.0", 17),
-    ("162.158.0.0", 15),
-    ("104.16.0.0", 13),
-    ("104.24.0.0", 14),
-    ("172.64.0.0", 13),
-    ("131.0.72.0", 22),
-    // Fastly — https://api.fastly.com/public-ip-list
-    ("23.235.32.0", 20),
-    ("104.156.80.0", 20),
-    ("151.101.0.0", 16),
-    ("199.27.72.0", 21),
-    // Amazon CloudFront
-    ("13.32.0.0", 15),
-    ("13.224.0.0", 14),
-    ("54.182.0.0", 16),
-    ("52.84.0.0", 15),
-    ("143.204.0.0", 16),
-    ("130.176.0.0", 16),
-    // Bunny CDN
-    ("185.75.40.0", 24),
-    ("185.93.180.0", 22),
-    ("212.71.250.0", 24),
-];
-
-/// Fast keyword-based CDN check — returns true if the hostname contains known
-/// CDN provider names or a `cdn.` subdomain prefix.
+/// Keyword-based CDN detection — checks if the domain contains known CDN
+/// provider names or CDN-related patterns.
+///
+/// This catches servers routed through Cloudflare/Fastly/CloudFront CDNs
+/// (like `cdn.gamingdll.ir`, `global.ssl.fastly.net`) where the transport_host
+/// or sni indicates CDN routing. These servers typically have unstable outlet IPs.
+///
+/// In addition to keywords, the ASN database (GeoLite2-ASN.mmdb) is checked
+/// during batch latency testing for servers whose outlet IP IS reachable
+/// through the proxy (covers Cloudflare Workers/WARP where ASN = 13335 etc.).
 fn keyword_cdn_check(host: &str) -> bool {
     let lower = host.to_lowercase();
     lower.contains("fastly")
@@ -153,37 +123,24 @@ fn keyword_cdn_check(host: &str) -> bool {
         || lower.contains("cloudfront")
         || lower.contains("akamai")
         || lower.contains("cdn.")
+        || lower.ends_with(".workers.dev")
+        || lower.ends_with(".pages.dev")
+        || lower.ends_with(".cfargotunnel.com")
+        || lower.contains("worker")
 }
 
-/// Check if an IP address falls within any of the known CDN CIDR ranges.
-fn ip_in_cdn_range(ip: &IpAddr) -> bool {
-    let ip_u32 = match ip {
-        IpAddr::V4(v4) => u32::from_be_bytes(v4.octets()),
-        IpAddr::V6(_) => return false,
-    };
-    for &(base_str, prefix_len) in CDN_CIDRS {
-        let base: u32 = base_str
-            .parse::<std::net::Ipv4Addr>()
-            .map(|a| u32::from_be_bytes(a.octets()))
-            .unwrap_or(0);
-        let mask = if prefix_len == 0 {
-            0
-        } else {
-            !0u32 << (32 - prefix_len)
-        };
-        if (ip_u32 & mask) == (base & mask) {
-            return true;
-        }
-    }
-    false
-}
-
-/// Multi-layer CDN detection:
-///   1. Keyword check on `transport_host` (fast, static).
-///   2. DNS-resolve `transport_host` / `sni` / `server` and check resolved IPs
-///      against known CDN CIDR ranges.
+/// Lightweight initial CDN detection via keyword check on transport_host, sni.
+///
+/// The real detection happens during batch testing via GeoLite2-ASN.mmdb
+/// (`geoip::is_cdn_asn()`), which examines the actual outlet IP. This function
+/// is a fast pre-check for obviously serverless domains, so the UI can show
+/// the CDN badge even before batch testing runs.
+///
+/// Previously this function also did DNS CIDR resolution on entry domains,
+/// but that was incorrect — a VPS behind Cloudflare CDN has a stable outlet IP
+/// and is NOT a CDN node in the problematic sense. Only Workers/WARP/Pages
+/// have unstable outlet IPs.
 pub async fn is_cdn_server(s: &ServerProfile) -> bool {
-    // Layer 1: keyword check on transport_host and sni
     if let Some(ref host) = s.transport_host {
         if keyword_cdn_check(host) {
             return true;
@@ -194,38 +151,9 @@ pub async fn is_cdn_server(s: &ServerProfile) -> bool {
             return true;
         }
     }
-
-    // Layer 2: DNS-based CIDR check
-    // Collect all candidate domains to resolve
-    let mut domains: Vec<&str> = Vec::new();
-    if let Some(ref host) = s.transport_host {
-        // Skip raw IP addresses
-        if host.parse::<IpAddr>().is_err() && !domains.contains(&host.as_str()) {
-            domains.push(host);
-        }
+    if keyword_cdn_check(&s.server) {
+        return true;
     }
-    if let Some(ref sni) = s.sni {
-        if sni.parse::<IpAddr>().is_err()
-            && !domains.contains(&sni.as_str())
-        {
-            domains.push(sni);
-        }
-    }
-    // Check server field too if it's a domain (not IP)
-    if s.server.parse::<IpAddr>().is_err() && !domains.contains(&s.server.as_str()) {
-        domains.push(&s.server);
-    }
-
-    for domain in domains {
-        if let Ok(addrs) = tokio::net::lookup_host(format!("{}:0", domain)).await {
-            for addr in addrs {
-                if ip_in_cdn_range(&addr.ip()) {
-                    return true;
-                }
-            }
-        }
-    }
-
     false
 }
 
@@ -443,54 +371,25 @@ impl VpnManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
 
     #[test]
-    fn test_ip_in_cdn_cloudflare() {
-        let ip = IpAddr::V4(Ipv4Addr::new(104, 16, 0, 1));
-        assert!(ip_in_cdn_range(&ip), "104.16.0.1 should be Cloudflare");
+    fn test_keyword_cdn_workers_dev() {
+        assert!(keyword_cdn_check("my-worker.workers.dev"));
     }
 
     #[test]
-    fn test_ip_in_cdn_fastly() {
-        let ip = IpAddr::V4(Ipv4Addr::new(151, 101, 1, 1));
-        assert!(ip_in_cdn_range(&ip), "151.101.1.1 should be Fastly");
+    fn test_keyword_cdn_pages_dev() {
+        assert!(keyword_cdn_check("my-site.pages.dev"));
     }
 
     #[test]
-    fn test_ip_in_cdn_cloudfront() {
-        let ip = IpAddr::V4(Ipv4Addr::new(13, 32, 0, 1));
-        assert!(ip_in_cdn_range(&ip), "13.32.0.1 should be CloudFront");
+    fn test_keyword_cdn_cfargotunnel() {
+        assert!(keyword_cdn_check("tunnel.cfargotunnel.com"));
     }
 
     #[test]
-    fn test_ip_not_in_cdn_range() {
-        let ip = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
-        assert!(!ip_in_cdn_range(&ip), "8.8.8.8 is not a CDN");
-    }
-
-    #[test]
-    fn test_ip_in_cdn_bunny() {
-        let ip = IpAddr::V4(Ipv4Addr::new(185, 75, 40, 10));
-        assert!(ip_in_cdn_range(&ip), "185.75.40.10 should be Bunny CDN");
-    }
-
-    #[test]
-    fn test_ip_in_cdn_range_edge() {
-        let ip = IpAddr::V4(Ipv4Addr::new(173, 245, 63, 255));
-        assert!(
-            ip_in_cdn_range(&ip),
-            "173.245.63.255 should be Cloudflare (last in 173.245.48.0/20)"
-        );
-    }
-
-    #[test]
-    fn test_ip_not_in_cdn_range_outside() {
-        let ip = IpAddr::V4(Ipv4Addr::new(173, 245, 64, 0));
-        assert!(
-            !ip_in_cdn_range(&ip),
-            "173.245.64.0 should be outside Cloudflare 173.245.48.0/20"
-        );
+    fn test_keyword_cdn_worker_subdomain() {
+        assert!(keyword_cdn_check("test.worker.example.com"));
     }
 
     #[test]
@@ -509,13 +408,13 @@ mod tests {
     }
 
     #[test]
-    fn test_keyword_cdn_not_cdn() {
-        assert!(!keyword_cdn_check("example.com"));
-        assert!(!keyword_cdn_check("my-server.io"));
+    fn test_keyword_cdn_akamai() {
+        assert!(keyword_cdn_check("a1245.g.akamai.net"));
     }
 
     #[test]
-    fn test_keyword_cdn_akamai() {
-        assert!(keyword_cdn_check("a1245.g.akamai.net"));
+    fn test_keyword_cdn_not_cdn() {
+        assert!(!keyword_cdn_check("example.com"));
+        assert!(!keyword_cdn_check("my-server.io"));
     }
 }

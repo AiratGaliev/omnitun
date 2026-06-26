@@ -340,20 +340,22 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
     let logger = app.state::<Mutex<Logger>>();
 
     // Lazy-init GeoIP: load from disk or download synchronously (one-time cost)
-    if !crate::vpn::geoip::is_ready() {
-        let data_dir = app.path().app_data_dir().ok();
-        if let Some(dir) = data_dir {
-            let geo_dir = dir.join("geoip");
-            let db_path = geo_dir.join("GeoLite2-City.mmdb");
-            if db_path.exists() {
-                let _ = crate::vpn::geoip::init(&db_path);
+    let data_dir = app.path().app_data_dir().ok();
+    if let Some(ref dir) = data_dir {
+        let geo_dir = dir.join("geoip");
+        let city_path = geo_dir.join("GeoLite2-City.mmdb");
+        let asn_path = geo_dir.join("GeoLite2-ASN.mmdb");
+
+        if !crate::vpn::geoip::is_ready() {
+            if city_path.exists() {
+                let _ = crate::vpn::geoip::init_city(&city_path);
             } else {
                 log(
                     app,
                     &logger,
                     LogLevel::Info,
                     LogSource::System,
-                    "Downloading GeoIP City database (one-time)...".into(),
+                    "Downloading GeoIP databases (one-time)...".into(),
                 );
                 match crate::vpn::geoip::ensure_downloaded(&geo_dir).await {
                     Ok(_) => log(
@@ -361,7 +363,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
                         &logger,
                         LogLevel::Success,
                         LogSource::System,
-                        "GeoIP database ready".into(),
+                        "GeoIP databases ready".into(),
                     ),
                     Err(e) => log(
                         app,
@@ -372,6 +374,12 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
                     ),
                 }
             }
+        }
+
+        // Always try to init ASN if the file exists — may have been downloaded
+        // on a previous run while is_ready() already returned true for City only.
+        if asn_path.exists() && !crate::vpn::geoip::is_asn_ready() {
+            let _ = crate::vpn::geoip::init_asn(&asn_path);
         }
     }
 
@@ -404,8 +412,8 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         );
     }
 
-    // 1b. Detect CDN-routed servers (unstable outlet IP).
-    //     Multi-layer: keyword + DNS CIDR check.
+    // 1b. Fast keyword pre-check for serverless domains (workers.dev, pages.dev).
+    //     Full CDN detection via GeoLite2-ASN happens during batch latency test.
     for s in &mut unique {
         s.behind_cdn = crate::vpn::is_cdn_server(s).await;
     }
@@ -539,7 +547,8 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
 
     // 4. Real latency test via Clash API — start a temporary sing-box with all servers as outbounds.
     //    Skip if main VPN is running (separate sing-box instances crash the main process on Windows).
-    let main_vpn_running = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
+    let main_vpn_running =
+        crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
     if !alive.is_empty() && !main_vpn_running {
         // Используем параллельную проверку если серверов больше 20
         let updated = if alive.len() > 20 {
@@ -559,6 +568,27 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
                     LogSource::Subscription,
                     format!("Removed {latency_filtered} server(s) that failed real latency test"),
                 );
+            }
+
+            // Apply CDN node filter if user enabled it
+            if let Some(settings) =
+                app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
+            {
+                let settings_guard = settings.lock().await;
+                if settings_guard.block_cdn_nodes {
+                    let before_cdn_filter = updated.len();
+                    updated.retain(|s| !s.behind_cdn);
+                    let cdn_filtered = before_cdn_filter - updated.len();
+                    if cdn_filtered > 0 {
+                        log(
+                            app,
+                            &logger,
+                            LogLevel::Info,
+                            LogSource::Subscription,
+                            format!("Removed {cdn_filtered} CDN/Worker/WARP server(s) (blockCdnNodes enabled)"),
+                        );
+                    }
+                }
             }
 
             // Sort by ping (fastest first)
@@ -597,23 +627,41 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
 /// Generates a single config with ALL servers as outbounds, starts sing-box,
 /// tests each via GET /proxies/{tag}/delay, returns servers with real latency.
 ///
-/// Fetch outlet IP through a given proxy port. Used during batch latency testing.
+/// Fetch outlet IP through a given proxy port. Uses multiple IP echo services
+/// as fallbacks to avoid rate-limiting issues during batch testing (50+ servers).
+///
+/// IMPORTANT: uses `Proxy::all` (not `Proxy::http`) so HTTPS URLs like
+/// `https://ifconfig.me/ip` are properly wrapped in HTTP CONNECT tunnels
+/// through the sing-box mixed inbound.
 async fn fetch_outlet_ip(proxy_port: u16) -> Option<String> {
-    let proxy = reqwest::Proxy::http(format!("http://127.0.0.1:{proxy_port}")).ok()?;
+    let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}")).ok()?;
     let client = reqwest::Client::builder()
         .proxy(proxy)
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(4))
         .build()
         .ok()?;
-    let resp = client.get("https://ifconfig.me/ip").send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
+
+    let ip_urls = [
+        "https://ifconfig.me/ip",
+        "https://api.ipify.org",
+        "https://icanhazip.com",
+    ];
+
+    for url in ip_urls {
+        if let Ok(resp) = client.get(url).send().await {
+            if resp.status().is_success() {
+                if let Ok(text) = resp.text().await {
+                    let ip = text.trim().to_string();
+                    if !ip.is_empty()
+                        && ip.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':')
+                    {
+                        return Some(ip);
+                    }
+                }
+            }
+        }
     }
-    resp.text()
-        .await
-        .ok()
-        .map(|t| t.trim().to_string())
-        .filter(|s| !s.is_empty())
+    None
 }
 
 /// Параллельная проверка outlet IP через множественные инстансы sing-box
@@ -844,26 +892,27 @@ async fn test_servers_via_singbox_parallel(
                     .unwrap_or(false);
 
                 if !switched {
+                    let logger = app_clone.state::<Mutex<Logger>>();
+                    log(
+                        &app_clone,
+                        &logger,
+                        LogLevel::Warning,
+                        LogSource::Subscription,
+                        format!("[cdn] switch failed for {}", tag),
+                    );
                     continue;
                 }
 
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
 
-                // Stability check: fetch outlet IP twice, if different → CDN
-                let ip1 = fetch_outlet_ip(proxy_port).await;
+                let ip = fetch_outlet_ip(proxy_port).await;
 
-                tokio::time::sleep(Duration::from_millis(500)).await;
-
-                let ip2 = fetch_outlet_ip(proxy_port).await;
-
-                // If two IPs differ, the server is behind CDN (unstable exit)
-                if let (Some(ref a), Some(ref b)) = (&ip1, &ip2) {
-                    if a != b {
+                // CDN detection via ASN — single fetch, offline lookup (~2µs)
+                if let Some(ref outlet) = ip {
+                    if crate::vpn::geoip::is_cdn_asn(outlet) {
                         srv.behind_cdn = true;
                     }
                 }
-
-                let ip = ip2.or(ip1);
 
                 // Outlet IP check: only enrich GeoIP data, never clear ping_ms.
                 // Latency test via Clash API delay endpoint is the primary filter.
@@ -1118,7 +1167,9 @@ async fn test_servers_via_singbox_batch(
         );
     }
 
-    // --- Outlet IP checking via Clash API selector switch (parallel) ---
+    // --- Outlet IP checking via Clash API selector switch (sequential) ---
+    // IMPORTANT: must be sequential — parallel tasks race on the same global
+    // singleton selector and produce garbage results.
     let outlet_count = updated.len().min(10);
     log(
         app,
@@ -1141,65 +1192,42 @@ async fn test_servers_via_singbox_batch(
     // Pre-fetch the local real IP (without proxy) to filter out failed proxy routes
     let real_ip = fetch_outlet_ip(proxy_port).await.unwrap_or_default();
 
-    // Spawn parallel outlet IP checks — each server on its own task
-    let mut outlet_handles = Vec::new();
-    let outlet_client = client.clone();
-    for (server_idx, srv) in updated.iter().enumerate().take(outlet_count) {
+    // Sequential outlet IP check (no race condition on the selector)
+    for server_idx in 0..outlet_count {
+        let srv = &mut updated[server_idx];
         let tag = format!("proxy-{}", &srv.id);
         let switch_url = format!("{api_url}/proxies/proxy");
-        let cl = outlet_client.clone();
-        let port = proxy_port;
 
-        outlet_handles.push(tokio::spawn(async move {
-            // Switch selector via Clash API
-            let switched = cl
-                .put(&switch_url)
-                .json(&json!({"name": tag}))
-                .send()
-                .await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false);
+        let switched = client
+            .put(&switch_url)
+            .json(&json!({"name": tag}))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
-            // Stability check: fetch outlet IP twice, if different → CDN
-            let ip1 = if switched {
-                fetch_outlet_ip(port).await
-            } else {
-                None
-            };
+        let ip = if switched {
+            fetch_outlet_ip(proxy_port).await
+        } else {
+            None
+        };
 
-            tokio::time::sleep(Duration::from_millis(500)).await;
-
-            let ip2 = if switched {
-                fetch_outlet_ip(port).await
-            } else {
-                None
-            };
-
-            let is_cdn = match (&ip1, &ip2) {
-                (Some(a), Some(b)) => a != b,
-                _ => false,
-            };
-
-            (server_idx, switched, ip2.or(ip1), is_cdn)
-        }));
-    }
-
-    // Collect results
-    for handle in outlet_handles {
-        if let Ok((idx, _switched, Some(ip), is_cdn)) = handle.await {
-            // Update CDN flag from stability check
-            if is_cdn {
-                updated[idx].behind_cdn = true;
+        // CDN detection via ASN
+        if let Some(ref outlet) = ip {
+            if crate::vpn::geoip::is_cdn_asn(outlet) {
+                srv.behind_cdn = true;
             }
-            // Only update if outlet IP differs from local real IP
-            // (means the proxy actually routed the request)
+        }
+
+        // Only update if outlet IP differs from local real IP
+        if let Some(ip) = ip {
             if !real_ip.is_empty() && ip != real_ip {
                 if let Some(info) = crate::vpn::geoip::resolve_hostname(&ip).await {
-                    updated[idx].flag = Some(info.country_code.clone());
-                    updated[idx].country_name = Some(info.country_name.clone());
-                    updated[idx].city_name = if info.city.is_empty() {
+                    srv.flag = Some(info.country_code.clone());
+                    srv.country_name = Some(info.country_name.clone());
+                    srv.city_name = if info.city.is_empty() {
                         None
                     } else {
                         Some(info.city.clone())
@@ -1589,7 +1617,7 @@ mod extra_tests {
             return;
         }
 
-        let r = geoip::init(&db_path);
+        let r = geoip::init_city(&db_path);
         assert!(
             r.is_ok() || geoip::is_ready(),
             "GeoIP not initialized: {:?}",

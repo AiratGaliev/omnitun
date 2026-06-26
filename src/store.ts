@@ -289,6 +289,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     antiDpi: true,
     enableMux: false,
     minimizeToTray: false,
+    blockCdnNodes: false,
   },
 
   setStatus: (status) => {

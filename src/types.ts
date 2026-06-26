@@ -126,4 +126,5 @@ export interface Settings {
   antiDpi: boolean;
   enableMux: boolean;
   minimizeToTray: boolean;
+  blockCdnNodes: boolean;
 }
