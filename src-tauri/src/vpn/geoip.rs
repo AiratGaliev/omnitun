@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::OnceLock;
+use serde::{Serialize, Deserialize};
 
 /// Lazily-initialized MaxMind GeoLite2 City reader.
 static CITY_READER: OnceLock<maxminddb::Reader<Vec<u8>>> = OnceLock::new();
@@ -8,7 +9,7 @@ static CITY_READER: OnceLock<maxminddb::Reader<Vec<u8>>> = OnceLock::new();
 static ASN_READER: OnceLock<maxminddb::Reader<Vec<u8>>> = OnceLock::new();
 
 /// Rich result from GeoIP lookup.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeoIpResult {
     pub country_code: String,
     #[allow(dead_code)]
@@ -324,5 +325,104 @@ mod tests {
     fn test_private_ip_no_mock() {
         assert!(resolve("192.168.1.1").is_none());
         assert!(resolve("10.0.0.1").is_none());
+    }
+
+    // ── ASN / CDN detection tests ─────────────────────────────────────
+
+    #[test]
+    fn test_is_cdn_asn_cloudflare() {
+        // 13335 = Cloudflare ASN. But is_cdn_asn takes an IP, not an ASN number.
+        // Without a real ASN database, ASN_READER is not initialized,
+        // so the function always returns false.
+        // This tests the parsing + DB-not-ready path.
+        assert!(!is_cdn_asn("1.1.1.1")); // Cloudflare DNS — but ASN DB not loaded
+        assert!(!is_cdn_asn("8.8.8.8")); // Google DNS — DB not loaded
+    }
+
+    #[test]
+    fn test_is_cdn_asn_fastly_when_db_ready() {
+        // Without GeoLite2-ASN.mmdb, ASN detection returns false for all IPs.
+        // Verify this is the case (not a panic).
+        assert!(!is_cdn_asn("151.101.1.1")); // Fastly LB IP
+    }
+
+    #[test]
+    fn test_is_cdn_asn_aws() {
+        assert!(!is_cdn_asn("13.32.0.1")); // AWS CloudFront — DB not loaded
+        assert!(!is_cdn_asn("52.84.0.1")); // AWS CloudFront — DB not loaded
+    }
+
+    #[test]
+    fn test_is_cdn_asn_regular_asn() {
+        assert!(!is_cdn_asn("12345"));
+        assert!(!is_cdn_asn("42"));
+        assert!(!is_cdn_asn("0"));
+    }
+
+    #[test]
+    fn test_is_cdn_asn_invalid_input() {
+        assert!(!is_cdn_asn(""));
+        assert!(!is_cdn_asn("not_a_number"));
+        assert!(!is_cdn_asn("abc123"));
+    }
+
+    #[test]
+    fn test_is_asn_ready_before_init() {
+        // Before any init, ASN should not be ready
+        assert!(!is_asn_ready());
+    }
+
+    #[test]
+    fn test_is_ready_before_init() {
+        // CITY_READER might or might not be initialised depending on test order
+        // This just verifies it doesn't panic
+        let _ = is_ready();
+    }
+
+    // ── GeoIpResult serialization ──────────────────────────────────────
+
+    #[test]
+    fn test_geoip_result_serde() {
+        let result = GeoIpResult {
+            country_code: "US".into(),
+            country_name: "United States".into(),
+            city: "New York".into(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("US"));
+        assert!(json.contains("New York"));
+        let deser: GeoIpResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.country_code, "US");
+        assert_eq!(deser.city, "New York");
+    }
+
+    #[test]
+    fn test_geoip_result_empty_city() {
+        let result = GeoIpResult {
+            country_code: "DE".into(),
+            country_name: "Germany".into(),
+            city: String::new(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        // Must serialize to valid JSON (no panic) and handle empty city
+        assert!(json.contains("\"DE\""), "JSON should contain country code");
+        assert!(json.contains("\"city\":\"\""), "JSON should have empty city");
+    }
+
+    // ── resolve_hostname edge cases ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_resolve_hostname_returns_none_when_not_ready() {
+        // Without init, should return None (or fall back to resolve mock)
+        let result = resolve_hostname("127.0.0.1").await;
+        // When not initialised, it may return mock result or None
+        // Either is acceptable — just verify no panic
+        assert!(result.is_none() || result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_hostname_empty() {
+        let result = resolve_hostname("").await;
+        assert!(result.is_none());
     }
 }

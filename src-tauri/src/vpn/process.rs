@@ -308,4 +308,59 @@ mod tests {
         assert!(result.is_ok());
         assert!(!mgr.is_running());
     }
+
+    #[test]
+    fn test_new_stores_binary_path() {
+        let mgr = ProcessManager::new(PathBuf::from("/custom/path/sing-box"));
+        // binary_path is not pub, but we can verify pid starts None
+        assert!(mgr.pid().is_none());
+    }
+
+    #[test]
+    fn test_pid_returns_none_initially() {
+        let mgr = ProcessManager::new(PathBuf::from("sing-box"));
+        assert!(mgr.pid().is_none());
+    }
+
+    #[test]
+    fn test_clear_pid_returns_none_when_empty() {
+        let mgr = ProcessManager::new(PathBuf::from("sing-box"));
+        assert!(mgr.clear_pid().is_none());
+        assert!(mgr.pid().is_none());
+    }
+
+    #[test]
+    fn test_clear_pid_atomic_take() {
+        let mgr = ProcessManager::new(PathBuf::from("sing-box"));
+        // Simulate setting a PID via the internal Arc<Mutex<Option<u32>>>
+        {
+            let mut guard = mgr.pid.lock().unwrap();
+            *guard = Some(12345);
+        }
+        assert_eq!(mgr.pid(), Some(12345));
+
+        // clear_pid should take it
+        let taken = mgr.clear_pid();
+        assert_eq!(taken, Some(12345));
+        assert!(mgr.pid().is_none(), "PID should be None after clear_pid");
+
+        // Second clear_pid returns None
+        assert!(mgr.clear_pid().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stop_clears_pid() {
+        let mgr = ProcessManager::new(PathBuf::from("sing-box"));
+        // Set a fake PID (won't actually kill anything since it's 999999999)
+        {
+            let mut guard = mgr.pid.lock().unwrap();
+            *guard = Some(999999999);
+        }
+        assert!(mgr.is_running());
+
+        // stop should take the PID and try to kill (won't find process, but shouldn't crash)
+        let result = mgr.stop().await;
+        assert!(result.is_ok());
+        assert!(!mgr.is_running());
+    }
 }

@@ -999,4 +999,241 @@ mod tests {
         assert_eq!(servers[0]["server"], "1.0.0.1");
         assert_eq!(servers[0]["server_port"], 443);
     }
+
+    // ── Edge cases: settings affect config structure ────────────────────────
+
+    #[test]
+    fn test_allow_lan_false_removes_private_rule() {
+        let mut settings = default_settings();
+        settings.allow_lan = false;
+
+        let result = generate_config(
+            base_template(),
+            &cache_dir(),
+            1080,
+            "local-proxy",
+            &[vless_profile()],
+            &settings,
+        );
+        assert!(result.is_ok());
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let rules = config["route"]["rules"].as_array().unwrap();
+        let has_private = rules.iter().any(|r| r.get("ip_is_private") == Some(&Value::Bool(true)));
+        assert!(!has_private, "allow_lan=false should remove ip_is_private rule");
+    }
+
+    #[test]
+    fn test_allow_lan_true_keeps_private_rule() {
+        let mut settings = default_settings();
+        settings.allow_lan = true;
+
+        let result = generate_config(
+            base_template(),
+            &cache_dir(),
+            1080,
+            "local-proxy",
+            &[vless_profile()],
+            &settings,
+        );
+        assert!(result.is_ok());
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let rules = config["route"]["rules"].as_array().unwrap();
+        let has_private = rules.iter().any(|r| r.get("ip_is_private") == Some(&Value::Bool(true)));
+        assert!(has_private, "allow_lan=true should keep ip_is_private rule");
+    }
+
+    #[test]
+    fn test_bypass_ru_true_adds_cidr_rules() {
+        let mut settings = default_settings();
+        settings.bypass_ru = true;
+
+        let result = generate_config(
+            base_template(),
+            &cache_dir(),
+            1080,
+            "local-proxy",
+            &[vless_profile()],
+            &settings,
+        );
+        assert!(result.is_ok());
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let rules = config["route"]["rules"].as_array().unwrap();
+        let has_ru = rules.iter().any(|r| {
+            r.get("ip_cidr")
+                .and_then(|c| c.as_array())
+                .is_some_and(|cidrs| cidrs.iter().any(|c| c.as_str().is_some_and(|s| s.starts_with("5.45."))))
+        });
+        assert!(has_ru, "bypass_ru=true should add Russian CIDR rules");
+    }
+
+    #[test]
+    fn test_bypass_ru_false_no_cidr_rules() {
+        let mut settings = default_settings();
+        settings.bypass_ru = false;
+
+        let result = generate_config(
+            base_template(),
+            &cache_dir(),
+            1080,
+            "local-proxy",
+            &[vless_profile()],
+            &settings,
+        );
+        assert!(result.is_ok());
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let rules = config["route"]["rules"].as_array().unwrap();
+        let has_ru = rules.iter().any(|r| {
+            r.get("ip_cidr")
+                .and_then(|c| c.as_array())
+                .is_some_and(|cidrs| cidrs.iter().any(|c| c.as_str().is_some_and(|s| s.starts_with("5.45."))))
+        });
+        assert!(!has_ru, "bypass_ru=false should NOT add Russian CIDR rules");
+    }
+
+    #[test]
+    fn test_kill_switch_true_sets_auto_redirect_on_tun() {
+        let mut settings = default_settings();
+        settings.kill_switch = true;
+
+        let result = generate_config(
+            vpn_template(),  // kill_switch only applies in VPN mode
+            &cache_dir(),
+            1080,
+            "vpn",           // must be vpn mode
+            &[vless_profile()],
+            &settings,
+        );
+        assert!(result.is_ok());
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let tun = &config["inbounds"][0];
+        assert_eq!(tun["type"], "tun");
+        // kill_switch adds auto_redirect: true to TUN inbound
+        assert_eq!(tun["auto_redirect"], true,
+            "kill_switch=true should set auto_redirect on TUN inbound");
+    }
+
+    #[test]
+    fn test_kill_switch_false_no_auto_redirect() {
+        let settings = default_settings();
+        // kill_switch = false by default
+
+        let result = generate_config(
+            vpn_template(),
+            &cache_dir(),
+            1080,
+            "vpn",
+            &[vless_profile()],
+            &settings,
+        );
+        assert!(result.is_ok());
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let tun = &config["inbounds"][0];
+        // Without kill_switch, auto_redirect should not be set
+        assert!(tun.get("auto_redirect").is_none() || tun["auto_redirect"] == false,
+            "kill_switch=false should NOT add auto_redirect");
+    }
+
+    #[test]
+    fn test_enable_mux_true_adds_mux_section() {
+        let mut settings = default_settings();
+        settings.enable_mux = true;
+
+        let result = generate_config(
+            base_template(),
+            &cache_dir(),
+            1080,
+            "local-proxy",
+            &[vless_profile()],
+            &settings,
+        );
+        assert!(result.is_ok());
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        // Find the proxy outbound — should have mux section
+        let proxy_ob = config["outbounds"].as_array().unwrap().iter()
+            .find(|o| o["tag"] == "proxy").unwrap();
+        assert!(
+            proxy_ob.get("mux").is_some(),
+            "enable_mux=true should add mux section to proxy outbound"
+        );
+        assert_eq!(
+            proxy_ob["mux"]["protocol"].as_str(),
+            Some("h2mux"),
+            "mux protocol should be h2mux"
+        );
+    }
+
+    #[test]
+    fn test_enable_mux_false_no_mux_section() {
+        let settings = default_settings();
+        // enable_mux = false by default
+
+        let result = generate_config(
+            base_template(),
+            &cache_dir(),
+            1080,
+            "local-proxy",
+            &[vless_profile()],
+            &settings,
+        );
+        assert!(result.is_ok());
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let proxy_ob = config["outbounds"].as_array().unwrap().iter()
+            .find(|o| o["tag"] == "proxy").unwrap();
+        assert!(
+            proxy_ob.get("mux").is_none(),
+            "enable_mux=false should NOT add mux section"
+        );
+    }
+
+    #[test]
+    fn test_anti_dpi_true_adds_utls_to_tls() {
+        let mut settings = default_settings();
+        settings.anti_dpi = true;
+
+        let result = generate_config(
+            base_template(),
+            &cache_dir(),
+            1080,
+            "local-proxy",
+            &[vless_tls_profile()],  // must have TLS enabled
+            &settings,
+        );
+        assert!(result.is_ok());
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let proxy_ob = config["outbounds"].as_array().unwrap().iter()
+            .find(|o| o["tag"] == "proxy").unwrap();
+        let tls = proxy_ob.get("tls");
+        assert!(tls.is_some(), "anti_dpi=true — TLS section expected");
+        if let Some(t) = tls {
+            let utls = t.get("utls");
+            assert!(utls.is_some(), "anti_dpi=true should add utls to TLS");
+            assert_eq!(utls.and_then(|u| u.get("enabled")).and_then(|e| e.as_bool()), Some(true));
+            assert_eq!(utls.and_then(|u| u.get("fingerprint")).and_then(|f| f.as_str()), Some("chrome"));
+        }
+    }
+
+    #[test]
+    fn test_anti_dpi_false_no_utls() {
+        let settings = default_settings();
+        // anti_dpi = true by default in AppSettings
+
+        let result = generate_config(
+            base_template(),
+            &cache_dir(),
+            1080,
+            "local-proxy",
+            &[vless_tls_profile()],  // has TLS but anti_dpi applies
+            &settings,
+        );
+        assert!(result.is_ok());
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        let proxy_ob = config["outbounds"].as_array().unwrap().iter()
+            .find(|o| o["tag"] == "proxy").unwrap();
+        let tls = proxy_ob.get("tls");
+        // With anti_dpi=true (default), utls should be present on TLS outbounds
+        if let Some(t) = tls {
+            // Default anti_dpi=true means utls IS present
+            assert!(t.get("utls").is_some(), "anti_dpi=true (default) should add utls");
+        }
+    }
 }

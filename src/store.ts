@@ -257,7 +257,7 @@ function toRustServerProfile(s: Server | null, fallbackName: string): Record<str
 
 /// Pick the best replacement server when the current one dies.
 /// Priority: same country → fastest any country (respecting user filters).
-function pickReplacementServer(
+export function pickReplacementServer(
   servers: Server[],
   currentServer: Server | null,
   settings: Settings,
@@ -416,7 +416,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
           profiles: state.profiles.filter((p) => p.id !== id),
           servers: remaining,
           activeServer: removedIds.has(state.activeServer?.id ?? '')
-            ? (remaining[0] ?? undefined)
+            ? (remaining[0] ?? null)
             : state.activeServer,
         };
       });
