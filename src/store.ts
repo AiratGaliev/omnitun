@@ -550,7 +550,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         // build a `urltest` group and auto-select the fastest outbound.
         // Previously this was always an empty array, which silently
         // disabled the autoConnectFastest feature.
-        let altServers: ReturnType<typeof toRustServerProfile>[] = [];
+        const altServers: ReturnType<typeof toRustServerProfile>[] = [];
 
         await invoke('start_vpn', {
           profile,

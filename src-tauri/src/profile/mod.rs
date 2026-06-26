@@ -410,15 +410,15 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         let total_before = unique.len();
         unique.retain(|s| {
             // Filter by protocol
-            if !settings_guard.allowed_protocols.is_empty() {
-                if !settings_guard.allowed_protocols.contains(&s.protocol) {
-                    return false;
-                }
+            if !settings_guard.allowed_protocols.is_empty()
+                && !settings_guard.allowed_protocols.contains(&s.protocol)
+            {
+                return false;
             }
-            if !settings_guard.blocked_protocols.is_empty() {
-                if settings_guard.blocked_protocols.contains(&s.protocol) {
-                    return false;
-                }
+            if !settings_guard.blocked_protocols.is_empty()
+                && settings_guard.blocked_protocols.contains(&s.protocol)
+            {
+                return false;
             }
             // Filter by country (flag must be resolved first)
             if !settings_guard.allowed_countries.is_empty() {
@@ -479,23 +479,13 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         set.spawn(async move {
             let addr = format!("{}:{}", server.server, server.port);
             let start = std::time::Instant::now();
-            // Retry up to 3 times with 1-second backoff (Karing-style)
-            let mut reachable = false;
-            for attempt in 1..=3 {
-                if attempt > 1 {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-                if tokio::time::timeout(
-                    std::time::Duration::from_secs(3),
-                    tokio::net::TcpStream::connect(&addr),
-                )
-                .await
-                .is_ok_and(|r| r.is_ok())
-                {
-                    reachable = true;
-                    break;
-                }
-            }
+            // Single attempt with 3-second timeout (was 3 retries — too permissive)
+            let reachable = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await
+            .is_ok_and(|r| r.is_ok());
             let ping_ms = start.elapsed().as_millis() as u64;
             drop(permit);
             (server, reachable, ping_ms)
@@ -543,9 +533,27 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
 
     // 4. Real latency test via Clash API — start a temporary sing-box with all servers as outbounds
     if !alive.is_empty() {
-        let updated = test_servers_via_singbox_batch(app, &alive).await;
+        // Используем параллельную проверку если серверов больше 20
+        let updated = if alive.len() > 20 {
+            test_servers_via_singbox_parallel(app, &alive).await
+        } else {
+            test_servers_via_singbox_batch(app, &alive).await
+        };
         if let Ok(mut updated) = updated {
-            // Sort by ping (fastest first), unknown pings last
+            let before_filter = updated.len();
+            updated.retain(|s| s.ping_ms.is_some());
+            let latency_filtered = before_filter - updated.len();
+            if latency_filtered > 0 {
+                log(
+                    app,
+                    &logger,
+                    LogLevel::Warning,
+                    LogSource::Subscription,
+                    format!("Removed {latency_filtered} server(s) that failed real latency test"),
+                );
+            }
+
+            // Sort by ping (fastest first)
             updated.sort_by(|a, b| {
                 a.ping_ms
                     .unwrap_or(u64::MAX)
@@ -580,7 +588,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
 /// Test all servers that passed TCP ping using sing-box and Clash API.
 /// Generates a single config with ALL servers as outbounds, starts sing-box,
 /// tests each via GET /proxies/{tag}/delay, returns servers with real latency.
-
+///
 /// Fetch outlet IP through a given proxy port. Used during batch latency testing.
 async fn fetch_outlet_ip(proxy_port: u16) -> Option<String> {
     let proxy = reqwest::Proxy::http(format!("http://127.0.0.1:{proxy_port}")).ok()?;
@@ -598,6 +606,294 @@ async fn fetch_outlet_ip(proxy_port: u16) -> Option<String> {
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// Параллельная проверка outlet IP через множественные инстансы sing-box
+async fn test_servers_via_singbox_parallel(
+    app: &AppHandle,
+    servers: &[ServerProfile],
+) -> Result<Vec<ServerProfile>, ()> {
+    use crate::vpn::config::{build_outbound, find_available_port};
+    use serde_json::json;
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+    use std::time::Duration;
+
+    let logger = app.state::<Mutex<Logger>>();
+    log(
+        app,
+        &logger,
+        LogLevel::Info,
+        LogSource::Subscription,
+        format!(
+            "Testing {} server(s) via parallel sing-box instances...",
+            servers.len()
+        ),
+    );
+
+    let data_dir = app.path().app_data_dir().map_err(|_| ())?;
+    let binary_path = data_dir
+        .join("binaries")
+        .join(crate::vpn::installer::Installer::binary_name());
+
+    // Разбиваем серверы на батчи по 20
+    const BATCH_SIZE: usize = 20;
+    let batches: Vec<&[ServerProfile]> = servers.chunks(BATCH_SIZE).collect();
+
+    log(
+        app,
+        &logger,
+        LogLevel::Info,
+        LogSource::Subscription,
+        format!(
+            "Split into {} batch(es) of up to {} servers each",
+            batches.len(),
+            BATCH_SIZE
+        ),
+    );
+
+    let mut all_results = Vec::new();
+    let mut batch_handles = Vec::new();
+
+    // Запускаем каждый батч параллельно
+    for (batch_idx, batch) in batches.iter().enumerate() {
+        let binary_path = binary_path.clone();
+        let batch = batch.to_vec();
+        let app_clone = app.clone();
+
+        batch_handles.push(tokio::spawn(async move {
+            // Находим свободные порты для этого батча
+            let proxy_port = find_available_port().ok_or(())?;
+            let stats_port = find_available_port().ok_or(())?;
+
+            // Строим конфиг только для этого батча
+            let mut outbounds: Vec<serde_json::Value> = vec![
+                json!({"type": "direct", "tag": "direct"}),
+                json!({"type": "block", "tag": "block"}),
+            ];
+
+            let mut proxy_tags: Vec<String> = Vec::new();
+            for server in &batch {
+                if let Ok(ob) = build_outbound(server) {
+                    let tag = format!("proxy-{}", &server.id);
+                    proxy_tags.push(tag.clone());
+                    let mut ob = ob;
+                    ob["tag"] = json!(tag);
+                    outbounds.push(ob);
+                }
+            }
+
+            let mut selector_outbounds = vec!["direct".to_string()];
+            selector_outbounds.extend(proxy_tags);
+            outbounds.push(json!({"type": "selector", "tag": "proxy", "outbounds": selector_outbounds}));
+
+            let test_dir = std::env::temp_dir().join(format!(
+                "omnitun-batch-{}-{}",
+                batch_idx,
+                uuid::Uuid::new_v4()
+            ));
+            let _ = std::fs::create_dir_all(&test_dir);
+
+            let config_json = json!({
+                "log": { "level": "error", "output": test_dir.join("sing-box.log").to_string_lossy().to_string(), "timestamp": true },
+                "dns": {
+                    "servers": [
+                        {"type": "https", "tag": "remote", "server": "1.1.1.1", "server_port": 443, "detour": "proxy"},
+                        {"type": "https", "tag": "local", "server": "8.8.8.8", "server_port": 443}
+                    ],
+                    "final": "remote"
+                },
+                "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": proxy_port}],
+                "outbounds": outbounds,
+                "experimental": {
+                    "cache_file": { "enabled": false },
+                    "clash_api": {
+                        "external_controller": format!("127.0.0.1:{stats_port}"),
+                        "secret": ""
+                    }
+                },
+                "route": {
+                    "final": "proxy",
+                    "auto_detect_interface": true,
+                    "default_domain_resolver": "local",
+                    "rules": [{"ip_is_private": true, "outbound": "direct"}]
+                },
+            });
+
+            let config_path = test_dir.join("config.json");
+            let config_str = serde_json::to_string_pretty(&config_json).map_err(|_| ())?;
+            std::fs::write(&config_path, &config_str).map_err(|_| ())?;
+
+            // Запускаем sing-box для этого батча
+            #[cfg(windows)]
+            let child = std::process::Command::new(&binary_path)
+                .args(["run", "-c"])
+                .arg(&config_path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .creation_flags(0x08000000)
+                .spawn()
+                .map_err(|_| ())?;
+
+            #[cfg(not(windows))]
+            let child = std::process::Command::new(&binary_path)
+                .args(["run", "-c"])
+                .arg(&config_path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|_| ())?;
+
+            let pid = child.id();
+
+            // Ждём запуска
+            tokio::time::sleep(Duration::from_millis(600)).await;
+
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(8))
+                .build()
+                .map_err(|_| {
+                    let _ = kill_process(pid);
+                })?;
+
+            let api_url = format!("http://127.0.0.1:{stats_port}");
+
+            // Параллельная проверка задержки
+            let test_url = "http://cp.cloudflare.com/generate_204";
+            let mut updated = Vec::new();
+            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+            let mut delay_handles = Vec::new();
+
+            for server in &batch {
+                let tag = format!("proxy-{}", &server.id);
+                let delay_url = format!("{api_url}/proxies/{tag}/delay?url={test_url}&timeout=5000");
+                let client = client.clone();
+                let sem = semaphore.clone();
+                let srv = server.clone();
+
+                delay_handles.push(tokio::spawn(async move {
+                    let _permit = sem.acquire().await.unwrap();
+                    let mut result = srv;
+                    result.ping_ms = None;
+                    match client.get(&delay_url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            if let Ok(body) = resp.text().await {
+                                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
+                                    if let Some(ms) = data["delay"].as_u64() {
+                                        result.ping_ms = Some(ms);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    result
+                }));
+            }
+
+            for handle in delay_handles {
+                if let Ok(server) = handle.await {
+                    updated.push(server);
+                }
+            }
+
+            // Log per-batch latency test results
+            let batch_passed = updated.iter().filter(|s| s.ping_ms.is_some()).count();
+            let batch_failed = updated.len() - batch_passed;
+            if batch_failed > 0 {
+                let logger = app_clone.state::<Mutex<Logger>>();
+                log(
+                    &app_clone,
+                    &logger,
+                    LogLevel::Info,
+                    LogSource::Subscription,
+                    format!(
+                        "Batch {batch_idx}: {batch_passed} passed, {batch_failed} failed real latency test"
+                    ),
+                );
+            }
+
+            // Сортируем по задержке
+            updated.sort_by(|a, b| {
+                a.ping_ms
+                    .unwrap_or(u64::MAX)
+                    .cmp(&b.ping_ms.unwrap_or(u64::MAX))
+            });
+
+            // Последовательная проверка outlet IP внутри батча
+            let real_ip = fetch_outlet_ip(proxy_port).await.unwrap_or_default();
+
+            for srv in &mut updated {
+                let tag = format!("proxy-{}", &srv.id);
+
+                let switched = client
+                    .put(format!("{api_url}/proxies/proxy"))
+                    .json(&json!({"name": tag}))
+                    .send()
+                    .await
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false);
+
+                if !switched {
+                    continue;
+                }
+
+                tokio::time::sleep(Duration::from_millis(50)).await;
+
+                let ip = fetch_outlet_ip(proxy_port).await;
+
+                // Outlet IP check: only enrich GeoIP data, never clear ping_ms.
+                // Latency test via Clash API delay endpoint is the primary filter.
+                if let Some(ip) = ip {
+                    if !real_ip.is_empty() && ip != real_ip {
+                        if let Some(info) = crate::vpn::geoip::resolve_hostname(&ip).await {
+                            srv.flag = Some(info.country_code.clone());
+                            srv.country_name = Some(info.country_name.clone());
+                            srv.city_name = if info.city.is_empty() {
+                                None
+                            } else {
+                                Some(info.city.clone())
+                            };
+                        }
+                    }
+                }
+            }
+
+            // Восстанавливаем selector
+            let _ = client
+                .put(format!("{api_url}/proxies/proxy"))
+                .json(&json!({"name": "direct"}))
+                .send()
+                .await;
+
+            // Cleanup
+            let _ = kill_process(pid);
+            let _ = std::fs::remove_dir_all(&test_dir);
+
+            Ok::<Vec<ServerProfile>, ()>(updated)
+        }));
+    }
+
+    // Собираем результаты всех батчей
+    for handle in batch_handles {
+        if let Ok(Ok(batch_results)) = handle.await {
+            all_results.extend(batch_results);
+        }
+    }
+
+    log(
+        app,
+        &logger,
+        LogLevel::Success,
+        LogSource::Subscription,
+        format!(
+            "Parallel test complete: {} server(s) processed",
+            all_results.len()
+        ),
+    );
+
+    Ok(all_results)
 }
 
 async fn test_servers_via_singbox_batch(
@@ -739,7 +1035,6 @@ async fn test_servers_via_singbox_batch(
         .build()
         .map_err(|_| {
             let _ = kill_process(pid);
-            ()
         })?;
 
     let api_url = format!("http://127.0.0.1:{stats_port}");
@@ -760,6 +1055,7 @@ async fn test_servers_via_singbox_batch(
         handles.push(tokio::spawn(async move {
             let _permit = sem.acquire().await.unwrap();
             let mut result = srv;
+            result.ping_ms = None;
             match client.get(&delay_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     if let Ok(body) = resp.text().await {
@@ -783,6 +1079,22 @@ async fn test_servers_via_singbox_batch(
 
     // Collect results into a Vec (sorted by ping later, after outlet IP check)
     let mut updated = Arc::try_unwrap(updated).unwrap().into_inner().unwrap();
+
+    // Log how many servers passed/failed the real latency test
+    let passed = updated.iter().filter(|s| s.ping_ms.is_some()).count();
+    let failed = updated.len() - passed;
+    if failed > 0 {
+        log(
+            app,
+            &logger,
+            LogLevel::Info,
+            LogSource::Subscription,
+            format!(
+                "Real latency test: {passed} passed, {failed} failed (of {} tested)",
+                updated.len()
+            ),
+        );
+    }
 
     // --- Outlet IP checking via Clash API selector switch (parallel) ---
     let outlet_count = updated.len().min(10);
@@ -810,8 +1122,8 @@ async fn test_servers_via_singbox_batch(
     // Spawn parallel outlet IP checks — each server on its own task
     let mut outlet_handles = Vec::new();
     let outlet_client = client.clone();
-    for server_idx in 0..outlet_count {
-        let tag = format!("proxy-{}", &updated[server_idx].id);
+    for (server_idx, srv) in updated.iter().enumerate().take(outlet_count) {
+        let tag = format!("proxy-{}", &srv.id);
         let switch_url = format!("{api_url}/proxies/proxy");
         let cl = outlet_client.clone();
         let port = proxy_port;
@@ -860,7 +1172,7 @@ async fn test_servers_via_singbox_batch(
 
     // Restore selector to direct (best-effort)
     let _ = client
-        .put(&format!("{api_url}/proxies/proxy"))
+        .put(format!("{api_url}/proxies/proxy"))
         .json(&json!({"name": "direct"}))
         .send()
         .await;
@@ -1004,7 +1316,7 @@ fn emoji_flag_from_name(name: &str) -> Option<String> {
     let c2 = chars[1] as u32;
 
     // Regional Indicator A..Z
-    if c1 >= 0x1F1E6 && c1 <= 0x1F1FF && c2 >= 0x1F1E6 && c2 <= 0x1F1FF {
+    if (0x1F1E6..=0x1F1FF).contains(&c1) && (0x1F1E6..=0x1F1FF).contains(&c2) {
         let letter1 = char::from_u32((c1 - 0x1F1E6) + b'A' as u32)?;
         let letter2 = char::from_u32((c2 - 0x1F1E6) + b'A' as u32)?;
         Some(format!("{letter1}{letter2}"))

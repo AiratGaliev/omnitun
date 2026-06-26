@@ -94,7 +94,7 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
     let country_code = entry
         .country
         .as_ref()
-        .and_then(|c| c.iso_code.as_deref())
+        .and_then(|c| c.iso_code)
         .unwrap_or("")
         .to_string();
 

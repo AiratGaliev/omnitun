@@ -1431,18 +1431,16 @@ async fn wait_for_proxy_ready(
     // VPN mode: no inbound TCP port to probe. Wait for PID + a small grace
     // period for the TUN interface to come up.
     if routing_mode == "vpn" {
-        loop {
-            attempts += 1;
-            if !is_process_alive(pid) {
-                return Err(format!(
-                    "sing-box (PID {pid}) exited before TUN was ready (after {attempts} attempt(s))"
-                ));
-            }
-            // PID is alive — give the TUN interface a brief grace period to
-            // finish coming up before we declare "Connected".
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            return Ok(attempts);
+        attempts += 1;
+        if !is_process_alive(pid) {
+            return Err(format!(
+                "sing-box (PID {pid}) exited before TUN was ready (after {attempts} attempt(s))"
+            ));
         }
+        // PID is alive — give the TUN interface a brief grace period to
+        // finish coming up before we declare "Connected".
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        return Ok(attempts);
     }
 
     // Proxy modes: poll TCP connect to the mixed inbound port.
