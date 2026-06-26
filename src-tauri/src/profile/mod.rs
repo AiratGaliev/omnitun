@@ -404,9 +404,10 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         );
     }
 
-    // 1b. Detect CDN-routed servers (unstable outlet IP)
+    // 1b. Detect CDN-routed servers (unstable outlet IP).
+    //     Multi-layer: keyword + DNS CIDR check.
     for s in &mut unique {
-        s.behind_cdn = crate::vpn::is_cdn_server(s);
+        s.behind_cdn = crate::vpn::is_cdn_server(s).await;
     }
 
     // 2. Apply user filters (country, protocol) from settings
@@ -848,7 +849,21 @@ async fn test_servers_via_singbox_parallel(
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
-                let ip = fetch_outlet_ip(proxy_port).await;
+                // Stability check: fetch outlet IP twice, if different → CDN
+                let ip1 = fetch_outlet_ip(proxy_port).await;
+
+                tokio::time::sleep(Duration::from_millis(500)).await;
+
+                let ip2 = fetch_outlet_ip(proxy_port).await;
+
+                // If two IPs differ, the server is behind CDN (unstable exit)
+                if let (Some(ref a), Some(ref b)) = (&ip1, &ip2) {
+                    if a != b {
+                        srv.behind_cdn = true;
+                    }
+                }
+
+                let ip = ip2.or(ip1);
 
                 // Outlet IP check: only enrich GeoIP data, never clear ping_ms.
                 // Latency test via Clash API delay endpoint is the primary filter.
@@ -1147,20 +1162,37 @@ async fn test_servers_via_singbox_batch(
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
-            // Fetch outlet IP through the mixed proxy
-            let ip = if switched {
+            // Stability check: fetch outlet IP twice, if different → CDN
+            let ip1 = if switched {
                 fetch_outlet_ip(port).await
             } else {
                 None
             };
 
-            (server_idx, switched, ip)
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            let ip2 = if switched {
+                fetch_outlet_ip(port).await
+            } else {
+                None
+            };
+
+            let is_cdn = match (&ip1, &ip2) {
+                (Some(a), Some(b)) => a != b,
+                _ => false,
+            };
+
+            (server_idx, switched, ip2.or(ip1), is_cdn)
         }));
     }
 
     // Collect results
     for handle in outlet_handles {
-        if let Ok((idx, _switched, Some(ip))) = handle.await {
+        if let Ok((idx, _switched, Some(ip), is_cdn)) = handle.await {
+            // Update CDN flag from stability check
+            if is_cdn {
+                updated[idx].behind_cdn = true;
+            }
             // Only update if outlet IP differs from local real IP
             // (means the proxy actually routed the request)
             if !real_ip.is_empty() && ip != real_ip {
