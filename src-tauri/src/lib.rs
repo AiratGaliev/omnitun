@@ -833,6 +833,10 @@ pub fn run() {
             let logger = Logger::new(1000, Some(log_file));
             app.manage(StdMutex::new(logger));
 
+            // Store sing-box binary path for .srs parsing
+            let singbox_path = data_dir.join("binaries").join("sing-box.exe");
+            crate::vpn::geoip::set_singbox_bin_path(singbox_path);
+
             let vpn_manager = VpnManager::new(data_dir.clone());
             let vpn_state = VpnState {
                 manager: Arc::new(Mutex::new(vpn_manager)),

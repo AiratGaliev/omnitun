@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
@@ -216,47 +216,85 @@ pub fn is_ipinfo_ready() -> bool {
     IPINFO_LITE_READER.get().is_some()
 }
 
-// ── CDN detection (plain-text CIDR lists) ────────────────────────────
+// ── CDN detection (sing-box .srs rule sets via decompile) ──────────
 //
-// We download plain-text CIDR lists from 123jjck/cdn-ip-ranges and
-// PentiumB/CDN-RuleSet, then parse one CIDR per line.
+// We download .srs binary rule sets (native sing-box format), then
+// parse them via `sing-box rule-set decompile` → JSON → ip_cidr.
+// See https://github.com/123jjck/cdn-ip-ranges
+static CDN_RANGES: OnceLock<Vec<(IpAddr, u8)>> = OnceLock::new();
 
-/// Parse a plain-text CIDR list file (one CIDR per line).
-/// Used for CDN detection data from 123jjck and PentiumB repos.
+/// Path to sing-box binary, set during app initialization.
+static SINGBOX_BIN: OnceLock<PathBuf> = OnceLock::new();
+
+/// Set the path to the sing-box binary (called during app setup).
+pub fn set_singbox_bin_path(path: PathBuf) {
+    let _ = SINGBOX_BIN.set(path);
+}
+
+/// Replace CDN_RANGES with a new set.
+pub fn set_cdn_ranges(ranges: Vec<(IpAddr, u8)>) {
+    let _ = CDN_RANGES.set(ranges);
+}
+
+/// Parse a .srs file: call `sing-box rule-set decompile` on the raw file
+/// to convert to JSON, then extract ip_cidr entries.
 pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read CIDR file: {e}"))?;
+    let sb = SINGBOX_BIN.get().ok_or_else(|| "sing-box binary not set".to_string())?;
+
+    let tmp_dir = std::env::temp_dir();
+    let tmp_json = tmp_dir.join("cdn_srs_tmp.json");
+
+    let status = std::process::Command::new(sb)
+        .args(["rule-set", "decompile", "-o", &tmp_json.to_string_lossy(), &path.to_string_lossy()])
+        .output()
+        .map_err(|e| {
+            format!("Failed to run sing-box: {e}")
+        });
+
+    let out = status?;
+    if !out.status.success() {
+        return Err(format!(
+            "sing-box decompile failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+
+    // Read the output JSON file, then clean up
+    let json_text = std::fs::read_to_string(&tmp_json)
+        .map_err(|e| format!("Failed to read sing-box output JSON: {e}"));
+    let _ = std::fs::remove_file(&tmp_json);
+    let json_text = json_text?;
+
+    let json: serde_json::Value = serde_json::from_str(&json_text)
+        .map_err(|e| format!("Failed to parse sing-box output: {e}"))?;
+
     let mut ranges = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((ip_str, prefix_str)) = line.split_once('/') {
-            if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                if let Ok(prefix_len) = prefix_str.parse::<u8>() {
-                    ranges.push((ip, prefix_len));
+    if let Some(rules) = json["rules"].as_array() {
+        for rule in rules {
+            if let Some(cidrs) = rule["ip_cidr"].as_array() {
+                for cidr_val in cidrs {
+                    let cidr = cidr_val.as_str().unwrap_or("");
+                    if let Some((ip_str, prefix_str)) = cidr.split_once('/') {
+                        if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                            if let Ok(plen) = prefix_str.parse::<u8>() {
+                                ranges.push((ip, plen));
+                            }
+                        }
+                    }
                 }
             }
         }
     }
+
     Ok(ranges)
 }
 
-/// Load a CDN CIDR file and set CDN_RANGES.
+/// Load a .srs file and set CDN_RANGES.
 pub fn init_cdn_ranges(path: &Path) -> Result<(), String> {
     let ranges = parse_srs_file(path)?;
     log::info!("Loaded {} CDN CIDR entries from {}", ranges.len(), path.display());
     set_cdn_ranges(ranges);
     Ok(())
-}
-
-/// Lazily-loaded CDN CIDR prefixes from downloaded plain-text rule sets.
-static CDN_RANGES: OnceLock<Vec<(IpAddr, u8)>> = OnceLock::new();
-
-/// Replace CDN_RANGES with a new set.
-pub fn set_cdn_ranges(ranges: Vec<(IpAddr, u8)>) {
-    let _ = CDN_RANGES.set(ranges);
 }
 
 /// Returns true when CDN CIDR ranges are loaded.
@@ -468,7 +506,7 @@ fn sync_meta_file(db_dir: &Path) {
     let mut changed = false;
 
     for name in &["GeoLite2-City.mmdb", "GeoLite2-ASN.mmdb", "ipinfo_lite.mmdb",
-                  "cdn-only_plain.txt", "merged_cidrs.txt"] {
+                  "cdn-only_singbox.srs", "merged.srs"] {
         if meta.databases.contains_key(*name) {
             continue; // already tracked
         }
@@ -774,20 +812,20 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
     }
     let _ = init_ipinfo(&ipinfo_path);
 
-    // ── 5. CDN CIDR ranges from plain-text sources ─────────────────
+    // ── 5. CDN CIDR ranges from sing-box .srs rule sets ────────────
+    //
+    // We download native .srs binary format (compact, sing-box native),
+    // then parse via `sing-box rule-set decompile` → JSON → ip_cidr.
     //
     // Sources:
-    //   A) 123jjck/cdn-ip-ranges – broad CDN coverage (plain TXT, one CIDR/line)
-    //   B) PentiumB/CDN-RuleSet   – MaxMind+IPInfo+RouteViews based CDN ranges (merged.sum)
-    //
-    // Each source is a simple text file with one CIDR per line.
-    // We download/refresh each, parse, and merge into CDN_RANGES.
+    //   A) 123jjck/cdn-ip-ranges – broad CDN coverage (cdn-only_singbox.srs)
+    //   B) PentiumB/CDN-RuleSet   – MaxMind+IPInfo+RouteViews based CDN ranges (merged.srs)
 
     let cdn_sources: &[(&str, &str, &str)] = &[
-        ("123jjck", "cdn-only_plain.txt",
-         "https://raw.githubusercontent.com/123jjck/cdn-ip-ranges/main/cdn-only/cdn-only_plain.txt"),
-        ("PentiumB", "merged_cidrs.txt",
-         "https://github.com/PentiumB/CDN-RuleSet/releases/latest/download/merged.sum"),
+        ("123jjck", "cdn-only_singbox.srs",
+         "https://raw.githubusercontent.com/123jjck/cdn-ip-ranges/main/cdn-only/cdn-only_singbox.srs"),
+        ("PentiumB", "merged.srs",
+         "https://github.com/PentiumB/CDN-RuleSet/releases/latest/download/merged.srs"),
     ];
 
     let mut all_cdn_ranges: Vec<(IpAddr, u8)> = Vec::new();
@@ -800,43 +838,29 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
                 .map(|t| t.elapsed().map(|d| d > Duration::from_secs(24 * 3600)).unwrap_or(true))
                 .unwrap_or(true);
         if needs {
-            log::info!("Downloading CDN CIDR list from {name} ({url}) ...");
+            log::info!("Downloading CDN .srs from {name} ({url}) ...");
             if let Ok(dl) = reqwest::Client::builder()
                 .user_agent("omnitun/1.0")
                 .danger_accept_invalid_certs(true)
                 .timeout(Duration::from_secs(30))
                 .build()
             {
-                match download_single(&dl, &path, url, &format!("CDN {name}")).await {
+                match download_single(&dl, &path, url, &format!("CDN .srs {name}")).await {
                     Ok(bytes) => {
                         update_db_meta(db_dir, filename, None, bytes);
-                        log::info!("CDN {name} downloaded ({bytes} bytes)");
+                        log::info!("CDN .srs {name} downloaded ({bytes} bytes)");
                     }
-                    Err(e) => log::warn!("CDN {name} download: {e}"),
+                    Err(e) => log::warn!("CDN .srs {name} download: {e}"),
                 }
             }
         }
         if path.exists() {
-            match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    let mut count = 0usize;
-                    for line in text.lines() {
-                        let line = line.trim();
-                        if line.is_empty() || line.starts_with('#') {
-                            continue;
-                        }
-                        if let Some((ip_str, prefix_str)) = line.split_once('/') {
-                            if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                                if let Ok(prefix_len) = prefix_str.parse::<u8>() {
-                                    all_cdn_ranges.push((ip, prefix_len));
-                                    count += 1;
-                                }
-                            }
-                        }
-                    }
-                    log::info!("CDN {name}: {count} CIDR entries");
+            match parse_srs_file(&path) {
+                Ok(r) => {
+                    log::info!("CDN .srs {name}: {} CIDR entries", r.len());
+                    all_cdn_ranges.extend(r);
                 }
-                Err(e) => log::warn!("CDN {name} read: {e}"),
+                Err(e) => log::warn!("CDN .srs {name} parse: {e}"),
             }
         }
     }
@@ -1171,11 +1195,11 @@ mod tests {
 
     #[test]
     fn test_is_cdn_ip_loaded() {
-        // Create a plain-text CIDR file with a Cloudflare range
-        let tmp = std::env::temp_dir().join("cdn_test.txt");
-        std::fs::write(&tmp, b"1.1.1.0/24\n").unwrap();
-        assert!(init_cdn_ranges(&tmp).is_ok());
-        let _ = std::fs::remove_file(tmp);
+        // Directly set CDN ranges without needing sing-box binary
+        let ranges = vec![
+            ("1.1.1.0".parse::<IpAddr>().unwrap(), 24u8),
+        ];
+        set_cdn_ranges(ranges);
 
         assert!(is_cdn_ip("1.1.1.1"));
         assert!(!is_cdn_ip("8.8.8.8"));

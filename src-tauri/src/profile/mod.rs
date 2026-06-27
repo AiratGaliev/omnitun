@@ -400,31 +400,17 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
             let _ = crate::vpn::geoip::init_ipinfo(&ipinfo_path);
         }
 
-        // Always try to init CDN ranges from downloaded plain-text CIDR files
+        // Always try to init CDN ranges from downloaded .srs files
         if !crate::vpn::geoip::is_cdn_ready() {
             let mut merged: Vec<(std::net::IpAddr, u8)> = Vec::new();
-            for name in &["cdn-only_plain.txt", "merged_cidrs.txt"] {
+            for name in &["cdn-only_singbox.srs", "merged.srs"] {
                 let path = geo_dir.join(name);
                 if !path.exists() {
                     continue;
                 }
-                if let Ok(text) = std::fs::read_to_string(&path) {
-                    let mut count = 0usize;
-                    for line in text.lines() {
-                        let line = line.trim();
-                        if line.is_empty() || line.starts_with('#') {
-                            continue;
-                        }
-                        if let Some((ip_str, prefix_str)) = line.split_once('/') {
-                            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-                                if let Ok(plen) = prefix_str.parse::<u8>() {
-                                    merged.push((ip, plen));
-                                    count += 1;
-                                }
-                            }
-                        }
-                    }
-                    log::info!("CDN {name}: {count} CIDR entries (lazy)");
+                if let Ok(r) = crate::vpn::geoip::parse_srs_file(&path) {
+                    log::info!("CDN .srs {name}: {} CIDR entries (lazy)", r.len());
+                    merged.extend(r);
                 }
             }
             if !merged.is_empty() {
@@ -579,6 +565,19 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
                 if !info.city.is_empty() {
                     server.city_name = Some(info.city.clone());
                 }
+
+                // CDN detection via entry IP — if the server's resolved IP
+                // belongs to a known CDN provider, mark it as behind CDN.
+                if !server.behind_cdn && crate::vpn::geoip::is_cdn_asn(&server.server) {
+                    server.behind_cdn = true;
+                    log(
+                        app,
+                        &logger,
+                        LogLevel::Info,
+                        LogSource::Subscription,
+                        format!("[CDN] entry IP {} is behind CDN", &server.server),
+                    );
+                }
             }
             // If GeoIP fails, keep flag from emoji extraction or leave unset
 
@@ -679,6 +678,25 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
                 LogSource::Subscription,
                 "Real latency test via sing-box failed — falling back to TCP ping results".into(),
             );
+        }
+    } else if main_vpn_running && !alive.is_empty() {
+        // CDN detection via active proxy (main VPN running, can't start batch test)
+        if let Some(settings) = app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>() {
+            let guard = settings.lock().await;
+            if guard.proxy_port > 0 {
+                if let Some(outlet) = fetch_outlet_ip(guard.proxy_port).await {
+                    let is_cdn = crate::vpn::geoip::is_cdn_asn(&outlet);
+                    if is_cdn {
+                        log(
+                            app,
+                            &logger,
+                            LogLevel::Info,
+                            LogSource::Subscription,
+                            format!("[CDN] outlet IP {} is behind CDN (via active proxy)", outlet),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -982,7 +1000,14 @@ async fn test_servers_via_singbox_parallel(
                 if let Some(ref outlet) = ip {
                     if crate::vpn::geoip::is_cdn_asn(outlet) {
                         srv.behind_cdn = true;
-                        log::info!("[CDN] outlet IP {} → {} is behind CDN", outlet, srv.display_name());
+                        let l = app_clone.state::<std::sync::Mutex<crate::logging::Logger>>();
+                        crate::logging::log(
+                            &app_clone,
+                            &l,
+                            crate::logging::LogLevel::Info,
+                            crate::logging::LogSource::Subscription,
+                            format!("[CDN] outlet IP {} → {} is behind CDN", outlet, srv.display_name()),
+                        );
                     }
                 }
 
