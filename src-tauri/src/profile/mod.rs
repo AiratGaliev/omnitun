@@ -1319,7 +1319,14 @@ async fn test_servers_via_singbox_batch(
         if let Some(ref outlet) = ip {
             if crate::vpn::geoip::is_cdn_asn(outlet) {
                 srv.behind_cdn = true;
-                log::info!("[CDN] outlet IP {} → {} is behind CDN", outlet, srv.display_name());
+                let l = app.state::<std::sync::Mutex<crate::logging::Logger>>();
+                crate::logging::log(
+                    app,
+                    &l,
+                    crate::logging::LogLevel::Info,
+                    crate::logging::LogSource::Subscription,
+                    format!("[CDN] outlet IP {} → {} is behind CDN", outlet, srv.display_name()),
+                );
             }
         }
 
