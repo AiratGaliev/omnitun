@@ -385,12 +385,18 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         url: data.url,
       });
       const profile = mapRustProfile(result);
-      set((state) => ({
-        profiles: [...state.profiles, profile],
-        servers: [...state.servers, ...profile.servers],
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-        activeServer: state.activeServer ?? profile.servers[0] ?? null,
-      }));
+      set((state) => {
+        const allServers = [...state.servers, ...profile.servers];
+        const autoSelect = state.settings.autoConnectFastest;
+        const newActive = autoSelect
+          ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
+          : (state.activeServer ?? allServers[0] ?? null);
+        return {
+          profiles: [...state.profiles, profile],
+          servers: allServers,
+          activeServer: newActive,
+        };
+      });
       get().addLog(
         `Profile "${data.name}" added (${String(profile.servers.length)} server(s))`,
         'success',
@@ -416,11 +422,15 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         const removed = state.profiles.find((p) => p.id === id);
         const removedIds = new Set(removed?.servers.map((s) => s.id) ?? []);
         const remaining = state.servers.filter((s) => !removedIds.has(s.id));
+        const wasActiveRemoved = removedIds.has(state.activeServer?.id ?? '');
+        const autoSelect = state.settings.autoConnectFastest;
         return {
           profiles: state.profiles.filter((p) => p.id !== id),
           servers: remaining,
-          activeServer: removedIds.has(state.activeServer?.id ?? '')
-            ? (remaining[0] ?? null)
+          activeServer: wasActiveRemoved
+            ? (autoSelect
+                ? remaining.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best), remaining[0])
+                : (remaining[0] ?? null))
             : state.activeServer,
         };
       });
@@ -446,11 +456,14 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         const oldActiveName = state.activeServer?.name ?? state.activeServer?.server ?? 'none';
         const newActiveServer = autoSelect
           ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
-          : state.activeServer;
-        if (autoSelect && state.activeServer && state.activeServer.id !== newActiveServer?.id) {
+          : (activeServerStillExists ? state.activeServer : (allServers[0] ?? null));
+        if (state.activeServer && state.activeServer.id !== newActiveServer?.id) {
+          const reason = autoSelect
+            ? (!activeServerStillExists ? 'ID not found after refresh' : 'autoConnectFastest')
+            : 'current server was removed';
           const newName = newActiveServer?.name ?? newActiveServer?.server ?? 'none';
           get().addLog(
-            `Active server changed: ${oldActiveName} → ${newName} (reason: ${!activeServerStillExists ? 'ID not found after refresh' : 'autoConnectFastest'})`,
+            `Active server changed: ${oldActiveName} → ${newName} (reason: ${reason})`,
             'warning',
             'system',
           );
@@ -488,13 +501,15 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       const allServers = profiles.flatMap((p) => p.servers);
       const state = get();
       const oldActive = state.activeServer;
-      // Always pick the fastest server from the current filtered list.
-      // This ensures that when filters change (e.g. removing country filters),
-      // newly available faster servers are auto-selected.
-      const newActive: Server | null =
-        allServers.length > 0
+      const autoSelect = state.settings.autoConnectFastest;
+      // When autoConnectFastest is enabled, pick the fastest server so
+      // the initial connection uses the best node. When disabled, keep
+      // the existing selection (fall back to first available if removed).
+      const newActive: Server | null = autoSelect
+        ? allServers.length > 0
           ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
-          : null;
+          : null
+        : allServers.find((s) => s.id === oldActive?.id) ?? allServers[0] ?? null;
       set({
         profiles,
         servers: allServers,
@@ -503,8 +518,9 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         hasOnboarded: profiles.length > 0 || get().hasOnboarded,
       });
       if (newActive?.id !== oldActive?.id) {
+        const reason = autoSelect ? 'fastest' : 'previous was removed';
         get().addLog(
-          `[loadProfiles] activeServer changed: ${oldActive?.name ?? 'null'} → ${newActive?.name ?? 'null'} (fastest)`,
+          `[loadProfiles] activeServer changed: ${oldActive?.name ?? 'null'} → ${newActive?.name ?? 'null'} (${reason})`,
           'info',
           'system',
         );
@@ -682,6 +698,11 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
           routingMode: settings.routingMode,
           proxyPort: settings.proxyPort,
         });
+
+        // Force Selector to user's chosen server (sing-box Selector may
+        // auto-pick the fastest if not explicitly set via Clash API).
+        await new Promise((r) => setTimeout(r, 1000));
+        await invoke('switch_proxy', { proxyTag: 'proxy-0' }).catch(() => undefined);
 
         // Verify IP changed through VPN — poll outlet IP until different from real IP.
         // Use increasing delay (2s, 3s, 4s...) to avoid hammering IP check services.

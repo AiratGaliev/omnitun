@@ -947,11 +947,13 @@ pub fn run() {
             outlet_ip,
             speed_test,
             check_proxy_health,
+            switch_proxy,
             get_connections,
             import_subscription_content,
             import_subscription_file,
             initialize_app,
             download_ipinfo_db,
+            get_geoip_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1192,6 +1194,31 @@ async fn check_proxy_health() -> Result<bool, String> {
     match client.get(&delay_url).send().await {
         Ok(resp) if resp.status().is_success() => Ok(true),
         _ => Ok(false),
+    }
+}
+
+/// Switch the Selector proxy to the given outbound tag.
+/// Called by health check when the current server is dead.
+#[tauri::command]
+async fn switch_proxy(proxy_tag: String) -> Result<(), String> {
+    let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    if stats_port == 0 {
+        return Err("VPN not connected".into());
+    }
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let url = format!("http://127.0.0.1:{stats_port}/proxies/proxy");
+    let body = serde_json::json!({ "name": proxy_tag });
+
+    match client.put(&url).json(&body).send().await {
+        Ok(resp) if resp.status().is_success() => Ok(()),
+        Ok(resp) => Err(format!("Clash API returned HTTP {}", resp.status().as_u16())),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -1569,6 +1596,19 @@ async fn download_ipinfo_db(app: tauri::AppHandle) -> Result<String, String> {
             Err(e)
         }
     }
+}
+
+/// Return download metadata for all GeoIP databases.
+///
+/// Used by the frontend to display last-updated timestamps.
+#[tauri::command]
+async fn get_geoip_status(app: tauri::AppHandle) -> Result<crate::vpn::geoip::GeoIpMeta, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {e}"))?;
+    let geo_dir = data_dir.join("geoip");
+    Ok(crate::vpn::geoip::get_geoip_meta(&geo_dir))
 }
 
 /// Check if a process is alive by PID.

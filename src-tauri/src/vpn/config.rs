@@ -55,22 +55,20 @@ pub fn generate_config(
 
     if let Some(outbounds) = config["outbounds"].as_array_mut() {
         if proxy_outbounds.len() > 1 {
-            // Create urltest group for auto-selection
+            // Create Selector — keeps user's chosen server active, but allows
+            // Clash API to switch to alternatives (health check detects death).
             let tags: Vec<String> = (0..proxy_outbounds.len())
                 .map(|i| format!("proxy-{i}"))
                 .collect();
-            let urltest = json!({
-                "type": "urltest",
+            let selector = json!({
+                "type": "selector",
                 "tag": "proxy",
-                "outbounds": tags.clone(),
-                "url": "http://cp.cloudflare.com/generate_204",
-                "interval": "5m",
-                "tolerance": 50
+                "outbounds": tags.clone()
             });
             for ob in proxy_outbounds {
                 outbounds.push(ob);
             }
-            outbounds.push(urltest);
+            outbounds.push(selector);
         } else {
             // Single server — use it as the proxy outbound
             outbounds.push(proxy_outbounds.into_iter().next().unwrap());

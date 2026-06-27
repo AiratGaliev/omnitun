@@ -60,9 +60,9 @@ export default function App() {
           'system',
         );
       }),
-      fetchRealIp().catch(() => undefined),
-    ]).then(() => {
+    ]).then(async () => {
       setIsInitialized(true);
+      await fetchRealIp().catch(() => undefined);
       const { profiles: loadedProfiles, settings: loadedSettings } = useVPNStore.getState();
       addLog(
         `App initialized: ${String(loadedProfiles.length)} profile(s), language: ${loadedSettings.language}`,

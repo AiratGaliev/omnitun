@@ -171,6 +171,7 @@ beforeEach(() => {
       enableMux: false,
       minimizeToTray: false,
       blockCdnNodes: false,
+      ipinfoToken: '',
     },
   });
 });
@@ -476,8 +477,8 @@ describe('store — profile management', () => {
     const state = useVPNStore.getState();
     expect(state.profiles).toHaveLength(1);
     expect(state.profiles[0].servers).toHaveLength(1);
-    // activeServer stays at old one because autoConnectFastest=false
-    expect(state.activeServer?.id).toBe('srv-1');
+    // activeServer falls to first available when current is removed (even with autoConnectFastest=false)
+    expect(state.activeServer?.id).toBe('srv-1-new');
   });
 
   it('refreshProfile with autoConnectFastest selects fastest server', async () => {
@@ -621,6 +622,7 @@ describe('store — toggleConnection', () => {
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useVPNStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
+    mockInvoke.mockResolvedValueOnce(undefined); // switch_proxy
     mockInvoke.mockResolvedValueOnce({
       server: '5.6.7.8',
       flag: 'PL',
@@ -660,6 +662,7 @@ describe('store — toggleConnection', () => {
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useVPNStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
+    mockInvoke.mockResolvedValueOnce(undefined); // switch_proxy
     mockInvoke.mockResolvedValueOnce({
       server: '5.6.7.8',
       flag: 'PL',
@@ -685,6 +688,7 @@ describe('store — toggleConnection', () => {
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useVPNStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
+    mockInvoke.mockResolvedValueOnce(undefined); // switch_proxy
     mockInvoke.mockResolvedValueOnce({
       server: '5.6.7.8',
       flag: 'PL',

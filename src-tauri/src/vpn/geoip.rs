@@ -15,9 +15,68 @@ static IPINFO_LITE_READER: OnceLock<maxminddb::Reader<Vec<u8>>> = OnceLock::new(
 /// Minimum interval between ipinfo.io database downloads.
 ///
 /// ipinfo.io rate-limits downloads to 10 per day per IP.
-/// We use 4 hours (14 400 s) → max 6 downloads/day, well under the limit
+/// We use 4 hours (14400 s) → max 6 downloads/day, well under the limit
 /// with margin for retries and app restarts.
 const IPINFO_REFRESH_INTERVAL: Duration = Duration::from_secs(4 * 3600);
+
+/// Minimum interval between GitHub release API checks for MaxMind DB updates.
+/// 1 hour — well under GitHub's 60 req/h unauthenticated limit.
+#[allow(dead_code)]
+const GITHUB_RELEASE_CHECK_INTERVAL: Duration = Duration::from_secs(3600);
+
+/// Minimum interval between MaxMind DB re-downloads when a new release is
+/// available. Prevents re-downloading on every startup if the same release
+/// tag is already cached.
+#[allow(dead_code)]
+const MAXMIND_REFRESH_INTERVAL: Duration = Duration::from_secs(12 * 3600); // 12 h
+
+// ── GeoIP download metadata ────────────────────────────────────────────────
+
+/// Per-database download metadata stored in `geoip_meta.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbMeta {
+    /// ISO-8601 timestamp of last successful download.
+    pub last_downloaded_at: String,
+    /// Release tag from upstream (GitHub tag for MaxMind, empty for ipinfo).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_tag: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+}
+
+/// Download metadata for all GeoIP databases.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GeoIpMeta {
+    #[serde(default)]
+    pub databases: std::collections::HashMap<String, DbMeta>,
+    /// ISO-8601 timestamp of last GitHub release API check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_release_check: Option<String>,
+}
+
+/// Load geoip_meta.json from the geoip directory.
+pub fn load_meta(db_dir: &Path) -> GeoIpMeta {
+    let path = db_dir.join("geoip_meta.json");
+    match std::fs::read_to_string(&path) {
+        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Err(_) => GeoIpMeta::default(),
+    }
+}
+
+/// Save geoip_meta.json to the geoip directory.
+pub fn save_meta(db_dir: &Path, meta: &GeoIpMeta) {
+    let path = db_dir.join("geoip_meta.json");
+    if let Ok(json) = serde_json::to_string_pretty(meta) {
+        let _ = std::fs::write(&path, &json);
+    }
+}
+
+/// Return the download metadata (for frontend display).
+pub fn get_geoip_meta(db_dir: &Path) -> GeoIpMeta {
+    load_meta(db_dir)
+}
+
+// ── Rich result from GeoIP lookup ──────────────────────────────────────────
 
 /// Rich result from GeoIP lookup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +409,75 @@ pub async fn resolve_hostname(host: &str) -> Option<GeoIpResult> {
 
 // ── Database download ──────────────────────────────────────────────────────
 
+/// Update `geoip_meta.json` after a successful database download.
+fn update_db_meta(db_dir: &Path, name: &str, release_tag: Option<&str>, bytes: u64) {
+    let mut meta = load_meta(db_dir);
+    let now = chrono::Utc::now().to_rfc3339();
+    meta.databases.insert(
+        name.to_string(),
+        DbMeta {
+            last_downloaded_at: now,
+            release_tag: release_tag.map(|s| s.to_string()),
+            bytes: Some(bytes),
+        },
+    );
+    save_meta(db_dir, &meta);
+}
+
+/// Ensure `geoip_meta.json` exists by recording info for any MMDB files
+/// already on disk. Should be called at the end of `ensure_downloaded`.
+fn sync_meta_file(db_dir: &Path) {
+    let mut meta = load_meta(db_dir);
+    let mut changed = false;
+
+    for name in &["GeoLite2-City.mmdb", "GeoLite2-ASN.mmdb", "ipinfo_lite.mmdb"] {
+        if meta.databases.contains_key(*name) {
+            continue; // already tracked
+        }
+        let path = db_dir.join(name);
+        if let Ok(meta_info) = std::fs::metadata(&path) {
+            if let Ok(modified) = meta_info.modified() {
+                if let Ok(dur) = SystemTime::now().duration_since(modified) {
+                    let iso = chrono::DateTime::<chrono::Utc>::from(
+                        SystemTime::now() - dur,
+                    )
+                    .to_rfc3339();
+                    meta.databases.insert(
+                        name.to_string(),
+                        DbMeta {
+                            last_downloaded_at: iso,
+                            release_tag: None,
+                            bytes: Some(meta_info.len()),
+                        },
+                    );
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if changed {
+        save_meta(db_dir, &meta);
+    }
+}
+
+/// Check whether a DB entry in meta is older than the given interval.
+fn is_older_than(meta: &GeoIpMeta, name: &str, interval: Duration) -> bool {
+    match meta.databases.get(name) {
+        Some(entry) => {
+            if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&entry.last_downloaded_at) {
+                SystemTime::now()
+                    .duration_since(t.into())
+                    .map(|d| d >= interval)
+                    .unwrap_or(true)
+            } else {
+                true
+            }
+        }
+        None => true,
+    }
+}
+
 /// Check whether `ipinfo_lite.mmdb` should be (re-)downloaded.
 ///
 /// Downloads if:
@@ -423,6 +551,237 @@ async fn validate_ipinfo_token(client: &reqwest::Client, token: &str) -> Result<
     }
 }
 
+/// Fetch the latest release tag from P3TERX/GeoLite.mmdb GitHub releases.
+/// Caches result in `geoip_meta.json` (1h rate limit on API).
+async fn check_latest_release(client: &reqwest::Client, db_dir: &Path) -> Option<String> {
+    let mut meta = load_meta(db_dir);
+
+    // Rate-limit GitHub API to 1 req/h (60 req/h unauthenticated limit)
+    let should_fetch = match &meta.last_release_check {
+        Some(ts) => {
+            if let Ok(t) = chrono::DateTime::parse_from_rfc3339(ts) {
+                let elapsed = SystemTime::now()
+                    .duration_since(t.into())
+                    .unwrap_or(Duration::MAX);
+                elapsed >= GITHUB_RELEASE_CHECK_INTERVAL
+            } else {
+                true
+            }
+        }
+        None => true,
+    };
+
+    if !should_fetch {
+        // Use cached tag from meta
+        for name in &["GeoLite2-City.mmdb", "GeoLite2-ASN.mmdb"] {
+            if let Some(entry) = meta.databases.get(*name) {
+                if let Some(ref tag) = entry.release_tag {
+                    return Some(tag.clone());
+                }
+            }
+        }
+        return None;
+    }
+
+    let url = "https://api.github.com/repos/P3TERX/GeoLite.mmdb/releases/latest";
+    let resp = client.get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        log::warn!("GitHub API returned HTTP {} for release check", resp.status().as_u16());
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let tag = body.get("tag_name")?.as_str()?.to_string();
+    log::info!("GitHub API: latest P3TERX/GeoLite.mmdb release is {tag}");
+
+    let now = chrono::Utc::now().to_rfc3339();
+    meta.last_release_check = Some(now);
+    for name in &["GeoLite2-City.mmdb", "GeoLite2-ASN.mmdb"] {
+        if let Some(entry) = meta.databases.get_mut(*name) {
+            entry.release_tag = Some(tag.clone());
+        }
+    }
+    save_meta(db_dir, &meta);
+
+    Some(tag)
+}
+
+/// Unified check for all GeoIP database freshness.
+///
+/// Called from:
+///   - `initialize_app` (app startup)
+///   - `process_servers` (lazy init before profile processing)
+///
+/// Respects all rate limits:
+///   - ipinfo.io: max 10/day → 4h between downloads
+///   - GitHub API: max 60 req/h → 1h between release checks
+///   - MaxMind re-downloads: max 2/day → 12h between same-tag re-downloads
+///
+/// Non-blocking: all errors are logged as warnings, never returned.
+pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
+    let _ = std::fs::create_dir_all(db_dir);
+
+    let city_path = db_dir.join("GeoLite2-City.mmdb");
+    let asn_path = db_dir.join("GeoLite2-ASN.mmdb");
+    let ipinfo_path = db_dir.join("ipinfo_lite.mmdb");
+
+    let client = match reqwest::Client::builder()
+        .user_agent("omnitun/1.0")
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("Failed to build HTTP client for GeoIP check: {e}");
+            return;
+        }
+    };
+
+    // ── 1. MaxMind: check GitHub for latest release ────────────────────
+    let latest_tag = check_latest_release(&client, db_dir).await;
+    if let Some(ref tag) = latest_tag {
+        log::info!("Latest P3TERX/GeoLite.mmdb release: {tag}");
+    } else {
+        log::info!("P3TERX/GeoLite.mmdb release check skipped (cached or unavailable)");
+    }
+
+    // ── 2. MaxMind City ────────────────────────────────────────────────
+    let meta = load_meta(db_dir);
+    let city_stored_tag = meta
+        .databases
+        .get("GeoLite2-City.mmdb")
+        .and_then(|d| d.release_tag.as_deref());
+
+    let city_needs = !city_path.exists()
+        || (latest_tag.is_some()
+            && city_stored_tag != latest_tag.as_deref()
+            && is_older_than(&meta, "GeoLite2-City.mmdb", MAXMIND_REFRESH_INTERVAL));
+    drop(meta);
+
+    if city_needs {
+        let urls = [
+            "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb",
+            "https://cdn.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-City.mmdb",
+        ];
+        if let Ok(dl) = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(30))
+            .build()
+        {
+            match download_db_geoip(&dl, &city_path, &urls, "City").await {
+                Ok(bytes) => update_db_meta(db_dir, "GeoLite2-City.mmdb", latest_tag.as_deref(), bytes),
+                Err(e) => log::warn!("City DB download: {e}"),
+            }
+        }
+    } else if city_path.exists() {
+        log::info!("GeoLite2-City.mmdb is up-to-date");
+    }
+    let _ = init_city(&city_path);
+
+    // ── 3. MaxMind ASN ─────────────────────────────────────────────────
+    let meta = load_meta(db_dir);
+    let asn_stored_tag = meta
+        .databases
+        .get("GeoLite2-ASN.mmdb")
+        .and_then(|d| d.release_tag.as_deref());
+
+    let asn_needs = !asn_path.exists()
+        || (latest_tag.is_some()
+            && asn_stored_tag != latest_tag.as_deref()
+            && is_older_than(&meta, "GeoLite2-ASN.mmdb", MAXMIND_REFRESH_INTERVAL));
+    drop(meta);
+
+    if asn_needs {
+        let urls = [
+            "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-ASN.mmdb",
+            "https://cdn.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-ASN.mmdb",
+        ];
+        if let Ok(dl) = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(30))
+            .build()
+        {
+            match download_db_geoip(&dl, &asn_path, &urls, "ASN").await {
+                Ok(bytes) => update_db_meta(db_dir, "GeoLite2-ASN.mmdb", latest_tag.as_deref(), bytes),
+                Err(e) => log::warn!("ASN DB download: {e}"),
+            }
+        }
+    } else if asn_path.exists() {
+        log::info!("GeoLite2-ASN.mmdb is up-to-date");
+    }
+    let _ = init_asn(&asn_path);
+
+    // ── 4. ipinfo.io Lite ──────────────────────────────────────────────
+    if !ipinfo_token.is_empty() && should_download_ipinfo(&ipinfo_path) {
+        let url = format!(
+            "https://ipinfo.io/data/ipinfo_lite.mmdb?token={}",
+            ipinfo_token
+        );
+        log::info!("Downloading ipinfo Lite database from ipinfo.io ...");
+        if let Ok(dl) = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .timeout(Duration::from_secs(30))
+            .build()
+        {
+            match download_single(&dl, &ipinfo_path, &url, "ipinfo Lite").await {
+                Ok(bytes) => update_db_meta(db_dir, "ipinfo_lite.mmdb", None, bytes),
+                Err(e) => {
+                    log::warn!("ipinfo Lite download: {e}");
+                    if let Err(ve) = validate_ipinfo_token(&dl, ipinfo_token).await {
+                        log::warn!("{ve}");
+                    }
+                }
+            }
+        }
+    }
+    let _ = init_ipinfo(&ipinfo_path);
+
+    // ── 5. Ensure meta file exists (for existing DBs not yet tracked) ──
+    sync_meta_file(db_dir);
+}
+
+/// Download from mirrors, return bytes.
+async fn download_db_geoip(
+    client: &reqwest::Client,
+    target_path: &Path,
+    urls: &[&str],
+    label: &str,
+) -> Result<u64, String> {
+    let mut last_err = String::new();
+    for url in urls {
+        log::info!("Downloading GeoIP {} database from {} ...", label, url);
+        match client.get(*url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.as_u16() >= 400 {
+                    let body = resp.text().await.unwrap_or_default();
+                    last_err = format!("HTTP {} — {}", status.as_u16(),
+                        body.chars().take(200).collect::<String>().trim());
+                    continue;
+                }
+                let bytes = match resp.bytes().await {
+                    Ok(b) => b,
+                    Err(e) => { last_err = format!("{e}"); continue; }
+                };
+                let len = bytes.len() as u64;
+                if len < 100_000 {
+                    last_err = format!("response too small ({len} bytes) — likely an error page");
+                    continue;
+                }
+                let tmp = target_path.with_extension("mmdb.tmp");
+                std::fs::write(&tmp, &bytes)
+                    .map_err(|e| format!("Failed to write {label} database: {e}"))?;
+                std::fs::rename(&tmp, target_path)
+                    .map_err(|e| format!("Failed to finalize {label} database: {e}"))?;
+                log::info!("GeoIP {} database downloaded ({len} bytes)", label);
+                return Ok(len);
+            }
+            Err(e) => last_err = format!("{e}"),
+        }
+    }
+    Err(format!("All GeoIP {} mirrors failed: {}", label, last_err))
+}
+
 /// Download only the ipinfo.io Lite database.
 ///
 /// Validates the token first, then respects the rate-limit
@@ -464,7 +823,8 @@ pub async fn download_ipinfo_db(db_dir: &Path, ipinfo_token: &str) -> Result<boo
             .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
         log::info!("Downloading ipinfo Lite database from ipinfo.io ...");
-        download_single(&dl_client, &ipinfo_path, &url, "ipinfo Lite").await?;
+        let bytes = download_single(&dl_client, &ipinfo_path, &url, "ipinfo Lite").await?;
+        update_db_meta(db_dir, "ipinfo_lite.mmdb", None, bytes);
         let _ = init_ipinfo(&ipinfo_path);
         Ok(true)
     } else {
@@ -474,76 +834,21 @@ pub async fn download_ipinfo_db(db_dir: &Path, ipinfo_token: &str) -> Result<boo
     }
 }
 
-/// Download GeoIP databases (MaxMind City + ASN + ipinfo Lite) from remote sources.
-///
-/// * `db_dir` — directory to store `.mmdb` files
-/// * `ipinfo_token` — ipinfo.io API token; when non-empty, also downloads
-///   `ipinfo_lite.mmdb` (country + ASN) from ipinfo.io
+/// Thin wrapper: check freshness + init all readers.
+/// Called during startup and lazy init before profile processing.
 pub async fn ensure_downloaded(db_dir: &Path, ipinfo_token: &str) -> Result<(), String> {
-    std::fs::create_dir_all(db_dir)
-        .map_err(|e| format!("Failed to create geoip directory: {e}"))?;
-
-    let city_path = db_dir.join("GeoLite2-City.mmdb");
-    let asn_path = db_dir.join("GeoLite2-ASN.mmdb");
-    let ipinfo_path = db_dir.join("ipinfo_lite.mmdb");
-
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
-
-    // Download MaxMind City database (if not exists)
-    if !city_path.exists() {
-        let city_urls = [
-            "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb",
-            "https://cdn.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-City.mmdb",
-        ];
-        download_db(&client, &city_path, &city_urls, "City").await?;
-    }
-    let _ = init_city(&city_path);
-
-    // Download MaxMind ASN database (if not exists)
-    if !asn_path.exists() {
-        let asn_urls = [
-            "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-ASN.mmdb",
-            "https://cdn.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-ASN.mmdb",
-        ];
-        download_db(&client, &asn_path, &asn_urls, "ASN").await?;
-    }
-    let _ = init_asn(&asn_path);
-
-    // Download ipinfo.io Lite database (with rate-limit + validation)
-    if !ipinfo_token.is_empty() && should_download_ipinfo(&ipinfo_path) {
-        let ipinfo_url = format!(
-            "https://ipinfo.io/data/ipinfo_lite.mmdb?token={}",
-            ipinfo_token
-        );
-        log::info!("Downloading ipinfo Lite database from ipinfo.io ...");
-        // Non-blocking: ipinfo download failure (invalid token, network) is
-        // just a warning — MaxMind DBs are still loaded and the app works.
-        // User can retry via Settings → General → IPinfo API Token.
-        if let Err(e) = download_single(&client, &ipinfo_path, &ipinfo_url, "ipinfo Lite").await
-        {
-            log::warn!("Failed to download ipinfo Lite database: {e}");
-            // Attempt to validate the token to give a more specific warning
-            if let Err(ve) = validate_ipinfo_token(&client, ipinfo_token).await {
-                log::warn!("{ve}");
-            }
-        }
-    }
-    let _ = init_ipinfo(&ipinfo_path);
-
+    ensure_databases_fresh(db_dir, ipinfo_token).await;
     Ok(())
 }
 
 /// Download a single URL (with redirect-follow) to a file.
+/// Returns the number of bytes downloaded.
 async fn download_single(
     client: &reqwest::Client,
     target_path: &Path,
     url: &str,
     label: &str,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     match client.get(url).send().await {
         Ok(resp) => {
             let status = resp.status();
@@ -559,10 +864,10 @@ async fn download_single(
                 .bytes()
                 .await
                 .map_err(|e| format!("Failed to read {label} response: {e}"))?;
-            if bytes.len() < 100_000 {
+            let len = bytes.len() as u64;
+            if len < 100_000 {
                 return Err(format!(
-                    "{label} response too small ({} bytes) — likely an error page",
-                    bytes.len()
+                    "{label} response too small ({len} bytes) — likely an error page"
                 ));
             }
             let tmp_path = target_path.with_extension("mmdb.tmp");
@@ -570,24 +875,36 @@ async fn download_single(
                 .map_err(|e| format!("Failed to write {label} database: {e}"))?;
             std::fs::rename(&tmp_path, target_path)
                 .map_err(|e| format!("Failed to finalize {label} database: {e}"))?;
-            log::info!("{label} database downloaded ({} bytes)", bytes.len());
-            Ok(())
+            log::info!("{label} database downloaded ({len} bytes)");
+            Ok(len)
         }
         Err(e) => Err(format!("Failed to download {label} database: {e}")),
     }
 }
-
+/// Download a database from multiple mirror URLs (tries each in order).
+/// Returns the number of bytes downloaded.
+#[allow(dead_code)]
 async fn download_db(
     client: &reqwest::Client,
     target_path: &Path,
     urls: &[&str],
     label: &str,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let mut last_err = String::new();
     for url in urls {
         log::info!("Downloading GeoIP {} database from {} ...", label, url);
         match client.get(*url).send().await {
             Ok(resp) => {
+                let status = resp.status();
+                if status.as_u16() >= 400 {
+                    let body = resp.text().await.unwrap_or_default();
+                    last_err = format!(
+                        "HTTP {} — {}",
+                        status.as_u16(),
+                        body.chars().take(200).collect::<String>().trim()
+                    );
+                    continue;
+                }
                 let bytes = match resp.bytes().await {
                     Ok(b) => b,
                     Err(e) => {
@@ -595,10 +912,10 @@ async fn download_db(
                         continue;
                     }
                 };
-                if bytes.len() < 100_000 {
+                let len = bytes.len() as u64;
+                if len < 100_000 {
                     last_err = format!(
-                        "response too small ({} bytes) — likely an error page",
-                        bytes.len()
+                        "response too small ({len} bytes) — likely an error page"
                     );
                     continue;
                 }
@@ -608,11 +925,10 @@ async fn download_db(
                 std::fs::rename(&tmp_path, target_path)
                     .map_err(|e| format!("Failed to finalize GeoIP {} database: {e}", label))?;
                 log::info!(
-                    "GeoIP {} database downloaded ({} bytes)",
-                    label,
-                    bytes.len()
+                    "GeoIP {} database downloaded ({len} bytes)",
+                    label
                 );
-                return Ok(());
+                return Ok(len);
             }
             Err(e) => {
                 last_err = format!("{e}");

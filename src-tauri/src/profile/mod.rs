@@ -89,6 +89,7 @@ impl ProfileManager {
             return;
         }
         let mut changed = false;
+        let mut enriched_count = 0u32;
         for profile in &mut self.profiles {
             for server in &mut profile.servers {
                 if server.country_name.is_some() && server.city_name.is_some() {
@@ -101,12 +102,14 @@ impl ProfileManager {
                         server.city_name = Some(info.city.clone());
                     }
                     changed = true;
+                    enriched_count += 1;
                 }
             }
         }
         if changed {
             let _ = self.save();
         }
+        log::info!("GeoIP enrichment: {enriched_count} server(s) updated");
     }
 
     pub fn save(&self) -> Result<(), VpnError> {
@@ -1807,11 +1810,11 @@ mod extra_tests {
         let cfg: serde_json::Value = serde_json::from_str(&cfg_str).unwrap();
         let obs = cfg["outbounds"].as_array().unwrap();
 
-        // Find urltest group
-        let has_urltest = obs.iter().any(|o| o["type"] == "urltest");
+        // Find selector group
+        let has_selector = obs.iter().any(|o| o["type"] == "selector");
         assert!(
-            has_urltest,
-            "With autoConnectFastest=true, expected urltest outbound group"
+            has_selector,
+            "With autoConnectFastest=true, expected selector outbound group"
         );
 
         let _ = std::fs::remove_dir_all(&cache);
