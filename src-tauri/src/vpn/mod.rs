@@ -103,7 +103,7 @@ pub struct ServerProfile {
     pub behind_cdn: bool,
     /// Exit IP geoip — last known exit IP address when connected through this server.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub exit_ip: Option<String>,
+    pub exit_server: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_country_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

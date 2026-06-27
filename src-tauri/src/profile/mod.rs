@@ -925,14 +925,16 @@ async fn test_servers_via_singbox_parallel(
                     }
                 }
 
-                // Outlet IP check: only enrich GeoIP data, never clear ping_ms.
-                // Latency test via Clash API delay endpoint is the primary filter.
+                // Outlet IP check: store exit geoip in exit fields (not server location).
+                // The server's own flag/country_name/city_name are the physical server
+                // location (from TCP ping geoip); the exit IP location goes into exit_*.
                 if let Some(ip) = ip {
                     if !real_ip.is_empty() && ip != real_ip {
                         if let Some(info) = crate::vpn::geoip::resolve_hostname(&ip).await {
-                            srv.flag = Some(info.country_code.clone());
-                            srv.country_name = Some(info.country_name.clone());
-                            srv.city_name = if info.city.is_empty() {
+                            srv.exit_server = Some(ip.clone());
+                            srv.exit_flag = Some(info.country_code.clone());
+                            srv.exit_country_name = Some(info.country_name.clone());
+                            srv.exit_city_name = if info.city.is_empty() {
                                 None
                             } else {
                                 Some(info.city.clone())
@@ -1234,13 +1236,14 @@ async fn test_servers_via_singbox_batch(
             }
         }
 
-        // Only update if outlet IP differs from local real IP
+        // Only update if outlet IP differs from local real IP — store in exit_* fields.
         if let Some(ip) = ip {
             if !real_ip.is_empty() && ip != real_ip {
                 if let Some(info) = crate::vpn::geoip::resolve_hostname(&ip).await {
-                    srv.flag = Some(info.country_code.clone());
-                    srv.country_name = Some(info.country_name.clone());
-                    srv.city_name = if info.city.is_empty() {
+                    srv.exit_server = Some(ip.clone());
+                    srv.exit_flag = Some(info.country_code.clone());
+                    srv.exit_country_name = Some(info.country_name.clone());
+                    srv.exit_city_name = if info.city.is_empty() {
                         None
                     } else {
                         Some(info.city.clone())

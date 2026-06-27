@@ -985,6 +985,7 @@ pub struct ExitIpInfo {
     pub server: String,
     pub flag: String,
     pub country_name: String,
+    pub city_name: String,
 }
 
 #[tauri::command]
@@ -1045,11 +1046,13 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
             server: ip.clone(),
             flag: geo.country_code.clone(),
             country_name: geo.country_name.clone(),
+            city_name: geo.city.clone(),
         },
         None => ExitIpInfo {
             server: ip.clone(),
             flag: String::new(),
             country_name: String::new(),
+            city_name: String::new(),
         },
     };
 
@@ -1072,9 +1075,15 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
                         } else {
                             Some(info.country_name.clone())
                         };
-                        server.exit_ip = Some(info.server.clone());
+                        let city = if info.city_name.is_empty() {
+                            None
+                        } else {
+                            Some(info.city_name.clone())
+                        };
+                        server.exit_server = Some(info.server.clone());
                         server.exit_flag = cc;
                         server.exit_country_name = cn;
+                        server.exit_city_name = city;
                         saved = true;
                         break;
                     }
