@@ -29,9 +29,9 @@
 // Other than these targeted fixes, the file is unchanged from the original
 // codebase.
 
-import { create } from 'zustand';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import {create} from 'zustand';
+import {invoke} from '@tauri-apps/api/core';
+import {listen} from '@tauri-apps/api/event';
 import type {
   ConnectionInfo,
   ConnectionStatus,
@@ -485,14 +485,13 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       const allServers = profiles.flatMap((p) => p.servers);
       const state = get();
       const oldActive = state.activeServer;
-      const activeServerStillExists = allServers.some((s) => s.id === state.activeServer?.id);
-      // On first load (no active server): always pick fastest.
-      // On subsequent loads: only auto-select when smart selection is enabled.
-      const autoSelect =
-        !state.activeServer || (state.settings.autoConnectFastest && !activeServerStillExists);
-      const newActive = autoSelect
-        ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
-        : state.activeServer;
+      // Always pick the fastest server from the current filtered list.
+      // This ensures that when filters change (e.g. removing country filters),
+      // newly available faster servers are auto-selected.
+      const newActive: Server | null =
+        allServers.length > 0
+          ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
+          : null;
       set({
         profiles,
         servers: allServers,
@@ -500,7 +499,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       });
       if (newActive?.id !== oldActive?.id) {
         get().addLog(
-          `[loadProfiles] activeServer changed: ${oldActive?.name ?? 'null'} → ${newActive?.name ?? 'null'} (autoSelect=${String(autoSelect)})`,
+          `[loadProfiles] activeServer changed: ${oldActive?.name ?? 'null'} → ${newActive?.name ?? 'null'} (fastest)`,
           'info',
           'system',
         );

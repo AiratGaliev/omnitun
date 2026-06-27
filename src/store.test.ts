@@ -517,21 +517,18 @@ describe('store — profile management', () => {
     expect(state.activeServer?.id).toBe('srv-1');
   });
 
-  it('loadProfiles preserves activeServer on subsequent loads', async () => {
+  it('loadProfiles always selects fastest server', async () => {
     mockInvoke.mockResolvedValueOnce([makeRustProfile()]);
     await useVPNStore.getState().loadProfiles();
     expect(useVPNStore.getState().activeServer?.id).toBe('srv-1');
 
     // Set manual server
-    useVPNStore.getState().updateSettings({ autoConnectFastest: false });
-    useVPNStore
-      .getState()
-      .setActiveServer({ id: 'srv-2', name: 'Manual', server: '10.0.0.2', port: 8080 });
+    useVPNStore.getState().setActiveServer({ id: 'srv-2', name: 'Manual', server: '10.0.0.2', port: 8080 });
 
     mockInvoke.mockResolvedValueOnce([makeRustProfile()]);
     await useVPNStore.getState().loadProfiles();
-    // With autoConnectFastest=false, active server should remain
-    expect(useVPNStore.getState().activeServer?.id).toBe('srv-2');
+    // Always picks fastest — srv-1 (ping 50) over srv-2 (ping 100)
+    expect(useVPNStore.getState().activeServer?.id).toBe('srv-1');
   });
 
   it('loadProfiles handles invoke failure gracefully', async () => {
