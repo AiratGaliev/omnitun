@@ -10,7 +10,7 @@ import 'country-flag-icons/3x2/flags.css';
 import type { Tab } from '@/types.ts';
 
 /** Render flag via country-flag-icons library. Falls back to globe emoji. */
-function FlagDisplay({ code, className }: { code?: string; className?: string }) {
+function FlagDisplay({ code, className }: Readonly<{ code?: string; className?: string }>) {
   const cc = code?.toUpperCase();
   if (cc?.length === 2 && hasFlag(cc)) {
     return <span className={`${className ?? ''} flag:${cc}`} />;
@@ -31,9 +31,9 @@ function formatProtocol(protocol: string): string {
   return map[protocol] ?? protocol.charAt(0).toUpperCase() + protocol.slice(1);
 }
 
-/** Get city name; return empty if none available. */
-function serverCity(srv: { cityName?: string }): string {
-  return srv.cityName ?? '';
+/** Get city name; prefer exit city when available. */
+function serverCity(srv: { cityName?: string; exitCityName?: string }): string {
+  return srv.exitCityName ?? srv.cityName ?? '';
 }
 
 export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => void }) {
@@ -277,10 +277,32 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     }}
                     className="px-5 py-3 bg-zinc-900/60 hover:bg-zinc-800/80 backdrop-blur-xl transition-all rounded-2xl border border-white/10 flex items-center gap-3 z-20 shadow-lg"
                   >
-                    <FlagDisplay code={activeServer?.flag} className="text-xl drop-shadow-md" />
+                    <div className="flex items-center gap-1">
+                      {activeServer?.exitFlag &&
+                      activeServer?.flag &&
+                      activeServer?.exitServer !== activeServer?.server ? (
+                        <div className="flex items-center gap-0.5 text-lg text-zinc-500">
+                          <FlagDisplay code={activeServer.flag} className="text-xs" />
+                          <span>→</span>
+                          <FlagDisplay code={activeServer.exitFlag} className="text-xs" />
+                        </div>
+                      ) : (
+                        <FlagDisplay
+                          code={activeServer?.exitFlag ?? activeServer?.flag}
+                          className="text-lg"
+                        />
+                      )}
+                    </div>
                     <div className="flex flex-col items-start">
-                      <span className="font-semibold text-sm text-zinc-100 leading-tight">
-                        {activeServer?.countryName ?? activeServer?.name ?? ''}
+                      <span className="text-sm font-medium leading-tight">
+                        {activeServer?.exitCountryName ??
+                          activeServer?.countryName ??
+                          activeServer?.name}
+                        {activeServer?.behindCdn && (
+                          <span className="ml-1.5 text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono">
+                            CDN
+                          </span>
+                        )}
                       </span>
                       {activeServer && serverCity(activeServer) ? (
                         <span className="text-[11px] text-zinc-500 leading-tight">
@@ -341,10 +363,25 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                 }`}
                               >
                                 <div className="flex items-center gap-3">
-                                  <FlagDisplay code={server.flag} className="text-lg" />
+                                  <div className="flex items-center gap-1">
+                                    {server.exitFlag &&
+                                    server.flag &&
+                                    server.exitServer !== server.server ? (
+                                      <div className="flex items-center gap-0.5 text-lg text-zinc-500">
+                                        <FlagDisplay code={server.flag} className="text-xs" />
+                                        <span>→</span>
+                                        <FlagDisplay code={server.exitFlag} className="text-xs" />
+                                      </div>
+                                    ) : (
+                                      <FlagDisplay
+                                        code={server.exitFlag ?? server.flag}
+                                        className="text-lg"
+                                      />
+                                    )}
+                                  </div>
                                   <div className="flex flex-col items-start">
                                     <span className="text-sm font-medium leading-tight">
-                                      {server.countryName ?? server.name}
+                                      {server.exitCountryName ?? server.countryName ?? server.name}
                                       {server.behindCdn && (
                                         <span className="ml-1.5 text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono">
                                           CDN

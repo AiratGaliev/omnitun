@@ -60,6 +60,11 @@ export interface Server {
   //    the proxy connection fails to authenticate. ──────────────────────
   username?: string;
   behindCdn?: boolean;
+  // ── Exit IP geoip (populated when outlet IP differs from entry IP) ─
+  exitFlag?: string;
+  exitCountryName?: string;
+  exitCityName?: string;
+  exitServer?: string;
 }
 
 export interface Profile {

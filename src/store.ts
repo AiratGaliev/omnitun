@@ -90,6 +90,11 @@ interface RustServerProfile {
   // NOT present in the JSON. The display name is derived from
   // country_name / city_name in `mapRustProfile`.
   behind_cdn?: boolean;
+  // ── Exit IP geoip fields ──────────────────────────────────────────
+  exit_flag?: string;
+  exit_country_name?: string;
+  exit_city_name?: string;
+  exit_server?: string;
 }
 
 export interface RustSubscriptionProfile {
@@ -198,6 +203,10 @@ export function mapRustProfile(rust: RustSubscriptionProfile): Profile {
         flag: s.flag ?? undefined,
         countryName: s.country_name ?? undefined,
         cityName: s.city_name ?? undefined,
+        exitFlag: s.exit_flag ?? undefined,
+        exitCountryName: s.exit_country_name ?? undefined,
+        exitCityName: s.exit_city_name ?? undefined,
+        exitServer: s.exit_server ?? undefined,
         // ── FIX: propagate WireGuard + username fields so the dashboard
         //    can show them and `toggleConnection` can forward them to
         //    `start_vpn`. Without this, WireGuard / SOCKS5-auth /

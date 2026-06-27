@@ -1012,10 +1012,9 @@ async fn test_servers_via_singbox_parallel(
                 }
 
                 // Outlet IP check: store exit geoip in exit fields (not server location).
-                // The server's own flag/country_name/city_name are the physical server
-                // location (from TCP ping geoip); the exit IP location goes into exit_*.
+                // Skip for CDN servers — exit IP is just a CDN edge node.
                 if let Some(ip) = ip {
-                    if !real_ip.is_empty() && ip != real_ip {
+                    if !srv.behind_cdn && !real_ip.is_empty() && ip != real_ip {
                         if let Some(info) = crate::vpn::geoip::resolve_hostname(&ip).await {
                             srv.exit_server = Some(ip.clone());
                             srv.exit_flag = Some(info.country_code.clone());
