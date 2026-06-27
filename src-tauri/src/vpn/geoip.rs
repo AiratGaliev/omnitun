@@ -258,10 +258,10 @@ fn mock_lookup(ip: &str) -> Option<GeoIpResult> {
 
 /// Resolve GeoIP info for the given IP address.
 ///
-/// Lookup order:
-///   1. Mock IPs (test Docker servers)
-///   2. ipinfo.io Lite database (country only, no city)
-///   3. MaxMind GeoLite2 City database (country + city)
+/// Merges data from multiple sources:
+///   1. Mock IPs (test Docker servers) — short-circuit
+///   2. ipinfo.io Lite — country_code + country_name (more up-to-date)
+///   3. MaxMind GeoLite2 City — city + fallback country
 ///   4. None
 ///
 /// Returns None when no database is loaded, the input is a hostname,
@@ -273,47 +273,51 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
 
     let addr: IpAddr = ip.parse().ok()?;
 
-    // 1. Try ipinfo Lite DB first (usually has broader coverage)
+    // Try ipinfo Lite first for country (updated more frequently).
+    let mut country_code = String::new();
+    let mut country_name = String::new();
     if let Some(reader) = IPINFO_LITE_READER.get() {
         if let Ok(rec) = reader.lookup::<IpinfoLiteRecord>(addr) {
-            let country_code = rec.country_code.as_deref().unwrap_or("").to_string();
-            let country_name = rec.country.as_deref().unwrap_or("").to_string();
-            if !country_code.is_empty() {
-                return Some(GeoIpResult {
-                    country_code,
-                    country_name,
-                    city: String::new(), // ipinfo Lite has no city data
-                });
+            if let Some(ref cc) = rec.country_code {
+                if !cc.is_empty() {
+                    country_code = cc.clone();
+                    country_name = rec.country.clone().unwrap_or_default();
+                }
             }
         }
     }
 
-    // 2. Fallback to MaxMind City DB
-    let reader = CITY_READER.get()?;
-    let entry = reader.lookup::<maxminddb::geoip2::City>(addr).ok()?;
+    // Always try MaxMind City for city enrichment (ipinfo Lite has none)
+    // and fallback country when ipinfo didn't have the IP.
+    let mut city = String::new();
+    if let Some(reader) = CITY_READER.get() {
+        if let Ok(entry) = reader.lookup::<maxminddb::geoip2::City>(addr) {
+            city = entry
+                .city
+                .as_ref()
+                .and_then(|c| c.names.as_ref())
+                .and_then(|n| n.get("en").map(|s| s.to_string()))
+                .unwrap_or_default();
 
-    let country_code = entry
-        .country
-        .as_ref()
-        .and_then(|c| c.iso_code)
-        .unwrap_or("")
-        .to_string();
+            // Only use MaxMind country if ipinfo didn't provide one
+            if country_code.is_empty() {
+                country_code = entry
+                    .country
+                    .as_ref()
+                    .and_then(|c| c.iso_code)
+                    .unwrap_or("")
+                    .to_string();
+                country_name = entry
+                    .country
+                    .as_ref()
+                    .and_then(|c| c.names.as_ref())
+                    .and_then(|n| n.get("en").map(|s| s.to_string()))
+                    .unwrap_or_default();
+            }
+        }
+    }
 
-    let country_name = entry
-        .country
-        .as_ref()
-        .and_then(|c| c.names.as_ref())
-        .and_then(|n| n.get("en").map(|s| s.to_string()))
-        .unwrap_or_default();
-
-    let city = entry
-        .city
-        .as_ref()
-        .and_then(|c| c.names.as_ref())
-        .and_then(|n| n.get("en").map(|s| s.to_string()))
-        .unwrap_or_default();
-
-    if country_code.is_empty() {
+    if country_code.is_empty() && city.is_empty() {
         return None;
     }
 
