@@ -522,6 +522,8 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     try {
       const { settings } = get();
       await invoke('update_settings', { newSettings: settings });
+      // Re-load profiles so filters are applied server-side
+      await get().loadProfiles();
     } catch (e) {
       get().addLog(`Failed to save settings: ${String(e)}`, 'error', 'settings');
     }

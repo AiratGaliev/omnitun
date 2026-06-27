@@ -11,6 +11,24 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helper: build a minimal get_subscriptions mock response from servers array
+// ─────────────────────────────────────────────────────────────────────────────
+function mockGetSubscriptions(servers: unknown[]): unknown[] {
+  return [{
+    id: 'prof-mock',
+    name: 'Mock',
+    url: '',
+    servers: servers.map((s: Record<string, unknown>) => ({
+      id: s.id,
+      protocol: s.protocol ?? 'vless',
+      server: s.server ?? '127.0.0.1',
+      port: s.port ?? 0,
+    })),
+    updated_at: new Date().toISOString(),
+  }];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Mock Tauri listen
 // ─────────────────────────────────────────────────────────────────────────────
 const mockListenFns: { event: string; handler: (payload: unknown) => void }[] = [];
@@ -599,7 +617,8 @@ describe('store — toggleConnection', () => {
       ],
       realIp: '1.2.3.4',
     });
-    mockInvoke.mockResolvedValueOnce(undefined); // saveSettings
+    mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
+    mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useVPNStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
     mockInvoke.mockResolvedValueOnce({ server: "5.6.7.8", flag: "PL", country_name: "Poland", city_name: "Warsaw" }); // outlet_ip
 
@@ -632,7 +651,8 @@ describe('store — toggleConnection', () => {
       ],
       realIp: '1.2.3.4',
     });
-    mockInvoke.mockResolvedValueOnce(undefined); // saveSettings
+    mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
+    mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useVPNStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
     mockInvoke.mockResolvedValueOnce({ server: "5.6.7.8", flag: "PL", country_name: "Poland", city_name: "Warsaw" }); // outlet_ip
 
@@ -651,7 +671,8 @@ describe('store — toggleConnection', () => {
       realIp: '1.2.3.4',
     });
     useVPNStore.getState().updateSettings({ autoConnectFastest: false });
-    mockInvoke.mockResolvedValueOnce(undefined); // saveSettings
+    mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
+    mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useVPNStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
     mockInvoke.mockResolvedValueOnce({ server: "5.6.7.8", flag: "PL", country_name: "Poland", city_name: "Warsaw" }); // outlet_ip
 
@@ -677,7 +698,8 @@ describe('store — toggleConnection', () => {
       activeServer: { id: 'srv-1', name: 'Test', server: '10.0.0.1', port: 443 },
       realIp: '1.2.3.4',
     });
-    mockInvoke.mockResolvedValueOnce(undefined); // saveSettings
+    mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
+    mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useVPNStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockRejectedValueOnce(new Error('timeout')); // start_vpn fails
 
     await expect(useVPNStore.getState().toggleConnection()).rejects.toThrow('timeout');

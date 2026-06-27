@@ -605,12 +605,62 @@ async fn remove_subscription(
     }
 }
 
+/// Filter servers by country & protocol settings.
+/// Country filter uses exit IP for non-CDN servers, entry IP for CDN servers.
+fn filter_servers_by_settings(
+    servers: &[ServerProfile],
+    settings: &AppSettings,
+) -> Vec<ServerProfile> {
+    servers
+        .iter()
+        .filter(|s| {
+            // Protocol filter
+            if !settings.allowed_protocols.is_empty()
+                && !settings.allowed_protocols.contains(&s.protocol)
+            {
+                return false;
+            }
+            if !settings.blocked_protocols.is_empty()
+                && settings.blocked_protocols.contains(&s.protocol)
+            {
+                return false;
+            }
+            // Country filter: exit IP for non-CDN, entry IP fallback for CDN
+            let country_flag = if !s.behind_cdn {
+                s.exit_flag.as_deref().or(s.flag.as_deref())
+            } else {
+                s.flag.as_deref()
+            };
+            if let Some(flag) = country_flag {
+                if !settings.allowed_countries.is_empty()
+                    && !settings.allowed_countries.contains(&flag.to_string())
+                {
+                    return false;
+                }
+                if !settings.blocked_countries.is_empty()
+                    && settings.blocked_countries.contains(&flag.to_string())
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .cloned()
+        .collect()
+}
+
 #[tauri::command]
 async fn get_subscriptions(
     state: tauri::State<'_, ProfileState>,
+    settings_state: tauri::State<'_, Mutex<AppSettings>>,
 ) -> Result<Vec<SubscriptionProfile>, String> {
     let mgr = state.manager.lock().await;
-    Ok(mgr.list().to_vec())
+    let settings = settings_state.lock().await;
+    let mut profiles = mgr.list().to_vec();
+    for profile in &mut profiles {
+        profile.servers = filter_servers_by_settings(&profile.servers, &settings);
+    }
+    Ok(profiles)
 }
 
 #[tauri::command]
