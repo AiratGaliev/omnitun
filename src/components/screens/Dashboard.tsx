@@ -47,8 +47,8 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     setActiveServer,
     settings,
     updateSettings,
-    outletIp,
-    fetchOutletIp,
+    exitIp,
+    fetchExitIp,
     realIp,
     speedTestResult,
     runSpeedTest,
@@ -105,9 +105,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   // Fetch outlet IP once when connected (initial verification, no polling)
   useEffect(() => {
     if (status === 'connected') {
-      void fetchOutletIp();
+      void fetchExitIp();
     }
-  }, [status, fetchOutletIp]);
+  }, [status, fetchExitIp]);
 
   // Feed sparkline from speeds — triggered by traffic monitor updates
   // We read speeds directly from the store inside setSparklineData to avoid deps issues
@@ -442,15 +442,36 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     <p className="text-emerald-500/80 text-[10px] uppercase tracking-[0.2em] mt-1 font-bold">
                       {t('activeSession')}
                     </p>
-                    {outletIp && (
-                      <p className="text-xs text-zinc-400 font-mono mt-2 flex items-center gap-1.5">
-                        <Globe size={12} className="text-emerald-500" />
-                        <span>{outletIp.split(' ')[0]}</span>
-                        {activeServer?.flag && (
+                    {activeServer && (
+                      <p className="text-xs text-zinc-400 font-mono mt-2 flex items-center gap-1.5 flex-wrap justify-center">
+                        <Globe size={12} className="text-emerald-500 shrink-0" />
+                        {activeServer.flag && (
                           <span className={`flag:${activeServer.flag.toUpperCase()} text-[11px]`} />
                         )}
-                        {activeServer?.countryName && (
-                          <span className="text-zinc-500">{activeServer.countryName}</span>
+                        <span>{activeServer.countryName ?? activeServer.flag}</span>
+                        {activeServer.cityName && (
+                          <span className="text-zinc-500">({activeServer.cityName})</span>
+                        )}
+                        <span className="text-zinc-600">{activeServer.server}</span>
+                        {activeServer.behindCdn ? (
+                          <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono">
+                            CDN
+                          </span>
+                        ) : (
+                          exitIp &&
+                          exitIp.server !== activeServer.server && (
+                            <>
+                              <span className="text-zinc-600">→</span>
+                              {exitIp.flag && (
+                                <span className={`flag:${exitIp.flag.toUpperCase()} text-[11px]`} />
+                              )}
+                              <span>{exitIp.country_name ?? exitIp.flag}</span>
+                              {exitIp.city_name && (
+                                <span className="text-zinc-500">({exitIp.city_name})</span>
+                              )}
+                              <span className="text-zinc-600">{exitIp.server}</span>
+                            </>
+                          )
                         )}
                       </p>
                     )}

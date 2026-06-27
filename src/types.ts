@@ -128,3 +128,10 @@ export interface Settings {
   minimizeToTray: boolean;
   blockCdnNodes: boolean;
 }
+
+export interface ExitIpInfo {
+  server: string;
+  flag: string;
+  country_name: string;
+  city_name: string;
+}

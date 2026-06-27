@@ -118,6 +118,10 @@ fn parse_vless(data: &str) -> Option<ServerProfile> {
         wg_keepalive: None,
         username: None,
         behind_cdn: false,
+        exit_ip: None,
+        exit_country_name: None,
+        exit_flag: None,
+        exit_city_name: None,
     })
 }
 
@@ -178,6 +182,10 @@ fn parse_vmess(data: &str) -> Option<ServerProfile> {
         wg_keepalive: None,
         username: None,
         behind_cdn: false,
+        exit_ip: None,
+        exit_country_name: None,
+        exit_flag: None,
+        exit_city_name: None,
     })
 }
 
@@ -230,6 +238,10 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
                                 wg_keepalive: None,
                                 username: None,
                                 behind_cdn: false,
+        exit_ip: None,
+        exit_country_name: None,
+        exit_flag: None,
+        exit_city_name: None,
                             });
                         }
                     }
@@ -279,6 +291,10 @@ fn parse_ss(data: &str) -> Option<ServerProfile> {
         wg_keepalive: None,
         username: None,
         behind_cdn: false,
+        exit_ip: None,
+        exit_country_name: None,
+        exit_flag: None,
+        exit_city_name: None,
     })
 }
 
@@ -324,6 +340,10 @@ fn parse_trojan(data: &str) -> Option<ServerProfile> {
         wg_keepalive: None,
         username: None,
         behind_cdn: false,
+        exit_ip: None,
+        exit_country_name: None,
+        exit_flag: None,
+        exit_city_name: None,
     })
 }
 
@@ -369,6 +389,10 @@ fn parse_hysteria2(data: &str) -> Option<ServerProfile> {
         wg_keepalive: None,
         username: None,
         behind_cdn: false,
+        exit_ip: None,
+        exit_country_name: None,
+        exit_flag: None,
+        exit_city_name: None,
     })
 }
 
@@ -420,6 +444,10 @@ fn parse_tuic(data: &str) -> Option<ServerProfile> {
         wg_keepalive: None,
         username: None,
         behind_cdn: false,
+        exit_ip: None,
+        exit_country_name: None,
+        exit_flag: None,
+        exit_city_name: None,
     })
 }
 
@@ -474,6 +502,10 @@ fn parse_wireguard(data: &str) -> Option<ServerProfile> {
             .and_then(|k| k.parse().ok()),
         username: None,
         behind_cdn: false,
+        exit_ip: None,
+        exit_country_name: None,
+        exit_flag: None,
+        exit_city_name: None,
     })
 }
 
@@ -606,6 +638,10 @@ fn parse_http(uri: &str) -> Option<ServerProfile> {
         // authenticate instead of failing silently.
         username: username_opt,
         behind_cdn: false,
+        exit_ip: None,
+        exit_country_name: None,
+        exit_flag: None,
+        exit_city_name: None,
     })
 }
 

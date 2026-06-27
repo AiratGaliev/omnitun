@@ -35,6 +35,7 @@ import { listen } from '@tauri-apps/api/event';
 import type {
   ConnectionInfo,
   ConnectionStatus,
+  ExitIpInfo,
   LogEntry,
   LogSource,
   Profile,
@@ -132,8 +133,8 @@ interface VPNStore {
   setSpeeds: (speeds: { up: number; down: number }) => void;
   toggleConnection: () => Promise<void>;
   initListener: () => Promise<() => void>;
-  outletIp: string | null;
-  fetchOutletIp: () => Promise<void>;
+  exitIp: ExitIpInfo | null;
+  fetchExitIp: () => Promise<void>;
   realIp: string | null;
   fetchRealIp: () => Promise<void>;
   speedTestResult: SpeedTestResult | null;
@@ -315,7 +316,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   connectedAt: null,
   logs: [],
   settingsVersion: 0,
-  outletIp: null,
+  exitIp: null,
   realIp: null,
   speedTestResult: null,
   connections: [],
@@ -571,12 +572,12 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     set({ speeds });
   },
 
-  fetchOutletIp: async () => {
+  fetchExitIp: async () => {
     try {
-      const ip = await invoke<string>('outlet_ip');
-      set({ outletIp: ip });
+      const info = await invoke<ExitIpInfo>('outlet_ip');
+      set({ exitIp: info });
     } catch {
-      set({ outletIp: null });
+      set({ exitIp: null });
     }
   },
 
@@ -670,9 +671,9 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
           const delay = 2000 + i * 500; // 2s, 2.5s, 3s, ... (max 7.5s)
           await new Promise((r) => setTimeout(r, delay));
           try {
-            const vpnIp = await invoke<string>('outlet_ip');
-            if (realIp && vpnIp && !vpnIp.startsWith(realIp.split(' ')[0])) {
-              set({ outletIp: vpnIp });
+            const vpnInfo = await invoke<ExitIpInfo>('outlet_ip');
+            if (realIp && vpnInfo.server && !vpnInfo.server.startsWith(realIp.split(' ')[0])) {
+              set({ exitIp: vpnInfo });
               ipChanged = true;
               break;
             }

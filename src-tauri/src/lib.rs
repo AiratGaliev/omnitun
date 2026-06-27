@@ -14,6 +14,7 @@ use crate::settings::{AppSettings, SettingsManager};
 use crate::subscription::SubscriptionProfile;
 use crate::vpn::{ServerProfile, VpnManager, VpnStatus};
 use chrono::Local;
+use serde::Serialize;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::sync::atomic::Ordering;
@@ -71,6 +72,12 @@ async fn start_vpn(
         ),
     );
     emit_status(&app, VpnStatus::Connecting);
+
+    // Store active server ID for exit IP enrichment
+    {
+        let mut active_id = crate::vpn::ACTIVE_SERVER_ID.lock().unwrap();
+        *active_id = Some(profile.id.clone());
+    }
 
     let manager_arc = state.manager.clone();
     let manager = manager_arc.lock().await;
@@ -973,8 +980,15 @@ async fn get_real_ip(app: tauri::AppHandle) -> Result<String, String> {
 /// Track previous outlet IP so we log changes from Rust directly.
 static PREV_OUTLET_IP: StdMutex<Option<String>> = StdMutex::new(None);
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ExitIpInfo {
+    pub server: String,
+    pub flag: String,
+    pub country_name: String,
+}
+
 #[tauri::command]
-async fn outlet_ip(app: tauri::AppHandle) -> Result<String, String> {
+async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
     let stats_port = crate::vpn::CLASH_API_PORT.load(Ordering::Relaxed);
     if stats_port == 0 {
         return Err("VPN not connected".into());
@@ -1026,7 +1040,55 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<String, String> {
         return Err("Could not determine external IP".into());
     }
 
-    // Log outlet IP change from Rust side (directly to logs-*.jsonl)
+    let info = match crate::vpn::geoip::resolve(&ip) {
+        Some(geo) => ExitIpInfo {
+            server: ip.clone(),
+            flag: geo.country_code.clone(),
+            country_name: geo.country_name.clone(),
+        },
+        None => ExitIpInfo {
+            server: ip.clone(),
+            flag: String::new(),
+            country_name: String::new(),
+        },
+    };
+
+    // Persist exit IP geoip to the active server in profiles.json
+    let active_id = crate::vpn::ACTIVE_SERVER_ID.lock().unwrap().clone();
+    if let Some(ref server_id) = active_id {
+        if let Some(profile_state) = app.try_state::<ProfileState>() {
+            let mut pm = profile_state.manager.lock().await;
+            let mut saved = false;
+            for profile in pm.list_mut() {
+                for server in &mut profile.servers {
+                    if server.id == *server_id {
+                        let cc = if info.flag.is_empty() {
+                            None
+                        } else {
+                            Some(info.flag.clone())
+                        };
+                        let cn = if info.country_name.is_empty() {
+                            None
+                        } else {
+                            Some(info.country_name.clone())
+                        };
+                        server.exit_ip = Some(info.server.clone());
+                        server.exit_flag = cc;
+                        server.exit_country_name = cn;
+                        saved = true;
+                        break;
+                    }
+                }
+                if saved {
+                    break;
+                }
+            }
+            if saved {
+                let _ = pm.save();
+            }
+        }
+    }
+
     {
         let mut prev = PREV_OUTLET_IP.lock().unwrap();
         if prev.as_deref() != Some(&ip) {
@@ -1037,7 +1099,7 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<String, String> {
                 LogLevel::Info,
                 LogSource::System,
                 format!(
-                    "[rust] outletIp: {} → {ip}",
+                    "[rust] exitIp: {} → {ip}",
                     prev.as_deref().unwrap_or("null")
                 ),
             );
@@ -1045,21 +1107,7 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<String, String> {
         }
     }
 
-    let location = crate::vpn::geoip::resolve(&ip)
-        .map(|geo| {
-            if !geo.city.is_empty() {
-                format!("{}, {}", geo.city, geo.country_name)
-            } else {
-                geo.country_name
-            }
-        })
-        .unwrap_or_default();
-
-    if !location.is_empty() {
-        Ok(format!("{} ({})", ip, location))
-    } else {
-        Ok(ip)
-    }
+    Ok(info)
 }
 
 /// Quick health check for the active proxy via Clash API delay endpoint.

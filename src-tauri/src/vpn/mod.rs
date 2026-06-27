@@ -23,6 +23,10 @@ pub(crate) static VPN_PID: AtomicU32 = AtomicU32::new(0);
 pub(crate) static LAST_PROFILE: std::sync::Mutex<Option<LastConnection>> =
     std::sync::Mutex::new(None);
 
+/// ID of the currently active (connected) server, for exit IP enrichment.
+pub(crate) static ACTIVE_SERVER_ID: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
 /// Data needed to re-establish a connection after unexpected exit.
 #[derive(Clone)]
 pub struct LastConnection {
@@ -97,6 +101,15 @@ pub struct ServerProfile {
     /// CDN-routed servers have unstable outlet IPs (different per request).
     #[serde(default, skip_serializing_if = "is_false")]
     pub behind_cdn: bool,
+    /// Exit IP geoip — last known exit IP address when connected through this server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_country_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_flag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_city_name: Option<String>,
 }
 
 /// Serde helper: skip serializing `behind_cdn` when false.

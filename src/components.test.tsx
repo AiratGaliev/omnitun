@@ -66,7 +66,7 @@ function setConnectedState() {
         countryName: 'Switzerland',
       },
     ],
-    outletIp: '5.6.7.8',
+    exitIp: { server: '5.6.7.8', flag: 'PL', country_name: 'Poland', city_name: 'Warsaw' },
   });
 }
 

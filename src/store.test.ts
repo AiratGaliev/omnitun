@@ -123,7 +123,7 @@ beforeEach(() => {
     connectedAt: null,
     logs: [],
     settingsVersion: 0,
-    outletIp: null,
+    exitIp: null,
     realIp: null,
     speedTestResult: null,
     connections: [],
@@ -601,7 +601,7 @@ describe('store — toggleConnection', () => {
     });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings
     mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
-    mockInvoke.mockResolvedValueOnce('5.6.7.8'); // outlet_ip (success on first attempt)
+    mockInvoke.mockResolvedValueOnce({ server: "5.6.7.8", flag: "PL", country_name: "Poland", city_name: "Warsaw" }); // outlet_ip
 
     await useVPNStore.getState().toggleConnection();
 
@@ -634,7 +634,7 @@ describe('store — toggleConnection', () => {
     });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings
     mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
-    mockInvoke.mockResolvedValueOnce('5.6.7.8'); // outlet_ip
+    mockInvoke.mockResolvedValueOnce({ server: "5.6.7.8", flag: "PL", country_name: "Poland", city_name: "Warsaw" }); // outlet_ip
 
     await useVPNStore.getState().toggleConnection();
 
@@ -653,7 +653,7 @@ describe('store — toggleConnection', () => {
     useVPNStore.getState().updateSettings({ autoConnectFastest: false });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings
     mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
-    mockInvoke.mockResolvedValueOnce('5.6.7.8'); // outlet_ip
+    mockInvoke.mockResolvedValueOnce({ server: "5.6.7.8", flag: "PL", country_name: "Poland", city_name: "Warsaw" }); // outlet_ip
 
     await useVPNStore.getState().toggleConnection();
     const startCall = mockInvoke.mock.calls.find((c) => c[0] === 'start_vpn');
@@ -690,15 +690,17 @@ describe('store — toggleConnection', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('store — IP fetching', () => {
   it('fetchOutletIp stores IP on success', async () => {
-    mockInvoke.mockResolvedValueOnce('1.2.3.4');
-    await useVPNStore.getState().fetchOutletIp();
-    expect(useVPNStore.getState().outletIp).toBe('1.2.3.4');
+    mockInvoke.mockResolvedValueOnce({ server: "1.2.3.4", flag: "PL", country_name: "Poland", city_name: "Warsaw" });
+    await useVPNStore.getState().fetchExitIp();
+    const result = useVPNStore.getState().exitIp;
+    expect(result).not.toBeNull();
+    expect(result?.server).toBe('1.2.3.4');
   });
 
   it('fetchOutletIp stores null on error', async () => {
     mockInvoke.mockRejectedValueOnce(new Error('fail'));
-    await useVPNStore.getState().fetchOutletIp();
-    expect(useVPNStore.getState().outletIp).toBeNull();
+    await useVPNStore.getState().fetchExitIp();
+    expect(useVPNStore.getState().exitIp).toBeNull();
   });
 
   it('fetchRealIp stores IP on success', async () => {
