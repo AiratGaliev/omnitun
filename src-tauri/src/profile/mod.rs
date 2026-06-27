@@ -357,7 +357,16 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
                     LogSource::System,
                     "Downloading GeoIP databases (one-time)...".into(),
                 );
-                match crate::vpn::geoip::ensure_downloaded(&geo_dir).await {
+                match crate::vpn::geoip::ensure_downloaded(
+                    &geo_dir,
+                    &app
+                        .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
+                        .map(|s| s.try_lock().ok().map(|g| g.ipinfo_token.clone()))
+                        .flatten()
+                        .unwrap_or_default(),
+                )
+                .await
+                {
                     Ok(_) => log(
                         app,
                         &logger,
@@ -380,6 +389,12 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         // on a previous run while is_ready() already returned true for City only.
         if asn_path.exists() && !crate::vpn::geoip::is_asn_ready() {
             let _ = crate::vpn::geoip::init_asn(&asn_path);
+        }
+
+        // Always try to init ipinfo Lite if the file exists
+        let ipinfo_path = geo_dir.join("ipinfo_lite.mmdb");
+        if ipinfo_path.exists() && !crate::vpn::geoip::is_ipinfo_ready() {
+            let _ = crate::vpn::geoip::init_ipinfo(&ipinfo_path);
         }
     }
 

@@ -127,6 +127,7 @@ export interface Settings {
   enableMux: boolean;
   minimizeToTray: boolean;
   blockCdnNodes: boolean;
+  ipinfoToken: string;
 }
 
 export interface ExitIpInfo {

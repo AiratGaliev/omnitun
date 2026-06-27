@@ -169,5 +169,12 @@
   "minimizeToTray": "Minimize to Tray",
   "minimizeToTrayDesc": "Minimize app to system tray instead of closing.",
   "blockCdnNodes": "Block CDN / Dynamic IP Nodes",
-  "blockCdnNodesDesc": "Hide Cloudflare Workers and WARP nodes whose exit IP changes constantly."
+  "blockCdnNodesDesc": "Hide Cloudflare Workers and WARP nodes whose exit IP changes constantly.",
+  "ipinfoToken": "IPinfo API Token",
+  "ipinfoTokenDesc": "Free token from ipinfo.io — enables ipinfo_lite.mmdb for improved GeoIP and ASN coverage alongside MaxMind GeoLite2.",
+  "ipinfoTokenPlaceholder": "Enter your ipinfo.io API token",
+  "ipinfoDownloading": "Downloading IPinfo GeoIP database...",
+  "ipinfoDownloaded": "IPinfo GeoIP database downloaded",
+  "ipinfoCached": "IPinfo database is up-to-date (cached copy)",
+  "ipinfoDownloadFailed": "IPinfo database download failed"
 }

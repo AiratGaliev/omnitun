@@ -169,5 +169,12 @@
   "minimizeToTray": "Сворачивать в трей",
   "minimizeToTrayDesc": "Сворачивать приложение в системный трей вместо закрытия.",
   "blockCdnNodes": "Блокировать CDN / Dynamic IP узлы",
-  "blockCdnNodesDesc": "Скрывать Cloudflare Workers и WARP, выходной IP которых постоянно меняется."
+  "blockCdnNodesDesc": "Скрывать Cloudflare Workers и WARP, выходной IP которых постоянно меняется.",
+  "ipinfoToken": "IPinfo API Токен",
+  "ipinfoTokenDesc": "Бесплатный токен с ipinfo.io — включает ipinfo_lite.mmdb для улучшенного GeoIP и ASN совместно с MaxMind GeoLite2.",
+  "ipinfoTokenPlaceholder": "Введите ваш ipinfo.io API токен",
+  "ipinfoDownloading": "Загрузка IPinfo GeoIP базы данных...",
+  "ipinfoDownloaded": "IPinfo GeoIP база данных загружена",
+  "ipinfoCached": "IPinfo база актуальна (используется кэш)",
+  "ipinfoDownloadFailed": "Не удалось загрузить IPinfo базу"
 }

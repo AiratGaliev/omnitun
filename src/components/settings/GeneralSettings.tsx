@@ -1,7 +1,7 @@
 import { useVPNStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { i18n } from '../../i18n';
-import { Languages, Minus, RefreshCw, Rocket, Zap } from 'lucide-react';
+import { Key, Languages, Minus, RefreshCw, Rocket, Zap } from 'lucide-react';
 import { SettingItem } from './SettingItem';
 
 export function GeneralSettings() {
@@ -140,6 +140,32 @@ export function GeneralSettings() {
           updateSettings({ minimizeToTray: checked });
         }}
       />
+
+      {/* IPinfo.io API token */}
+      <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 hover:bg-zinc-900/60 hover:border-white/10 transition-all duration-300 rounded-2xl p-6 shadow-sm group">
+        <div className="flex gap-5">
+          <div className="mt-0.5 bg-zinc-800/80 p-2.5 rounded-xl shadow-inner h-fit border border-white/5 group-hover:border-white/10 transition-colors">
+            <Key size={20} className="text-amber-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h3 className="font-semibold text-sm text-zinc-100 tracking-wide">
+              {t('ipinfoToken')}
+            </h3>
+            <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed">
+              {t('ipinfoTokenDesc')}
+            </p>
+            <input
+              type="text"
+              value={settings.ipinfoToken}
+              onChange={(e) => {
+                updateSettings({ ipinfoToken: e.target.value });
+              }}
+              placeholder={t('ipinfoTokenPlaceholder')}
+              className="mt-3 w-full bg-zinc-800/60 border border-white/10 rounded-xl px-4 py-2.5 text-sm font-mono text-zinc-200 placeholder-zinc-500 focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none transition-all shadow-inner"
+            />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

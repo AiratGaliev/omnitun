@@ -32,6 +32,8 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { toast } from 'sonner';
+import { i18n } from './i18n';
 import type {
   ConnectionInfo,
   ConnectionStatus,
@@ -344,6 +346,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
     enableMux: false,
     minimizeToTray: false,
     blockCdnNodes: false,
+    ipinfoToken: '',
   },
 
   setStatus: (status) => {
@@ -496,6 +499,8 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
         profiles,
         servers: allServers,
         activeServer: newActive,
+        // If profiles exist, onboarding is complete (flag not persisted)
+        hasOnboarded: profiles.length > 0 || get().hasOnboarded,
       });
       if (newActive?.id !== oldActive?.id) {
         get().addLog(
@@ -523,6 +528,21 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       await invoke('update_settings', { newSettings: settings });
       // Re-load profiles so filters are applied server-side
       await get().loadProfiles();
+
+      // If ipinfo token is non-empty, trigger ipinfo database download
+      if (settings.ipinfoToken) {
+        const toastId = toast.loading(i18n.t('ipinfoDownloading'));
+        try {
+          const result = await invoke<string>('download_ipinfo_db');
+          if (result === 'downloaded') {
+            toast.success(i18n.t('ipinfoDownloaded'), { id: toastId });
+          } else {
+            toast.info(i18n.t('ipinfoCached'), { id: toastId });
+          }
+        } catch (e) {
+          toast.error(`${i18n.t('ipinfoDownloadFailed')}: ${String(e)}`, { id: toastId });
+        }
+      }
     } catch (e) {
       get().addLog(`Failed to save settings: ${String(e)}`, 'error', 'settings');
     }

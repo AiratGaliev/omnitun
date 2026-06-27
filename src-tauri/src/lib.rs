@@ -951,6 +951,7 @@ pub fn run() {
             import_subscription_content,
             import_subscription_file,
             initialize_app,
+            download_ipinfo_db,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1438,7 +1439,12 @@ async fn initialize_app(
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let geo_dir = data_dir.join("geoip");
     std::fs::create_dir_all(&geo_dir).map_err(|e| e.to_string())?;
-    crate::vpn::geoip::ensure_downloaded(&geo_dir).await?;
+    let ipinfo_token = app
+        .try_state::<Mutex<crate::settings::AppSettings>>()
+        .map(|s| s.try_lock().ok().map(|g| g.ipinfo_token.clone()))
+        .flatten()
+        .unwrap_or_default();
+    crate::vpn::geoip::ensure_downloaded(&geo_dir, &ipinfo_token).await?;
 
     // 3. Enrich loaded profiles with GeoIP data (fix corrupted names)
     if let Some(profile_state) = app.try_state::<ProfileState>() {
@@ -1484,6 +1490,85 @@ async fn initialize_app(
         "App initialized".into(),
     );
     Ok(())
+}
+
+/// Download the ipinfo.io Lite database on demand.
+///
+/// Called from the frontend after the user saves an IPinfo API token in
+/// General Settings. Respects the 4-hour rate-limit (max 6/day), shows
+/// result via the returned status string.
+///
+/// Returns:
+///   - `"downloaded"` — fresh download completed
+///   - `"skipped"`    — within rate-limit window, using cached copy
+///   - `Err`          — token missing or download failed
+#[tauri::command]
+async fn download_ipinfo_db(app: tauri::AppHandle) -> Result<String, String> {
+    let logger = app.state::<StdMutex<Logger>>();
+
+    let ipinfo_token = app
+        .try_state::<Mutex<crate::settings::AppSettings>>()
+        .map(|s| s.try_lock().ok().map(|g| g.ipinfo_token.clone()))
+        .flatten()
+        .unwrap_or_default();
+
+    if ipinfo_token.is_empty() {
+        log(
+            &app,
+            &logger,
+            LogLevel::Warning,
+            LogSource::System,
+            "IPinfo download skipped — token not configured".into(),
+        );
+        return Err("IPinfo API token not set".into());
+    }
+
+    log(
+        &app,
+        &logger,
+        LogLevel::Info,
+        LogSource::System,
+        "Downloading IPinfo GeoIP database...".into(),
+    );
+
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {e}"))?;
+    let geo_dir = data_dir.join("geoip");
+
+    match crate::vpn::geoip::download_ipinfo_db(&geo_dir, &ipinfo_token).await {
+        Ok(true) => {
+            log(
+                &app,
+                &logger,
+                LogLevel::Success,
+                LogSource::System,
+                "IPinfo GeoIP database downloaded".into(),
+            );
+            Ok("downloaded".into())
+        }
+        Ok(false) => {
+            log(
+                &app,
+                &logger,
+                LogLevel::Info,
+                LogSource::System,
+                "IPinfo database is up-to-date — using cached copy".into(),
+            );
+            Ok("skipped".into())
+        }
+        Err(e) => {
+            log(
+                &app,
+                &logger,
+                LogLevel::Error,
+                LogSource::System,
+                format!("IPinfo database download failed: {e}"),
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Check if a process is alive by PID.

@@ -26,6 +26,10 @@ pub struct AppSettings {
     pub enable_mux: bool,
     pub minimize_to_tray: bool,
     pub block_cdn_nodes: bool,
+    /// IPinfo.io API token for downloading ipinfo_lite.mmdb.
+    /// When empty, ipinfo.io database is not downloaded/used.
+    #[serde(default)]
+    pub ipinfo_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +64,7 @@ impl Default for AppSettings {
             enable_mux: false,
             minimize_to_tray: false,
             block_cdn_nodes: false,
+            ipinfo_token: String::new(),
         }
     }
 }
@@ -151,6 +156,7 @@ mod tests {
         original.enable_mux = true;
         original.minimize_to_tray = true;
         original.block_cdn_nodes = true;
+        original.ipinfo_token = "test_token_123".into();
 
         {
             let mgr = SettingsManager::new(dir.clone());
@@ -169,6 +175,7 @@ mod tests {
             assert!(loaded.enable_mux);
             assert!(loaded.minimize_to_tray);
             assert!(loaded.block_cdn_nodes);
+            assert_eq!(loaded.ipinfo_token, "test_token_123");
         }
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -229,6 +236,10 @@ mod tests {
         assert!(
             json.contains("blockCdnNodes"),
             "expected camelCase 'blockCdnNodes'"
+        );
+        assert!(
+            json.contains("ipinfoToken"),
+            "expected camelCase 'ipinfoToken'"
         );
     }
 }
