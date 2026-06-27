@@ -79,12 +79,10 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   const [sparklineData, setSparklineData] = useState<number[]>([]);
   const sparklineRef = useRef(sparklineData);
 
-  // Keep ref in sync without writing during render
   useEffect(() => {
     sparklineRef.current = sparklineData;
   }, [sparklineData]);
 
-  // Session timer when connected
   useEffect(() => {
     if (status !== 'connected' || !connectedAt) return;
     const interval = setInterval(() => {
@@ -95,22 +93,18 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     };
   }, [status, connectedAt]);
 
-  // Reset speeds display when disconnected
   useEffect(() => {
     if (status !== 'connected') {
       setSpeeds({ up: 0, down: 0 });
     }
   }, [status, setSpeeds]);
 
-  // Fetch outlet IP once when connected (initial verification, no polling)
   useEffect(() => {
     if (status === 'connected') {
       void fetchExitIp();
     }
   }, [status, fetchExitIp]);
 
-  // Feed sparkline from speeds — triggered by traffic monitor updates
-  // We read speeds directly from the store inside setSparklineData to avoid deps issues
   useEffect(() => {
     if (status !== 'connected') return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -169,7 +163,6 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   const isConnected = status === 'connected';
   const isConnecting = status === 'connecting' || status === 'disconnecting';
 
-  // SVG sparkline path
   const sparklinePath = (): string => {
     const data = sparklineData;
     if (data.length < 2) return '';
@@ -191,9 +184,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
         </div>
       </header>
 
-      <div className="flex-1 flex gap-12 items-center justify-center">
+      <div className="flex-1 flex flex-row gap-8 lg:gap-12 items-center justify-center w-full max-w-5xl mx-auto">
         {servers.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-5 bg-zinc-900/30 border border-white/5 p-12 rounded-3xl backdrop-blur-sm">
+          <div className="flex flex-col items-center justify-center gap-5 bg-zinc-900/30 border border-white/5 p-12 rounded-3xl backdrop-blur-sm w-full max-w-lg">
             <div className="w-20 h-20 bg-white/5 rounded-2xl flex items-center justify-center shadow-inner">
               <Server size={40} className="text-zinc-500" />
             </div>
@@ -211,10 +204,170 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
           </div>
         ) : (
           <>
-            <div className="flex flex-col items-center justify-center">
-              {/* Mode selector & server picker */}
-              <div className="mb-8 flex items-start gap-6">
-                <div className="w-72 flex flex-col items-center">
+            {/* Left Column: Controls & Power Button */}
+            <div className="flex flex-col items-center justify-center flex-1 max-w-sm w-full">
+              <div className="w-full flex flex-col items-center gap-6 mb-4 z-20">
+                {/* Server Picker */}
+                <div className="relative w-full z-30">
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.98 }}
+                    onClick={() => {
+                      setIsServerDropdownOpen(!isServerDropdownOpen);
+                    }}
+                    className="w-full px-5 py-3 bg-zinc-900/60 hover:bg-zinc-800/80 backdrop-blur-xl transition-all rounded-2xl border border-white/10 flex items-center justify-between gap-3 shadow-lg"
+                  >
+                    <div className="flex items-center gap-3 overflow-hidden w-full min-w-0">
+                      <div className="flex items-center gap-1 shrink-0">
+                        {activeServer?.exitFlag &&
+                        activeServer.flag &&
+                        activeServer.exitServer !== activeServer.server ? (
+                          <div className="flex items-center gap-0.5 text-lg text-zinc-500">
+                            <FlagDisplay code={activeServer.flag} className="text-xs" />
+                            <span>→</span>
+                            <FlagDisplay code={activeServer.exitFlag} className="text-xs" />
+                          </div>
+                        ) : (
+                          <FlagDisplay
+                            code={activeServer?.exitFlag ?? activeServer?.flag}
+                            className="text-lg"
+                          />
+                        )}
+                      </div>
+
+                      {/* min-w-0 is crucial here to allow truncate to work inside flex */}
+                      <div className="flex flex-col items-start overflow-hidden min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 w-full">
+                          <span className="text-sm font-medium leading-tight truncate">
+                            {activeServer?.exitCountryName ??
+                              activeServer?.countryName ??
+                              activeServer?.name}
+                          </span>
+                          {activeServer?.behindCdn && (
+                            <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono shrink-0">
+                              CDN
+                            </span>
+                          )}
+                        </div>
+                        {activeServer && serverCity(activeServer) ? (
+                          <span className="text-[11px] text-zinc-500 leading-tight truncate w-full text-left">
+                            {serverCity(activeServer)}
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0 pl-3 border-l border-white/10">
+                      <div
+                        className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.8)]' : 'bg-zinc-600'}`}
+                      />
+                      <span className="text-xs font-mono text-zinc-400 w-10 text-right">
+                        {activeServer?.ping} ms
+                      </span>
+                      <ChevronDown
+                        size={16}
+                        className={`text-zinc-500 transition-transform duration-300 ${isServerDropdownOpen ? 'rotate-180' : ''}`}
+                      />
+                    </div>
+                  </motion.button>
+
+                  <AnimatePresence>
+                    {isServerDropdownOpen && (
+                      <>
+                        <div
+                          className="fixed inset-0 z-10"
+                          onClick={() => {
+                            setIsServerDropdownOpen(false);
+                          }}
+                        />
+                        <motion.div
+                          initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: 10, scale: 0.95 }}
+                          transition={{ duration: 0.2, ease: 'easeOut' }}
+                          className="absolute top-full left-0 right-0 mt-3 w-full bg-zinc-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl p-2 z-20 max-h-72 overflow-y-auto custom-scrollbar"
+                        >
+                          <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest px-3 py-2 mb-1">
+                            {t('availableEndpoints')} ({servers.length})
+                          </p>
+                          <div className="flex flex-col gap-1">
+                            {servers.map((server) => (
+                              <button
+                                key={server.id}
+                                onClick={() => {
+                                  setActiveServer(server);
+                                  setIsServerDropdownOpen(false);
+                                  addLog(`Server changed to ${server.name}`, 'info', 'system');
+                                  toast.success(
+                                    `${t('serverStr')}${server.name}${t('selectedStr')}`,
+                                  );
+                                }}
+                                disabled={status === 'connecting'}
+                                className={`flex items-center justify-between p-2.5 rounded-xl transition-all w-full text-left ${
+                                  activeServer?.id === server.id
+                                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20'
+                                    : 'hover:bg-white/5 text-zinc-300 border border-transparent'
+                                }`}
+                              >
+                                <div className="flex items-center gap-3 overflow-hidden w-full min-w-0">
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    {server.exitFlag &&
+                                    server.flag &&
+                                    server.exitServer !== server.server ? (
+                                      <div className="flex items-center gap-0.5 text-lg text-zinc-500">
+                                        <FlagDisplay code={server.flag} className="text-xs" />
+                                        <span>→</span>
+                                        <FlagDisplay code={server.exitFlag} className="text-xs" />
+                                      </div>
+                                    ) : (
+                                      <FlagDisplay
+                                        code={server.exitFlag ?? server.flag}
+                                        className="text-lg"
+                                      />
+                                    )}
+                                  </div>
+
+                                  <div className="flex flex-col items-start overflow-hidden min-w-0 flex-1">
+                                    <div className="flex items-center gap-1.5 w-full">
+                                      <span className="text-sm font-medium leading-tight truncate">
+                                        {server.exitCountryName ??
+                                          server.countryName ??
+                                          server.name}
+                                      </span>
+                                      {server.behindCdn && (
+                                        <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono shrink-0">
+                                          CDN
+                                        </span>
+                                      )}
+                                    </div>
+                                    {serverCity(server) ? (
+                                      <span className="text-[11px] text-zinc-500 leading-tight truncate w-full text-left">
+                                        {serverCity(server)}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2 shrink-0 pl-2">
+                                  <span
+                                    className={`text-[10px] font-mono px-2 py-0.5 rounded-md ${(server.ping ?? 999) < 60 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-yellow-500/10 text-yellow-400'}`}
+                                  >
+                                    {server.ping ?? '-'}ms
+                                  </span>
+                                  {activeServer?.id === server.id && (
+                                    <Check size={14} strokeWidth={3} className="text-emerald-400" />
+                                  )}
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </motion.div>
+                      </>
+                    )}
+                  </AnimatePresence>
+                </div>
+
+                {/* Mode Selector */}
+                <div className="w-full flex flex-col items-center z-20">
                   <SegmentedControl
                     options={[
                       { id: 'vpn', label: t('vpnMode') },
@@ -229,7 +382,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     disabled={isConnected || isConnecting}
                     layoutId="modeIndicatorDashboard"
                   />
-                  <div className="h-20 mt-5 relative w-full">
+
+                  {/* Fixed height container to prevent layout shifts */}
+                  <div className="h-14 mt-3 relative w-full flex justify-center">
                     <AnimatePresence mode="wait" initial={false}>
                       <motion.div
                         key={settings.routingMode}
@@ -248,8 +403,8 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                         </p>
                         {(settings.routingMode === 'system-proxy' ||
                           settings.routingMode === 'local-proxy') && (
-                          <motion.div className="flex items-center justify-between gap-3 mt-3 bg-zinc-900/80 w-37.5 rounded-xl border border-white/10 p-2 px-4 transition-all shadow-inner focus-within:ring-2 focus-within:ring-emerald-500/30 focus-within:border-emerald-500/50">
-                            <span className="text-xs text-zinc-500 font-semibold tracking-wide uppercase">
+                          <motion.div className="flex items-center justify-between gap-3 mt-2 bg-zinc-900/80 w-[150px] mx-auto rounded-xl border border-white/10 p-1.5 px-4 transition-all shadow-inner focus-within:ring-2 focus-within:ring-emerald-500/30 focus-within:border-emerald-500/50">
+                            <span className="text-[10px] text-zinc-500 font-semibold tracking-wide uppercase">
                               {t('proxyPort')}
                             </span>
                             <input
@@ -259,7 +414,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                 updateSettings({ proxyPort: Number(e.target.value) });
                               }}
                               disabled={isConnected || isConnecting}
-                              className="bg-transparent text-sm tracking-widest text-emerald-400 w-14 focus:outline-none font-mono text-right disabled:opacity-50"
+                              className="bg-transparent text-xs tracking-widest text-emerald-400 w-12 focus:outline-none font-mono text-right disabled:opacity-50"
                             />
                           </motion.div>
                         )}
@@ -267,156 +422,10 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     </AnimatePresence>
                   </div>
                 </div>
-
-                <div className="relative">
-                  <motion.button
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
-                    onClick={() => {
-                      setIsServerDropdownOpen(!isServerDropdownOpen);
-                    }}
-                    className="px-5 py-3 bg-zinc-900/60 hover:bg-zinc-800/80 backdrop-blur-xl transition-all rounded-2xl border border-white/10 flex items-center gap-3 z-20 shadow-lg"
-                  >
-                    <div className="flex items-center gap-1">
-                      {activeServer?.exitFlag &&
-                      activeServer?.flag &&
-                      activeServer?.exitServer !== activeServer?.server ? (
-                        <div className="flex items-center gap-0.5 text-lg text-zinc-500">
-                          <FlagDisplay code={activeServer.flag} className="text-xs" />
-                          <span>→</span>
-                          <FlagDisplay code={activeServer.exitFlag} className="text-xs" />
-                        </div>
-                      ) : (
-                        <FlagDisplay
-                          code={activeServer?.exitFlag ?? activeServer?.flag}
-                          className="text-lg"
-                        />
-                      )}
-                    </div>
-                    <div className="flex flex-col items-start">
-                      <span className="text-sm font-medium leading-tight">
-                        {activeServer?.exitCountryName ??
-                          activeServer?.countryName ??
-                          activeServer?.name}
-                        {activeServer?.behindCdn && (
-                          <span className="ml-1.5 text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono">
-                            CDN
-                          </span>
-                        )}
-                      </span>
-                      {activeServer && serverCity(activeServer) ? (
-                        <span className="text-[11px] text-zinc-500 leading-tight">
-                          {serverCity(activeServer)}
-                        </span>
-                      ) : null}
-                    </div>
-                    <div className="flex items-center gap-1.5 ml-3 pl-3 border-l border-white/10">
-                      <div
-                        className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.8)]' : 'bg-zinc-600'}`}
-                      />
-                      <span className="text-xs font-mono text-zinc-400 w-10 text-right">
-                        {activeServer?.ping} ms
-                      </span>
-                    </div>
-                    <ChevronDown
-                      size={16}
-                      className={`ml-1 text-zinc-500 transition-transform duration-300 ${isServerDropdownOpen ? 'rotate-180' : ''}`}
-                    />
-                  </motion.button>
-
-                  <AnimatePresence>
-                    {isServerDropdownOpen && (
-                      <>
-                        <div
-                          className="fixed inset-0 z-10"
-                          onClick={() => {
-                            setIsServerDropdownOpen(false);
-                          }}
-                        />
-                        <motion.div
-                          initial={{ opacity: 0, y: 10, scale: 0.95 }}
-                          animate={{ opacity: 1, y: 0, scale: 1 }}
-                          exit={{ opacity: 0, y: 10, scale: 0.95 }}
-                          transition={{ duration: 0.2, ease: 'easeOut' }}
-                          className="absolute top-full right-0 mt-3 w-72 bg-zinc-900/95 backdrop-blur-2xl border border-white/10 rounded-2xl shadow-2xl p-2 z-20 max-h-72 overflow-y-auto custom-scrollbar"
-                        >
-                          <p className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest px-3 py-2 mb-1">
-                            {t('availableEndpoints')} ({servers.length})
-                          </p>
-                          <div className="flex flex-col gap-1">
-                            {servers.map((server) => (
-                              <button
-                                key={server.id}
-                                onClick={() => {
-                                  setActiveServer(server);
-                                  setIsServerDropdownOpen(false);
-                                  addLog(`Server changed to ${server.name}`, 'info', 'system');
-                                  toast.success(
-                                    `${t('serverStr')}${server.name}${t('selectedStr')}`,
-                                  );
-                                }}
-                                disabled={status === 'connecting'}
-                                className={`flex items-center justify-between p-2.5 rounded-xl transition-all ${
-                                  activeServer?.id === server.id
-                                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20'
-                                    : 'hover:bg-white/5 text-zinc-300 border border-transparent'
-                                }`}
-                              >
-                                <div className="flex items-center gap-3">
-                                  <div className="flex items-center gap-1">
-                                    {server.exitFlag &&
-                                    server.flag &&
-                                    server.exitServer !== server.server ? (
-                                      <div className="flex items-center gap-0.5 text-lg text-zinc-500">
-                                        <FlagDisplay code={server.flag} className="text-xs" />
-                                        <span>→</span>
-                                        <FlagDisplay code={server.exitFlag} className="text-xs" />
-                                      </div>
-                                    ) : (
-                                      <FlagDisplay
-                                        code={server.exitFlag ?? server.flag}
-                                        className="text-lg"
-                                      />
-                                    )}
-                                  </div>
-                                  <div className="flex flex-col items-start">
-                                    <span className="text-sm font-medium leading-tight">
-                                      {server.exitCountryName ?? server.countryName ?? server.name}
-                                      {server.behindCdn && (
-                                        <span className="ml-1.5 text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono">
-                                          CDN
-                                        </span>
-                                      )}
-                                    </span>
-                                    {serverCity(server) ? (
-                                      <span className="text-[11px] text-zinc-500 leading-tight">
-                                        {serverCity(server)}
-                                      </span>
-                                    ) : null}
-                                  </div>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <span
-                                    className={`text-[10px] font-mono px-2 py-0.5 rounded-md ${(server.ping ?? 999) < 60 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-yellow-500/10 text-yellow-400'}`}
-                                  >
-                                    {server.ping ?? '-'}ms
-                                  </span>
-                                  {activeServer?.id === server.id && (
-                                    <Check size={14} strokeWidth={3} />
-                                  )}
-                                </div>
-                              </button>
-                            ))}
-                          </div>
-                        </motion.div>
-                      </>
-                    )}
-                  </AnimatePresence>
-                </div>
               </div>
 
               {/* Connection button */}
-              <div className="relative flex items-center justify-center my-3">
+              <div className="relative flex items-center justify-center my-2 z-10">
                 {isConnected && (
                   <>
                     <motion.div
@@ -439,18 +448,22 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                   whileTap={{ scale: 0.95 }}
                   onClick={() => void handleToggleConnection()}
                   disabled={isConnecting}
-                  className={`relative z-10 w-44 h-44 rounded-full flex flex-col items-center justify-center transition-all duration-500 group border-4
-                    ${isConnected ? 'bg-zinc-900 border-emerald-500 shadow-[0_0_50px_rgba(16,185,129,0.2)]' : 'bg-zinc-900 border-zinc-800 shadow-[0_0_30px_rgba(0,0,0,0.5)]'}
-                    ${isConnecting ? 'animate-pulse border-blue-500 shadow-[0_0_30px_rgba(59,130,246,0.3)]' : ''}
-                    ${status === 'error' ? 'border-red-500 shadow-[0_0_30px_rgba(239,68,68,0.3)]' : ''}`}
+                  className={`relative z-10 w-52 h-52 rounded-full flex flex-col items-center justify-center transition-all duration-500 group
+                    ${isConnected ? 'bg-gradient-to-b from-zinc-800 to-zinc-900 border-2 border-emerald-500/80 shadow-[0_0_60px_-10px_rgba(16,185,129,0.4)]' : 'bg-gradient-to-b from-zinc-800 to-zinc-900 border-2 border-white/5 shadow-2xl hover:border-white/10'}
+                    ${isConnecting ? 'animate-pulse border-blue-500/80 shadow-[0_0_40px_-10px_rgba(59,130,246,0.4)]' : ''}
+                    ${status === 'error' ? 'border-red-500/80 shadow-[0_0_40px_-10px_rgba(239,68,68,0.4)]' : ''}
+                  `}
                 >
+                  <div
+                    className={`absolute inset-0 rounded-full bg-gradient-to-tr opacity-20 transition-opacity duration-500 ${isConnected ? 'from-emerald-500 to-transparent' : 'from-white/5 to-transparent'}`}
+                  />
                   <Power
-                    size={48}
+                    size={56}
                     strokeWidth={1.5}
-                    className={`mb-2 relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-500' : isConnecting ? 'text-blue-500' : status === 'error' ? 'text-red-500' : 'text-zinc-500 group-hover:text-zinc-300'}`}
+                    className={`mb-3 relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-400 drop-shadow-[0_0_8px_rgba(16,185,129,0.8)]' : isConnecting ? 'text-blue-400' : status === 'error' ? 'text-red-400' : 'text-zinc-400 group-hover:text-zinc-200'}`}
                   />
                   <span
-                    className={`text-[10px] font-bold uppercase tracking-[0.2em] relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-500' : isConnecting ? 'text-blue-500' : status === 'error' ? 'text-red-500' : 'text-zinc-500 group-hover:text-zinc-300'}`}
+                    className={`text-xs font-bold uppercase tracking-[0.2em] relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-400' : isConnecting ? 'text-blue-400' : status === 'error' ? 'text-red-400' : 'text-zinc-500 group-hover:text-zinc-300'}`}
                   >
                     {status === 'error'
                       ? t('statusError')
@@ -466,51 +479,43 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
               </div>
 
               {/* Session timer + outlet IP */}
-              <div className="mt-6 text-center h-14">
+              <div className="mt-6 text-center h-20 z-10 w-full flex flex-col items-center">
                 {isConnected && (
                   <motion.div
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className="flex flex-col items-center text-center"
+                    className="flex flex-col items-center text-center w-full"
                   >
-                    <p className="text-3xl font-light font-mono tracking-tight text-white drop-shadow-sm">
+                    <p className="text-4xl font-light font-mono tracking-tight text-white drop-shadow-sm">
                       {sessionDuration}
                     </p>
                     <p className="text-emerald-500/80 text-[10px] uppercase tracking-[0.2em] mt-1 font-bold">
                       {t('activeSession')}
                     </p>
+
+                    {/* Neatly grouped IP Pill */}
                     {activeServer && (
-                      <p className="text-xs text-zinc-400 font-mono mt-2 flex items-center gap-1.5 flex-wrap justify-center">
+                      <div className="mt-3 inline-flex items-center gap-2 bg-zinc-900/50 border border-white/5 rounded-xl px-3 py-1.5 max-w-full shadow-inner">
                         <Globe size={12} className="text-emerald-500 shrink-0" />
-                        {activeServer.flag && (
-                          <span className={`flag:${activeServer.flag.toUpperCase()} text-[11px]`} />
-                        )}
-                        <span>{activeServer.countryName ?? activeServer.flag}</span>
-                        {activeServer.cityName && (
-                          <span className="text-zinc-500">({activeServer.cityName})</span>
-                        )}
-                        <span className="text-zinc-600">{activeServer.server}</span>
-                        {activeServer.behindCdn ? (
-                          <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono">
-                            CDN
-                          </span>
-                        ) : (
-                          exitIp &&
-                          exitIp.server !== activeServer.server && (
+                        <div className="flex items-center gap-1.5 overflow-hidden text-xs text-zinc-400 font-mono min-w-0">
+                          {activeServer.behindCdn ? (
                             <>
-                              <span className="text-zinc-600">→</span>
-                              {exitIp.flag && (
-                                <span className={`flag:${exitIp.flag.toUpperCase()} text-[11px]`} />
-                              )}
-                              <span>{exitIp.country_name ?? exitIp.flag}</span>
-                              {exitIp.city_name && (
-                                <span className="text-zinc-500">({exitIp.city_name})</span>
-                              )}
-                              <span className="text-zinc-600">{exitIp.server}</span>
+                              <span className="truncate">{activeServer.server}</span>
+                              <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded shrink-0">
+                                CDN
+                              </span>
                             </>
-                          )
-                        )}
-                      </p>
+                          ) : exitIp && exitIp.server !== activeServer.server ? (
+                            <>
+                              <span className="truncate max-w-[120px]">{exitIp.country_name}</span>
+                              <span className="text-zinc-600 shrink-0">→</span>
+                              <span className="truncate text-zinc-300">{exitIp.server}</span>
+                            </>
+                          ) : (
+                            <span className="truncate">{activeServer.server}</span>
+                          )}
+                        </div>
+                      </div>
                     )}
                   </motion.div>
                 )}
@@ -518,26 +523,26 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                   <motion.div
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
-                    className="flex flex-col items-center text-center mt-4"
+                    className="flex flex-col items-center text-center mt-4 w-full"
                   >
-                    <p className="text-xs text-zinc-500 font-mono flex items-center gap-1.5">
-                      <Globe size={12} className="text-zinc-500" />
-                      {realIp}
-                    </p>
+                    <div className="inline-flex items-center gap-2 bg-zinc-900/30 border border-white/5 rounded-xl px-3 py-1.5 max-w-full">
+                      <Globe size={12} className="text-zinc-500 shrink-0" />
+                      <span className="text-xs text-zinc-500 font-mono truncate">{realIp}</span>
+                    </div>
                   </motion.div>
                 )}
               </div>
             </div>
 
-            {/* Right panel: protocol, traffic, routing, extra */}
-            <div className="w-80 flex flex-col gap-4">
+            {/* Right Column: Stats & Info */}
+            <div className="w-80 shrink-0 flex flex-col gap-5 z-10">
               {/* Protocol status */}
-              <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-5 shadow-lg">
+              <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-6 shadow-lg">
                 <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest mb-3">
                   {t('protocolStatus')}
                 </p>
                 <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold text-zinc-200">
+                  <span className="text-sm font-semibold text-zinc-200 truncate pr-2 min-w-0">
                     {isConnected
                       ? activeServer?.protocol
                         ? formatProtocol(activeServer.protocol)
@@ -545,7 +550,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                       : t('standby')}
                   </span>
                   <span
-                    className={`text-xs font-mono px-2 py-1 rounded-md ${isConnected ? 'bg-emerald-500/10 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}
+                    className={`text-xs font-mono px-2 py-1 rounded-md shrink-0 ${isConnected ? 'bg-emerald-500/10 text-emerald-400' : 'bg-zinc-800 text-zinc-500'}`}
                   >
                     {isConnected ? t('stable') : t('idle')}
                   </span>
@@ -553,26 +558,26 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
               </div>
 
               {/* Traffic + sparkline */}
-              <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-5 shadow-lg">
+              <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-6 shadow-lg">
                 <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest mb-3">
                   {t('networkTraffic')}
                 </p>
                 {isConnected ? (
                   <>
                     <div className="flex justify-between items-end gap-3">
-                      <div className="flex flex-col">
-                        <span className="text-emerald-400 font-mono text-xl font-medium tracking-tight">
+                      <div className="flex flex-col w-24 min-w-0">
+                        <span className="text-emerald-400 font-mono text-xl font-medium tracking-tight truncate">
                           {speeds.down.toFixed(1)}
                         </span>
-                        <span className="text-[10px] text-zinc-500 uppercase tracking-wider mt-0.5">
+                        <span className="text-[10px] text-zinc-500 uppercase tracking-wider mt-0.5 truncate">
                           MB/s {t('down')}
                         </span>
                       </div>
-                      <div className="flex flex-col items-end">
-                        <span className="text-blue-400 font-mono text-xl font-medium tracking-tight">
+                      <div className="flex flex-col items-end w-24 min-w-0">
+                        <span className="text-blue-400 font-mono text-xl font-medium tracking-tight truncate">
                           {speeds.up.toFixed(1)}
                         </span>
-                        <span className="text-[10px] text-zinc-500 uppercase tracking-wider mt-0.5">
+                        <span className="text-[10px] text-zinc-500 uppercase tracking-wider mt-0.5 truncate">
                           MB/s {t('up')}
                         </span>
                       </div>
@@ -608,23 +613,23 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
               </div>
 
               {/* Routing + speed test */}
-              <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-5 shadow-lg">
+              <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-6 shadow-lg">
                 <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest mb-3">
                   {t('smartRouting')}
                 </p>
-                <div className="flex flex-col gap-3">
+                <div className="flex flex-col gap-4">
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 overflow-hidden min-w-0">
                       <div
-                        className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-zinc-700'}`}
+                        className={`w-2.5 h-2.5 rounded-full shrink-0 ${isConnected ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-zinc-700'}`}
                       />
-                      <span className="text-sm text-zinc-300 font-medium">
+                      <span className="text-sm text-zinc-300 font-medium truncate">
                         {isConnected ? t('bypassingLocal') : t('routingDisabled')}
                       </span>
                     </div>
                     {/* Kill switch indicator */}
                     {isConnected && settings.killSwitch && (
-                      <span className="text-[10px] text-emerald-500/80 font-bold uppercase tracking-wider">
+                      <span className="text-[10px] text-emerald-500/80 font-bold uppercase tracking-wider shrink-0 ml-2">
                         {t('enabled')}
                       </span>
                     )}
@@ -634,14 +639,19 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     <button
                       onClick={() => void handleSpeedTest()}
                       disabled={isSpeedTesting}
-                      className="flex items-center justify-center gap-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 rounded-xl py-2 transition-all text-xs font-semibold disabled:opacity-50"
+                      className="flex items-center justify-center gap-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 rounded-xl py-2.5 transition-all text-xs font-semibold disabled:opacity-50 w-full overflow-hidden"
                     >
-                      <Gauge size={14} className={isSpeedTesting ? 'animate-spin' : ''} />
-                      {isSpeedTesting
-                        ? t('speedTesting')
-                        : speedTestResult?.delay
-                          ? `${t('speedTestResult')}: ${String(speedTestResult.delay)} ms`
-                          : t('speedTest')}
+                      <Gauge
+                        size={14}
+                        className={isSpeedTesting ? 'animate-spin shrink-0' : 'shrink-0'}
+                      />
+                      <span className="truncate">
+                        {isSpeedTesting
+                          ? t('speedTesting')
+                          : speedTestResult?.delay
+                            ? `${t('speedTestResult')}: ${String(speedTestResult.delay)} ms`
+                            : t('speedTest')}
+                      </span>
                     </button>
                   )}
                 </div>
