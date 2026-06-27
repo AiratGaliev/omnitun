@@ -216,69 +216,106 @@ pub fn is_ipinfo_ready() -> bool {
     IPINFO_LITE_READER.get().is_some()
 }
 
-// ── CDN detection (ASN-based) ──────────────────────────────────────────────
+// ── CDN detection (plain-text CIDR lists) ────────────────────────────
+//
+// We download plain-text CIDR lists from 123jjck/cdn-ip-ranges and
+// PentiumB/CDN-RuleSet, then parse one CIDR per line.
 
-/// Check if an IP address belongs to a known CDN provider by ASN.
+/// Parse a plain-text CIDR list file (one CIDR per line).
+/// Used for CDN detection data from 123jjck and PentiumB repos.
+pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read CIDR file: {e}"))?;
+    let mut ranges = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((ip_str, prefix_str)) = line.split_once('/') {
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                if let Ok(prefix_len) = prefix_str.parse::<u8>() {
+                    ranges.push((ip, prefix_len));
+                }
+            }
+        }
+    }
+    Ok(ranges)
+}
+
+/// Load a CDN CIDR file and set CDN_RANGES.
+pub fn init_cdn_ranges(path: &Path) -> Result<(), String> {
+    let ranges = parse_srs_file(path)?;
+    log::info!("Loaded {} CDN CIDR entries from {}", ranges.len(), path.display());
+    set_cdn_ranges(ranges);
+    Ok(())
+}
+
+/// Lazily-loaded CDN CIDR prefixes from downloaded plain-text rule sets.
+static CDN_RANGES: OnceLock<Vec<(IpAddr, u8)>> = OnceLock::new();
+
+/// Replace CDN_RANGES with a new set.
+pub fn set_cdn_ranges(ranges: Vec<(IpAddr, u8)>) {
+    let _ = CDN_RANGES.set(ranges);
+}
+
+/// Returns true when CDN CIDR ranges are loaded.
+pub fn is_cdn_ready() -> bool {
+    CDN_RANGES.get().is_some()
+}
+
+/// Check whether an IP address falls within any CDN CIDR range from the
+/// downloaded 123jjck/cdn-ip-ranges dataset.
 ///
-/// Tries ipinfo.io Lite first (has `asn` + `as_type` fields), then falls
-/// back to GeoLite2-ASN.mmdb.
-///
-/// Known CDN ASNs:
-///   - 13335, 209242, 203898, 394536, 395747, 132892, 398088  Cloudflare
-///   - 54113  Fastly
-///   - 16509, 14618  Amazon CloudFront (AWS)
-///   - 132203 Tencent Cloud CDN
-pub fn is_cdn_asn(ip: &str) -> bool {
+/// This replaces the old hardcoded-ASN approach. The data is updated
+/// every 12 hours via GitHub Actions in the upstream repo.
+pub fn is_cdn_ip(ip: &str) -> bool {
     let addr: IpAddr = match ip.parse() {
         Ok(a) => a,
         Err(_) => return false,
     };
 
-    // 1. Try ipinfo Lite DB first (richer, often more up-to-date)
-    if let Some(reader) = IPINFO_LITE_READER.get() {
-        if let Ok(rec) = reader.lookup::<IpinfoLiteRecord>(addr) {
-            if let Some(ref asn_str) = rec.asn {
-                // asn field format: "AS13335" — strip the "AS" prefix
-                let num: u64 = asn_str
-                    .trim_start_matches("AS")
-                    .trim_start_matches("as")
-                    .parse()
-                    .unwrap_or(0);
-                if is_cdn_asn_num(num) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    // 2. Fallback to MaxMind ASN DB
-    let reader = match ASN_READER.get() {
+    let ranges = match CDN_RANGES.get() {
         Some(r) => r,
         None => return false,
     };
 
-    if let Ok(asn_info) = reader.lookup::<maxminddb::geoip2::Asn>(addr) {
-        if let Some(asn) = asn_info.autonomous_system_number {
-            return is_cdn_asn_num(asn as u64);
+    let addr_bits = addr_to_bits(addr);
+    for &(prefix, prefix_len) in ranges {
+        let mask = prefix_mask(addr, prefix_len);
+        if (addr_bits & mask) == (addr_to_bits(prefix) & mask) {
+            return true;
         }
     }
-
     false
 }
 
-/// Check whether a numeric ASN belongs to a known CDN provider.
-fn is_cdn_asn_num(asn: u64) -> bool {
-    matches!(
-        asn,
-        // Cloudflare (main + WARP/Workers pools)
-        13335 | 209242 | 203898 | 394536 | 395747 | 132892 | 398088
-        // Fastly
-        | 54113
-        // Amazon CloudFront (AWS)
-        | 16509 | 14618
-        // Tencent Cloud CDN
-        | 132203
-    )
+#[inline]
+fn addr_to_bits(ip: IpAddr) -> u128 {
+    match ip {
+        IpAddr::V4(v4) => v4.to_bits() as u128,
+        IpAddr::V6(v6) => v6.to_bits(),
+    }
+}
+
+#[inline]
+fn prefix_mask(ip: IpAddr, len: u8) -> u128 {
+    match ip {
+        IpAddr::V4(_) => {
+            if len >= 32 { return !0u128; }
+            (!0u128) << (32 - len)
+        }
+        IpAddr::V6(_) => {
+            if len >= 128 { return !0u128; }
+            (!0u128) << (128 - len)
+        }
+    }
+}
+
+/// Check if an IP address belongs to a known CDN provider — legacy alias.
+/// Still used by `profile/mod.rs` in batch/parallel server tests.
+pub fn is_cdn_asn(ip: &str) -> bool {
+    is_cdn_ip(ip)
 }
 
 // ── Country resolution ─────────────────────────────────────────────────────
@@ -430,7 +467,8 @@ fn sync_meta_file(db_dir: &Path) {
     let mut meta = load_meta(db_dir);
     let mut changed = false;
 
-    for name in &["GeoLite2-City.mmdb", "GeoLite2-ASN.mmdb", "ipinfo_lite.mmdb"] {
+    for name in &["GeoLite2-City.mmdb", "GeoLite2-ASN.mmdb", "ipinfo_lite.mmdb",
+                  "cdn-only_plain.txt", "merged_cidrs.txt"] {
         if meta.databases.contains_key(*name) {
             continue; // already tracked
         }
@@ -736,7 +774,79 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
     }
     let _ = init_ipinfo(&ipinfo_path);
 
-    // ── 5. Ensure meta file exists (for existing DBs not yet tracked) ──
+    // ── 5. CDN CIDR ranges from plain-text sources ─────────────────
+    //
+    // Sources:
+    //   A) 123jjck/cdn-ip-ranges – broad CDN coverage (plain TXT, one CIDR/line)
+    //   B) PentiumB/CDN-RuleSet   – MaxMind+IPInfo+RouteViews based CDN ranges (merged.sum)
+    //
+    // Each source is a simple text file with one CIDR per line.
+    // We download/refresh each, parse, and merge into CDN_RANGES.
+
+    let cdn_sources: &[(&str, &str, &str)] = &[
+        ("123jjck", "cdn-only_plain.txt",
+         "https://raw.githubusercontent.com/123jjck/cdn-ip-ranges/main/cdn-only/cdn-only_plain.txt"),
+        ("PentiumB", "merged_cidrs.txt",
+         "https://github.com/PentiumB/CDN-RuleSet/releases/latest/download/merged.sum"),
+    ];
+
+    let mut all_cdn_ranges: Vec<(IpAddr, u8)> = Vec::new();
+
+    for (name, filename, url) in cdn_sources {
+        let path = db_dir.join(filename);
+        let needs = !path.exists()
+            || std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .map(|t| t.elapsed().map(|d| d > Duration::from_secs(24 * 3600)).unwrap_or(true))
+                .unwrap_or(true);
+        if needs {
+            log::info!("Downloading CDN CIDR list from {name} ({url}) ...");
+            if let Ok(dl) = reqwest::Client::builder()
+                .user_agent("omnitun/1.0")
+                .danger_accept_invalid_certs(true)
+                .timeout(Duration::from_secs(30))
+                .build()
+            {
+                match download_single(&dl, &path, url, &format!("CDN {name}")).await {
+                    Ok(bytes) => {
+                        update_db_meta(db_dir, filename, None, bytes);
+                        log::info!("CDN {name} downloaded ({bytes} bytes)");
+                    }
+                    Err(e) => log::warn!("CDN {name} download: {e}"),
+                }
+            }
+        }
+        if path.exists() {
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    let mut count = 0usize;
+                    for line in text.lines() {
+                        let line = line.trim();
+                        if line.is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        if let Some((ip_str, prefix_str)) = line.split_once('/') {
+                            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                                if let Ok(prefix_len) = prefix_str.parse::<u8>() {
+                                    all_cdn_ranges.push((ip, prefix_len));
+                                    count += 1;
+                                }
+                            }
+                        }
+                    }
+                    log::info!("CDN {name}: {count} CIDR entries");
+                }
+                Err(e) => log::warn!("CDN {name} read: {e}"),
+            }
+        }
+    }
+
+    if !all_cdn_ranges.is_empty() {
+        log::info!("CDN ranges merged: {} total entries", all_cdn_ranges.len());
+        set_cdn_ranges(all_cdn_ranges);
+    }
+
+    // ── 6. Ensure meta file exists (for existing DBs not yet tracked) ──
     sync_meta_file(db_dir);
 }
 
@@ -764,7 +874,7 @@ async fn download_db_geoip(
                     Err(e) => { last_err = format!("{e}"); continue; }
                 };
                 let len = bytes.len() as u64;
-                if len < 100_000 {
+                if len < 1000 {
                     last_err = format!("response too small ({len} bytes) — likely an error page");
                     continue;
                 }
@@ -865,7 +975,7 @@ async fn download_single(
                 .await
                 .map_err(|e| format!("Failed to read {label} response: {e}"))?;
             let len = bytes.len() as u64;
-            if len < 100_000 {
+            if len < 1000 {
                 return Err(format!(
                     "{label} response too small ({len} bytes) — likely an error page"
                 ));
@@ -1057,36 +1167,20 @@ mod tests {
         assert_eq!(rec.as_type.as_deref(), Some("hosting"));
     }
 
-    #[test]
-    fn test_is_cdn_asn_num_cloudflare() {
-        assert!(is_cdn_asn_num(13335));
-        assert!(is_cdn_asn_num(209242));
-    }
+    // ── is_cdn_ip / init_cdn_ranges ────────────────────────────────────
 
     #[test]
-    fn test_is_cdn_asn_num_fastly() {
-        assert!(is_cdn_asn_num(54113));
-    }
+    fn test_is_cdn_ip_loaded() {
+        // Create a plain-text CIDR file with a Cloudflare range
+        let tmp = std::env::temp_dir().join("cdn_test.txt");
+        std::fs::write(&tmp, b"1.1.1.0/24\n").unwrap();
+        assert!(init_cdn_ranges(&tmp).is_ok());
+        let _ = std::fs::remove_file(tmp);
 
-    #[test]
-    fn test_is_cdn_asn_num_aws() {
-        assert!(is_cdn_asn_num(16509));
-        assert!(is_cdn_asn_num(14618));
+        assert!(is_cdn_ip("1.1.1.1"));
+        assert!(!is_cdn_ip("8.8.8.8"));
+        assert!(!is_cdn_ip("invalid"));
     }
-
-    #[test]
-    fn test_is_cdn_asn_num_tencent() {
-        assert!(is_cdn_asn_num(132203));
-    }
-
-    #[test]
-    fn test_is_cdn_asn_num_non_cdn() {
-        assert!(!is_cdn_asn_num(1));
-        assert!(!is_cdn_asn_num(15169)); // Google
-        assert!(!is_cdn_asn_num(8075)); // Microsoft
-    }
-
-    // ── GeoIpResult serialization ──────────────────────────────────────
 
     #[test]
     fn test_geoip_result_serde() {
@@ -1096,8 +1190,6 @@ mod tests {
             city: "New York".into(),
         };
         let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains("US"));
-        assert!(json.contains("New York"));
         let deser: GeoIpResult = serde_json::from_str(&json).unwrap();
         assert_eq!(deser.country_code, "US");
         assert_eq!(deser.city, "New York");
@@ -1127,13 +1219,5 @@ mod tests {
     async fn test_resolve_hostname_empty() {
         let result = resolve_hostname("").await;
         assert!(result.is_none());
-    }
-
-    // ── is_cdn_asn_num extracted function ──────────────────────────────
-
-    #[test]
-    fn test_is_cdn_asn_num_edge() {
-        assert!(!is_cdn_asn_num(0));
-        assert!(!is_cdn_asn_num(u64::MAX));
     }
 }

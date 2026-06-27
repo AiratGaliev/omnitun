@@ -399,6 +399,39 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         if ipinfo_path.exists() && !crate::vpn::geoip::is_ipinfo_ready() {
             let _ = crate::vpn::geoip::init_ipinfo(&ipinfo_path);
         }
+
+        // Always try to init CDN ranges from downloaded plain-text CIDR files
+        if !crate::vpn::geoip::is_cdn_ready() {
+            let mut merged: Vec<(std::net::IpAddr, u8)> = Vec::new();
+            for name in &["cdn-only_plain.txt", "merged_cidrs.txt"] {
+                let path = geo_dir.join(name);
+                if !path.exists() {
+                    continue;
+                }
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    let mut count = 0usize;
+                    for line in text.lines() {
+                        let line = line.trim();
+                        if line.is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        if let Some((ip_str, prefix_str)) = line.split_once('/') {
+                            if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                                if let Ok(plen) = prefix_str.parse::<u8>() {
+                                    merged.push((ip, plen));
+                                    count += 1;
+                                }
+                            }
+                        }
+                    }
+                    log::info!("CDN {name}: {count} CIDR entries (lazy)");
+                }
+            }
+            if !merged.is_empty() {
+                log::info!("CDN ranges merged: {} total entries (lazy)", merged.len());
+                crate::vpn::geoip::set_cdn_ranges(merged);
+            }
+        }
     }
 
     // 1. Deduplication by protocol + server + port + uuid + password
@@ -431,9 +464,18 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
     }
 
     // 1b. Fast keyword pre-check for serverless domains (workers.dev, pages.dev).
-    //     Full CDN detection via GeoLite2-ASN happens during batch latency test.
+    //     Full CDN detection via ASN happens during batch latency test.
     for s in &mut unique {
         s.behind_cdn = crate::vpn::is_cdn_server(s).await;
+        if s.behind_cdn {
+            log(
+                app,
+                &logger,
+                LogLevel::Info,
+                LogSource::Subscription,
+                format!("[CDN] keyword match: {} ({})", s.display_name(), s.server),
+            );
+        }
     }
 
     // 2. Apply user filters (country, protocol) from settings
@@ -940,6 +982,7 @@ async fn test_servers_via_singbox_parallel(
                 if let Some(ref outlet) = ip {
                     if crate::vpn::geoip::is_cdn_asn(outlet) {
                         srv.behind_cdn = true;
+                        log::info!("[CDN] outlet IP {} → {} is behind CDN", outlet, srv.display_name());
                     }
                 }
 
@@ -1251,6 +1294,7 @@ async fn test_servers_via_singbox_batch(
         if let Some(ref outlet) = ip {
             if crate::vpn::geoip::is_cdn_asn(outlet) {
                 srv.behind_cdn = true;
+                log::info!("[CDN] outlet IP {} → {} is behind CDN", outlet, srv.display_name());
             }
         }
 
