@@ -14,18 +14,20 @@ vi.mock('@tauri-apps/api/core', () => ({
 // Helper: build a minimal get_subscriptions mock response from servers array
 // ─────────────────────────────────────────────────────────────────────────────
 function mockGetSubscriptions(servers: unknown[]): unknown[] {
-  return [{
-    id: 'prof-mock',
-    name: 'Mock',
-    url: '',
-    servers: servers.map((s: Record<string, unknown>) => ({
-      id: s.id,
-      protocol: s.protocol ?? 'vless',
-      server: s.server ?? '127.0.0.1',
-      port: s.port ?? 0,
-    })),
-    updated_at: new Date().toISOString(),
-  }];
+  return [
+    {
+      id: 'prof-mock',
+      name: 'Mock',
+      url: '',
+      servers: servers.map((s: Record<string, unknown>) => ({
+        id: s.id,
+        protocol: s.protocol ?? 'vless',
+        server: s.server ?? '127.0.0.1',
+        port: s.port ?? 0,
+      })),
+      updated_at: new Date().toISOString(),
+    },
+  ];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -523,7 +525,9 @@ describe('store — profile management', () => {
     expect(useVPNStore.getState().activeServer?.id).toBe('srv-1');
 
     // Set manual server
-    useVPNStore.getState().setActiveServer({ id: 'srv-2', name: 'Manual', server: '10.0.0.2', port: 8080 });
+    useVPNStore
+      .getState()
+      .setActiveServer({ id: 'srv-2', name: 'Manual', server: '10.0.0.2', port: 8080 });
 
     mockInvoke.mockResolvedValueOnce([makeRustProfile()]);
     await useVPNStore.getState().loadProfiles();
@@ -617,7 +621,12 @@ describe('store — toggleConnection', () => {
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useVPNStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
-    mockInvoke.mockResolvedValueOnce({ server: "5.6.7.8", flag: "PL", country_name: "Poland", city_name: "Warsaw" }); // outlet_ip
+    mockInvoke.mockResolvedValueOnce({
+      server: '5.6.7.8',
+      flag: 'PL',
+      country_name: 'Poland',
+      city_name: 'Warsaw',
+    }); // outlet_ip
 
     await useVPNStore.getState().toggleConnection();
 
@@ -651,7 +660,12 @@ describe('store — toggleConnection', () => {
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useVPNStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
-    mockInvoke.mockResolvedValueOnce({ server: "5.6.7.8", flag: "PL", country_name: "Poland", city_name: "Warsaw" }); // outlet_ip
+    mockInvoke.mockResolvedValueOnce({
+      server: '5.6.7.8',
+      flag: 'PL',
+      country_name: 'Poland',
+      city_name: 'Warsaw',
+    }); // outlet_ip
 
     await useVPNStore.getState().toggleConnection();
 
@@ -671,7 +685,12 @@ describe('store — toggleConnection', () => {
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useVPNStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
-    mockInvoke.mockResolvedValueOnce({ server: "5.6.7.8", flag: "PL", country_name: "Poland", city_name: "Warsaw" }); // outlet_ip
+    mockInvoke.mockResolvedValueOnce({
+      server: '5.6.7.8',
+      flag: 'PL',
+      country_name: 'Poland',
+      city_name: 'Warsaw',
+    }); // outlet_ip
 
     await useVPNStore.getState().toggleConnection();
     const startCall = mockInvoke.mock.calls.find((c) => c[0] === 'start_vpn');
@@ -709,7 +728,12 @@ describe('store — toggleConnection', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('store — IP fetching', () => {
   it('fetchOutletIp stores IP on success', async () => {
-    mockInvoke.mockResolvedValueOnce({ server: "1.2.3.4", flag: "PL", country_name: "Poland", city_name: "Warsaw" });
+    mockInvoke.mockResolvedValueOnce({
+      server: '1.2.3.4',
+      flag: 'PL',
+      country_name: 'Poland',
+      city_name: 'Warsaw',
+    });
     await useVPNStore.getState().fetchExitIp();
     const result = useVPNStore.getState().exitIp;
     expect(result).not.toBeNull();
