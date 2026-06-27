@@ -206,7 +206,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
           <>
             {/* Left Column: Controls & Power Button */}
             <div className="flex flex-col items-center justify-center flex-1 max-w-sm w-full">
-              <div className="w-full flex flex-col items-center gap-6 mb-4 z-20">
+              <div className="w-full flex flex-col items-center gap-6 mb-6 z-20">
                 {/* Server Picker */}
                 <div className="relative w-full z-30">
                   <motion.button
@@ -235,7 +235,6 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                         )}
                       </div>
 
-                      {/* min-w-0 is crucial here to allow truncate to work inside flex */}
                       <div className="flex flex-col items-start overflow-hidden min-w-0 flex-1">
                         <div className="flex items-center gap-1.5 w-full">
                           <span className="text-sm font-medium leading-tight truncate">
@@ -430,13 +429,13 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                   <>
                     <motion.div
                       initial={{ scale: 0.8, opacity: 0 }}
-                      animate={{ scale: 1.5, opacity: 0 }}
+                      animate={{ scale: 1.35, opacity: 0 }}
                       transition={{ repeat: Infinity, duration: 2.5, ease: 'easeOut' }}
                       className="absolute inset-0 rounded-full border border-emerald-500/30 bg-emerald-500/5"
                     />
                     <motion.div
                       initial={{ scale: 0.8, opacity: 0 }}
-                      animate={{ scale: 1.3, opacity: 0 }}
+                      animate={{ scale: 1.2, opacity: 0 }}
                       transition={{ repeat: Infinity, duration: 2.5, delay: 0.8, ease: 'easeOut' }}
                       className="absolute inset-0 rounded-full border border-emerald-500/40"
                     />
@@ -448,8 +447,8 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                   whileTap={{ scale: 0.95 }}
                   onClick={() => void handleToggleConnection()}
                   disabled={isConnecting}
-                  className={`relative z-10 w-52 h-52 rounded-full flex flex-col items-center justify-center transition-all duration-500 group
-                    ${isConnected ? 'bg-gradient-to-b from-zinc-800 to-zinc-900 border-2 border-emerald-500/80 shadow-[0_0_60px_-10px_rgba(16,185,129,0.4)]' : 'bg-gradient-to-b from-zinc-800 to-zinc-900 border-2 border-white/5 shadow-2xl hover:border-white/10'}
+                  className={`relative z-10 w-44 h-44 rounded-full flex flex-col items-center justify-center transition-all duration-500 group
+                    ${isConnected ? 'bg-gradient-to-b from-zinc-800 to-zinc-900 border-2 border-emerald-500/80 shadow-[0_0_50px_-10px_rgba(16,185,129,0.4)]' : 'bg-gradient-to-b from-zinc-800 to-zinc-900 border-2 border-white/5 shadow-2xl hover:border-white/10'}
                     ${isConnecting ? 'animate-pulse border-blue-500/80 shadow-[0_0_40px_-10px_rgba(59,130,246,0.4)]' : ''}
                     ${status === 'error' ? 'border-red-500/80 shadow-[0_0_40px_-10px_rgba(239,68,68,0.4)]' : ''}
                   `}
@@ -458,12 +457,12 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     className={`absolute inset-0 rounded-full bg-gradient-to-tr opacity-20 transition-opacity duration-500 ${isConnected ? 'from-emerald-500 to-transparent' : 'from-white/5 to-transparent'}`}
                   />
                   <Power
-                    size={56}
+                    size={48}
                     strokeWidth={1.5}
-                    className={`mb-3 relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-400 drop-shadow-[0_0_8px_rgba(16,185,129,0.8)]' : isConnecting ? 'text-blue-400' : status === 'error' ? 'text-red-400' : 'text-zinc-400 group-hover:text-zinc-200'}`}
+                    className={`mb-2 relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-400 drop-shadow-[0_0_8px_rgba(16,185,129,0.8)]' : isConnecting ? 'text-blue-400' : status === 'error' ? 'text-red-400' : 'text-zinc-400 group-hover:text-zinc-200'}`}
                   />
                   <span
-                    className={`text-xs font-bold uppercase tracking-[0.2em] relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-400' : isConnecting ? 'text-blue-400' : status === 'error' ? 'text-red-400' : 'text-zinc-500 group-hover:text-zinc-300'}`}
+                    className={`text-[10px] font-bold uppercase tracking-[0.2em] relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-400' : isConnecting ? 'text-blue-400' : status === 'error' ? 'text-red-400' : 'text-zinc-500 group-hover:text-zinc-300'}`}
                   >
                     {status === 'error'
                       ? t('statusError')
@@ -478,59 +477,66 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 </motion.button>
               </div>
 
-              {/* Session timer + outlet IP */}
-              <div className="mt-6 text-center h-20 z-10 w-full flex flex-col items-center">
-                {isConnected && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="flex flex-col items-center text-center w-full"
-                  >
-                    <p className="text-4xl font-light font-mono tracking-tight text-white drop-shadow-sm">
-                      {sessionDuration}
-                    </p>
-                    <p className="text-emerald-500/80 text-[10px] uppercase tracking-[0.2em] mt-1 font-bold">
-                      {t('activeSession')}
-                    </p>
+              {/* Session timer + outlet IP (Fixed Height Container) */}
+              <div className="mt-6 text-center h-24 z-10 w-full flex flex-col items-center justify-start">
+                <AnimatePresence mode="wait">
+                  {isConnected ? (
+                    <motion.div
+                      key="connected-info"
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      className="flex flex-col items-center text-center w-full"
+                    >
+                      <p className="text-4xl font-light font-mono tracking-tight text-white drop-shadow-sm">
+                        {sessionDuration}
+                      </p>
+                      <p className="text-emerald-500/80 text-[10px] uppercase tracking-[0.2em] mt-1 font-bold">
+                        {t('activeSession')}
+                      </p>
 
-                    {/* Neatly grouped IP Pill */}
-                    {activeServer && (
-                      <div className="mt-3 inline-flex items-center gap-2 bg-zinc-900/50 border border-white/5 rounded-xl px-3 py-1.5 max-w-full shadow-inner">
-                        <Globe size={12} className="text-emerald-500 shrink-0" />
-                        <div className="flex items-center gap-1.5 overflow-hidden text-xs text-zinc-400 font-mono min-w-0">
-                          {activeServer.behindCdn ? (
-                            <>
+                      {/* Neatly grouped IP Pill */}
+                      {activeServer && (
+                        <div className="mt-3 inline-flex items-center gap-2 bg-zinc-900/50 border border-white/5 rounded-xl px-3 py-1.5 max-w-full shadow-inner">
+                          <Globe size={12} className="text-emerald-500 shrink-0" />
+                          <div className="flex items-center gap-1.5 overflow-hidden text-xs text-zinc-400 font-mono min-w-0">
+                            {activeServer.behindCdn ? (
+                              <>
+                                <span className="truncate">{activeServer.server}</span>
+                                <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded shrink-0">
+                                  CDN
+                                </span>
+                              </>
+                            ) : exitIp && exitIp.server !== activeServer.server ? (
+                              <>
+                                <span className="truncate max-w-[120px]">
+                                  {exitIp.country_name}
+                                </span>
+                                <span className="text-zinc-600 shrink-0">→</span>
+                                <span className="truncate text-zinc-300">{exitIp.server}</span>
+                              </>
+                            ) : (
                               <span className="truncate">{activeServer.server}</span>
-                              <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded shrink-0">
-                                CDN
-                              </span>
-                            </>
-                          ) : exitIp && exitIp.server !== activeServer.server ? (
-                            <>
-                              <span className="truncate max-w-[120px]">{exitIp.country_name}</span>
-                              <span className="text-zinc-600 shrink-0">→</span>
-                              <span className="truncate text-zinc-300">{exitIp.server}</span>
-                            </>
-                          ) : (
-                            <span className="truncate">{activeServer.server}</span>
-                          )}
+                            )}
+                          </div>
                         </div>
+                      )}
+                    </motion.div>
+                  ) : realIp ? (
+                    <motion.div
+                      key="real-ip-info"
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -10 }}
+                      className="flex flex-col items-center text-center w-full mt-2"
+                    >
+                      <div className="inline-flex items-center gap-2 bg-zinc-900/30 border border-white/5 rounded-xl px-3 py-1.5 max-w-full">
+                        <Globe size={12} className="text-zinc-500 shrink-0" />
+                        <span className="text-xs text-zinc-500 font-mono truncate">{realIp}</span>
                       </div>
-                    )}
-                  </motion.div>
-                )}
-                {realIp && status !== 'connected' && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="flex flex-col items-center text-center mt-4 w-full"
-                  >
-                    <div className="inline-flex items-center gap-2 bg-zinc-900/30 border border-white/5 rounded-xl px-3 py-1.5 max-w-full">
-                      <Globe size={12} className="text-zinc-500 shrink-0" />
-                      <span className="text-xs text-zinc-500 font-mono truncate">{realIp}</span>
-                    </div>
-                  </motion.div>
-                )}
+                    </motion.div>
+                  ) : null}
+                </AnimatePresence>
               </div>
             </div>
 
@@ -541,7 +547,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest mb-3">
                   {t('protocolStatus')}
                 </p>
-                <div className="flex items-center justify-between">
+                <div className="h-[24px] flex items-center justify-between">
                   <span className="text-sm font-semibold text-zinc-200 truncate pr-2 min-w-0">
                     {isConnected
                       ? activeServer?.protocol
@@ -562,54 +568,56 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest mb-3">
                   {t('networkTraffic')}
                 </p>
-                {isConnected ? (
-                  <>
-                    <div className="flex justify-between items-end gap-3">
-                      <div className="flex flex-col w-24 min-w-0">
-                        <span className="text-emerald-400 font-mono text-xl font-medium tracking-tight truncate">
-                          {speeds.down.toFixed(1)}
-                        </span>
-                        <span className="text-[10px] text-zinc-500 uppercase tracking-wider mt-0.5 truncate">
-                          MB/s {t('down')}
-                        </span>
+                <div className="h-[84px] flex flex-col justify-end">
+                  {isConnected ? (
+                    <>
+                      <div className="flex justify-between items-end gap-3">
+                        <div className="flex flex-col w-24 min-w-0">
+                          <span className="text-emerald-400 font-mono text-xl font-medium tracking-tight truncate">
+                            {speeds.down.toFixed(1)}
+                          </span>
+                          <span className="text-[10px] text-zinc-500 uppercase tracking-wider mt-0.5 truncate">
+                            MB/s {t('down')}
+                          </span>
+                        </div>
+                        <div className="flex flex-col items-end w-24 min-w-0">
+                          <span className="text-blue-400 font-mono text-xl font-medium tracking-tight truncate">
+                            {speeds.up.toFixed(1)}
+                          </span>
+                          <span className="text-[10px] text-zinc-500 uppercase tracking-wider mt-0.5 truncate">
+                            MB/s {t('up')}
+                          </span>
+                        </div>
                       </div>
-                      <div className="flex flex-col items-end w-24 min-w-0">
-                        <span className="text-blue-400 font-mono text-xl font-medium tracking-tight truncate">
-                          {speeds.up.toFixed(1)}
-                        </span>
-                        <span className="text-[10px] text-zinc-500 uppercase tracking-wider mt-0.5 truncate">
-                          MB/s {t('up')}
-                        </span>
-                      </div>
+                      {/* Sparkline */}
+                      {sparklineData.length >= 2 && (
+                        <div className="mt-2 flex justify-center opacity-60 h-[30px]">
+                          <svg
+                            width="120"
+                            height="30"
+                            viewBox="0 0 120 30"
+                            className="overflow-visible"
+                          >
+                            <path
+                              d={sparklinePath()}
+                              fill="none"
+                              stroke="#10b981"
+                              strokeWidth="1.5"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                          </svg>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="h-full flex items-center justify-center">
+                      <span className="text-sm text-zinc-600 font-medium">
+                        {t('connectToMonitor')}
+                      </span>
                     </div>
-                    {/* Sparkline */}
-                    {sparklineData.length >= 2 && (
-                      <div className="mt-2 flex justify-center opacity-60">
-                        <svg
-                          width="120"
-                          height="30"
-                          viewBox="0 0 120 30"
-                          className="overflow-visible"
-                        >
-                          <path
-                            d={sparklinePath()}
-                            fill="none"
-                            stroke="#10b981"
-                            strokeWidth="1.5"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          />
-                        </svg>
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <div className="h-14 flex items-center justify-center">
-                    <span className="text-sm text-zinc-600 font-medium">
-                      {t('connectToMonitor')}
-                    </span>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
 
               {/* Routing + speed test */}
@@ -617,7 +625,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest mb-3">
                   {t('smartRouting')}
                 </p>
-                <div className="flex flex-col gap-4">
+                <div className="h-[76px] flex flex-col justify-between">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3 overflow-hidden min-w-0">
                       <div
@@ -634,26 +642,34 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                       </span>
                     )}
                   </div>
-                  {/* Speed test button */}
-                  {isConnected && (
-                    <button
-                      onClick={() => void handleSpeedTest()}
-                      disabled={isSpeedTesting}
-                      className="flex items-center justify-center gap-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 rounded-xl py-2.5 transition-all text-xs font-semibold disabled:opacity-50 w-full overflow-hidden"
-                    >
-                      <Gauge
-                        size={14}
-                        className={isSpeedTesting ? 'animate-spin shrink-0' : 'shrink-0'}
-                      />
-                      <span className="truncate">
-                        {isSpeedTesting
-                          ? t('speedTesting')
-                          : speedTestResult?.delay
-                            ? `${t('speedTestResult')}: ${String(speedTestResult.delay)} ms`
-                            : t('speedTest')}
-                      </span>
-                    </button>
-                  )}
+
+                  {/* Speed test button (or placeholder to maintain height) */}
+                  <AnimatePresence mode="wait">
+                    {isConnected ? (
+                      <motion.button
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        onClick={() => void handleSpeedTest()}
+                        disabled={isSpeedTesting}
+                        className="flex items-center justify-center gap-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 rounded-xl py-2.5 transition-all text-xs font-semibold disabled:opacity-50 w-full overflow-hidden"
+                      >
+                        <Gauge
+                          size={14}
+                          className={isSpeedTesting ? 'animate-spin shrink-0' : 'shrink-0'}
+                        />
+                        <span className="truncate">
+                          {isSpeedTesting
+                            ? t('speedTesting')
+                            : speedTestResult?.delay
+                              ? `${t('speedTestResult')}: ${String(speedTestResult.delay)} ms`
+                              : t('speedTest')}
+                        </span>
+                      </motion.button>
+                    ) : (
+                      <div className="h-[36px]" /> // Placeholder
+                    )}
+                  </AnimatePresence>
                 </div>
               </div>
             </div>
