@@ -184,7 +184,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
         </div>
       </header>
 
-      <div className="flex-1 flex flex-row gap-8 lg:gap-12 items-center justify-center w-full max-w-5xl mx-auto">
+      <div className="flex-1 flex flex-row gap-8 lg:gap-12 items-start justify-center w-full max-w-5xl mx-auto">
         {servers.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-5 bg-zinc-900/30 border border-white/5 p-12 rounded-3xl backdrop-blur-sm w-full max-w-lg">
             <div className="w-20 h-20 bg-white/5 rounded-2xl flex items-center justify-center shadow-inner">
@@ -205,7 +205,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
         ) : (
           <>
             {/* Left Column: Controls & Power Button */}
-            <div className="flex flex-col items-center justify-center flex-1 max-w-sm w-full">
+            <div className="flex flex-col items-center flex-1 max-w-sm w-full">
               <div className="w-full flex flex-col items-center gap-6 mb-6 z-20">
                 {/* Server Picker */}
                 <div className="relative w-full z-30">
@@ -456,29 +456,45 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                   <div
                     className={`absolute inset-0 rounded-full bg-gradient-to-tr opacity-20 transition-opacity duration-500 ${isConnected ? 'from-emerald-500 to-transparent' : 'from-white/5 to-transparent'}`}
                   />
-                  <Power
-                    size={48}
-                    strokeWidth={1.5}
-                    className={`mb-2 relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-400 drop-shadow-[0_0_8px_rgba(16,185,129,0.8)]' : isConnecting ? 'text-blue-400' : status === 'error' ? 'text-red-400' : 'text-zinc-400 group-hover:text-zinc-200'}`}
-                  />
-                  <span
-                    className={`text-[10px] font-bold uppercase tracking-[0.2em] relative z-10 transition-colors duration-500 ${isConnected ? 'text-emerald-400' : isConnecting ? 'text-blue-400' : status === 'error' ? 'text-red-400' : 'text-zinc-500 group-hover:text-zinc-300'}`}
-                  >
-                    {status === 'error'
-                      ? t('statusError')
-                      : isConnected
-                        ? t('connected')
-                        : status === 'disconnecting'
-                          ? t('disconnecting')
-                          : status === 'connecting'
-                            ? t('connecting')
-                            : t('disconnected')}
-                  </span>
+                  {isConnected ? (
+                    <>
+                      <Power
+                        size={28}
+                        strokeWidth={1.5}
+                        className="mb-1 relative z-10 text-emerald-400 drop-shadow-[0_0_8px_rgba(16,185,129,0.8)]"
+                      />
+                      <p className="text-xl font-light font-mono tracking-tight text-white drop-shadow-sm relative z-10">
+                        {sessionDuration}
+                      </p>
+                      <span className="text-[8px] text-emerald-500/80 font-bold uppercase tracking-[0.2em] relative z-10">
+                        {t('activeSession')}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <Power
+                        size={48}
+                        strokeWidth={1.5}
+                        className={`mb-2 relative z-10 transition-colors duration-500 ${isConnecting ? 'text-blue-400' : status === 'error' ? 'text-red-400' : 'text-zinc-400 group-hover:text-zinc-200'}`}
+                      />
+                      <span
+                        className={`text-[10px] font-bold uppercase tracking-[0.2em] relative z-10 transition-colors duration-500 ${isConnecting ? 'text-blue-400' : status === 'error' ? 'text-red-400' : 'text-zinc-500 group-hover:text-zinc-300'}`}
+                      >
+                        {status === 'error'
+                          ? t('statusError')
+                          : status === 'disconnecting'
+                            ? t('disconnecting')
+                            : status === 'connecting'
+                              ? t('connecting')
+                              : t('disconnected')}
+                      </span>
+                    </>
+                  )}
                 </motion.button>
               </div>
 
-              {/* Session timer + outlet IP (Fixed Height Container) */}
-              <div className="mt-6 text-center h-24 z-10 w-full flex flex-col items-center justify-start">
+              {/* Outlet IP (Fixed Height Container) */}
+              <div className="mt-6 text-center h-16 z-10 w-full flex flex-col items-center justify-start">
                 <AnimatePresence mode="wait">
                   {isConnected ? (
                     <motion.div
@@ -488,16 +504,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                       exit={{ opacity: 0, y: -10 }}
                       className="flex flex-col items-center text-center w-full"
                     >
-                      <p className="text-4xl font-light font-mono tracking-tight text-white drop-shadow-sm">
-                        {sessionDuration}
-                      </p>
-                      <p className="text-emerald-500/80 text-[10px] uppercase tracking-[0.2em] mt-1 font-bold">
-                        {t('activeSession')}
-                      </p>
-
                       {/* Neatly grouped IP Pill */}
                       {activeServer && (
-                        <div className="mt-3 inline-flex items-center gap-2 bg-zinc-900/50 border border-white/5 rounded-xl px-3 py-1.5 max-w-full shadow-inner">
+                        <div className="inline-flex items-center gap-2 bg-zinc-900/50 border border-white/5 rounded-xl px-3 py-1.5 max-w-full shadow-inner">
                           <Globe size={12} className="text-emerald-500 shrink-0" />
                           <div className="flex items-center gap-1.5 overflow-hidden text-xs text-zinc-400 font-mono min-w-0">
                             {activeServer.behindCdn ? (
