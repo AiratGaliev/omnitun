@@ -29,6 +29,7 @@ pub enum LogSource {
     Process,
     Subscription,
     Settings,
+    Cache,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

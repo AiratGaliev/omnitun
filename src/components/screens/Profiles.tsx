@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useVPNStore } from '@/store.ts';
-import { Edit2, Globe2, RefreshCw, Trash2 } from 'lucide-react';
+import { Edit2, Globe2, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import type { Profile } from '@/types.ts';
+import type { RefreshProgress } from '@/types.ts';
 import type { TranslationKey } from '@/i18n.ts';
 import * as z from 'zod';
 import { AddProfileOptions } from '../AddProfileOptions';
@@ -24,7 +25,7 @@ function formatBytes(bytes: number): string {
 }
 
 export function Profiles() {
-  const { profiles, addProfile, removeProfile, refreshProfile, updateProfile } = useVPNStore();
+  const { profiles, addProfile, removeProfile, refreshProfile, updateProfile, refreshProgress } = useVPNStore();
   const { t } = useTranslation();
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -93,6 +94,7 @@ export function Profiles() {
             <ProfileItem
               key={p.id}
               profile={p}
+              progress={refreshProgress[p.id] ?? null}
               updateProfile={updateProfile}
               handleRefresh={handleRefresh}
               t={t}
@@ -135,6 +137,7 @@ export function Profiles() {
 
 interface ProfileItemProps {
   readonly profile: Profile;
+  readonly progress: RefreshProgress | null;
   readonly updateProfile: (id: string, data: Partial<Profile>) => void;
   readonly handleRefresh: (profile: Profile) => void;
   readonly t: (key: TranslationKey) => string;
@@ -145,6 +148,7 @@ interface ProfileItemProps {
 
 function ProfileItem({
   profile: p,
+  progress,
   updateProfile,
   handleRefresh,
   t,
@@ -243,6 +247,47 @@ function ProfileItem({
                   )}
                 </div>
               )}
+
+              {/* ── Refresh progress bar ─────────────────────────────────── */}
+              {progress && (
+                <div className="mt-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-medium text-emerald-400 flex items-center gap-1.5">
+                      <Loader2 size={12} className="animate-spin" />
+                      {progress.phase === 'testing'
+                        ? `${t('testingServers')}: ${progress.tested}/${progress.total}`
+                        : progress.phase === 'singbox_starting'
+                          ? t('startingSingbox')
+                          : progress.phase === 'acquiring_ports'
+                            ? t('acquiringPorts')
+                            : progress.phase}
+                    </span>
+                    <span className="text-[11px] text-zinc-500">
+                      {progress.cache_hits > 0 && (
+                        <span className="text-emerald-500">
+                          {progress.cache_hits}{' '}
+                          {t('cached').toLowerCase()}
+                          {' · '}
+                        </span>
+                      )}
+                      {progress.successful}/{progress.total}{' '}
+                      {t('successful').toLowerCase()}
+                    </span>
+                  </div>
+                  {progress.total > 0 && (
+                    <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                      <motion.div
+                        className="h-full bg-gradient-to-r from-emerald-500 to-emerald-400 rounded-full"
+                        initial={{ width: 0 }}
+                        animate={{
+                          width: `${Math.min(100, (progress.tested / progress.total) * 100)}%`,
+                        }}
+                        transition={{ duration: 0.3 }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
@@ -258,10 +303,15 @@ function ProfileItem({
                 onClick={() => {
                   handleRefresh(p);
                 }}
+                disabled={progress !== null}
                 title={t('refreshServers')}
-                className="p-2.5 border border-white/5 bg-zinc-800/50 rounded-xl hover:bg-zinc-700 hover:text-white text-zinc-400 transition-all shadow-sm"
+                className={`p-2.5 border border-white/5 bg-zinc-800/50 rounded-xl hover:bg-zinc-700 hover:text-white text-zinc-400 transition-all shadow-sm disabled:opacity-50 disabled:cursor-not-allowed`}
               >
-                <RefreshCw size={16} />
+                {progress !== null ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <RefreshCw size={16} />
+                )}
               </button>
               <button
                 onClick={() => {

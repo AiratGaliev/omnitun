@@ -176,5 +176,10 @@
   "ipinfoDownloading": "Downloading IPinfo GeoIP database...",
   "ipinfoDownloaded": "IPinfo GeoIP database downloaded",
   "ipinfoCached": "IPinfo database is up-to-date (cached copy)",
-  "ipinfoDownloadFailed": "IPinfo database download failed"
+  "ipinfoDownloadFailed": "IPinfo database download failed",
+  "testingServers": "Testing",
+  "startingSingbox": "Starting sing-box",
+  "acquiringPorts": "Acquiring ports",
+  "cached": "Cached",
+  "successful": "Successful"
 }

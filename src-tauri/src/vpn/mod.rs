@@ -1,6 +1,10 @@
+pub mod batcher;
+pub mod cache;
 pub mod config;
 pub mod geoip;
 pub mod installer;
+pub mod persistence;
+pub mod port_pool;
 mod process;
 
 use crate::logging::{log, LogLevel, LogSource, Logger};

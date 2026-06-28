@@ -176,5 +176,10 @@
   "ipinfoDownloading": "Загрузка IPinfo GeoIP базы данных...",
   "ipinfoDownloaded": "IPinfo GeoIP база данных загружена",
   "ipinfoCached": "IPinfo база актуальна (используется кэш)",
-  "ipinfoDownloadFailed": "Не удалось загрузить IPinfo базу"
+  "ipinfoDownloadFailed": "Не удалось загрузить IPinfo базу",
+  "testingServers": "Тестирование",
+  "startingSingbox": "Запуск sing-box",
+  "acquiringPorts": "Получение портов",
+  "cached": "Кэш",
+  "successful": "Успешно"
 }

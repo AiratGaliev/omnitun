@@ -41,6 +41,7 @@ import type {
   LogEntry,
   LogSource,
   Profile,
+  RefreshProgress,
   Server,
   Settings,
   SpeedTestResult,
@@ -120,6 +121,8 @@ interface VPNStore {
   connectedAt: number | null;
   logs: LogEntry[];
   settingsVersion: number;
+  /** Per-profile batch refresh progress (profile_id → progress or null). */
+  refreshProgress: Record<string, RefreshProgress | null>;
 
   setStatus: (status: ConnectionStatus) => void;
   setActiveServer: (server: Server) => void;
@@ -321,6 +324,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   activeServer: null,
   servers: defaultServers,
   profiles: [],
+  refreshProgress: {},
   hasOnboarded: false,
   hasAcceptedTerms: false,
   speeds: { up: 0, down: 0 },
@@ -904,11 +908,24 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
       set({ speeds: { up: event.payload.up, down: event.payload.down } });
     });
 
+    // Listen for batch refresh progress from the BatchingEngine
+    const unlistenRefresh = await listen<RefreshProgress>('refresh-progress', (event) => {
+      const progress = event.payload;
+      set((state) => ({
+        refreshProgress: {
+          ...state.refreshProgress,
+          [progress.profile_id]:
+            progress.phase === 'done' ? null : progress,
+        },
+      }));
+    });
+
     return () => {
       stopHealthCheck();
       unlisten();
       unlistenLogs();
       unlistenTraffic();
+      unlistenRefresh();
     };
   },
 }));

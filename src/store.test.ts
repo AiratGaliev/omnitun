@@ -19,7 +19,7 @@ function mockGetSubscriptions(servers: unknown[]): unknown[] {
       id: 'prof-mock',
       name: 'Mock',
       url: '',
-      servers: servers.map((s: Record<string, unknown>) => ({
+      servers: (servers as Record<string, unknown>[]).map((s) => ({
         id: s.id,
         protocol: s.protocol ?? 'vless',
         server: s.server ?? '127.0.0.1',

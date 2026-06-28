@@ -12,6 +12,8 @@ use crate::logging::{log, LogLevel, LogSource, Logger, MAX_LOG_FILES_COUNT};
 use crate::profile::ProfileManager;
 use crate::settings::{AppSettings, SettingsManager};
 use crate::subscription::SubscriptionProfile;
+use crate::vpn::port_pool::PortPool;
+use crate::vpn::cache::ServerCache;
 use crate::vpn::{ServerProfile, VpnManager, VpnStatus};
 use chrono::Local;
 use serde::Serialize;
@@ -417,7 +419,7 @@ async fn start_vpn(
                                     }
                                 };
                                 let re_pinged =
-                                    crate::profile::process_servers(&app_clone, servers).await;
+                                    crate::profile::process_servers(&app_clone, servers, "").await;
                                 if let Some(profile) =
                                     pm.list_mut().iter_mut().find(|p| &p.id == pid)
                                 {
@@ -678,10 +680,39 @@ async fn refresh_subscription(
         "Refreshing subscription...".into(),
     );
 
+    // Emit tcp_ping progress phase
+    let _ = crate::events::emit_refresh_progress(
+        &app,
+        crate::events::RefreshProgress {
+            profile_id: id.clone(),
+            total: 0,
+            tested: 0,
+            cache_hits: 0,
+            successful: 0,
+            failed: 0,
+            phase: "tcp_ping".into(),
+        },
+    );
+
     let mut mgr = state.manager.lock().await;
     match mgr.refresh(&app, &id).await {
         Ok(profile) => {
             let count = profile.servers.len();
+
+            // Emit done phase
+            let _ = crate::events::emit_refresh_progress(
+                &app,
+                crate::events::RefreshProgress {
+                    profile_id: id,
+                    total: count,
+                    tested: count,
+                    cache_hits: 0,
+                    successful: count,
+                    failed: 0,
+                    phase: "done".into(),
+                },
+            );
+
             log(
                 &app,
                 &logger,
@@ -795,6 +826,34 @@ fn set_start_on_boot(enabled: bool) {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Cancel the current subscription refresh.
+#[tauri::command]
+async fn cancel_refresh(app: tauri::AppHandle) -> Result<(), String> {
+    let logger = app.state::<StdMutex<Logger>>();
+    log(
+        &app,
+        &logger,
+        LogLevel::Info,
+        LogSource::Cache,
+        "Cancelling refresh...".into(),
+    );
+    if let Some(cancel_guard) = app.try_state::<StdMutex<tokio_util::sync::CancellationToken>>() {
+        if let Ok(mut token) = cancel_guard.lock() {
+            let new_token = tokio_util::sync::CancellationToken::new();
+            let old_token = std::mem::replace(&mut *token, new_token);
+            old_token.cancel();
+            log(
+                &app,
+                &logger,
+                LogLevel::Info,
+                LogSource::Cache,
+                "Refresh cancelled".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -842,6 +901,30 @@ pub fn run() {
                 manager: Arc::new(Mutex::new(vpn_manager)),
             };
             app.manage(vpn_state);
+
+            // ── Server cache (dual-layer with batcher) ──────────────────────
+            let cache = Arc::new(ServerCache::new(&data_dir));
+            let port_pool = Arc::new(PortPool::new());
+            let cancel_token = tokio_util::sync::CancellationToken::new();
+
+            // Start the background batching engine
+            cache.start_batcher(
+                port_pool.clone(),
+                app.handle().clone(),
+                cancel_token.clone(),
+            );
+
+            app.manage(cache.clone());
+            app.manage(port_pool.clone());
+            app.manage(StdMutex::new(cancel_token));
+
+            log(
+                app.handle(),
+                &StdMutex::new(Logger::new(1, None)),
+                LogLevel::Info,
+                LogSource::System,
+                "Server cache and batch engine initialized".into(),
+            );
 
             let settings_mgr = SettingsManager::new(data_dir.clone());
             let settings = settings_mgr.load().expect("Failed to load settings");
@@ -935,6 +1018,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+
+
+
+
             start_vpn,
             stop_vpn,
             get_vpn_status,
@@ -944,6 +1031,7 @@ pub fn run() {
             refresh_subscription,
             get_settings,
             update_settings,
+            cancel_refresh,
             logging::get_logs,
             logging::log_message,
             read_clipboard_text,
@@ -1347,7 +1435,7 @@ async fn import_subscription_content(
         return Err("No servers found in content".into());
     }
 
-    let servers = crate::profile::process_servers(&app, servers).await;
+    let servers = crate::profile::process_servers(&app, servers, "").await;
 
     let profile = SubscriptionProfile {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1414,7 +1502,7 @@ async fn import_subscription_file(
     let url = format!("file://{}", file_path);
 
     let mut mgr = state.manager.lock().await;
-    let servers = crate::profile::process_servers(&app, servers).await;
+    let servers = crate::profile::process_servers(&app, servers, "").await;
     let server_count = servers.len();
 
     let profile = SubscriptionProfile {

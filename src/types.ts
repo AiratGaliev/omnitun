@@ -141,3 +141,14 @@ export interface ExitIpInfo {
   country_name: string;
   city_name: string;
 }
+
+/** Batch refresh progress event payload. */
+export interface RefreshProgress {
+  profile_id: string;
+  total: number;
+  tested: number;
+  cache_hits: number;
+  successful: number;
+  failed: number;
+  phase: string;
+}

@@ -3,14 +3,10 @@ use crate::subscription::SubscriptionProfile;
 use crate::vpn::{ServerProfile, VpnError};
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Semaphore;
-
-/// Guard: only one batch test runs at a time
-pub(crate) static TESTING_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Get proxy port to route subscription fetch through the active proxy.
 /// Returns None in VPN mode — all traffic already goes through TUN, so direct
@@ -166,7 +162,7 @@ impl ProfileManager {
             crate::subscription::parser::parse_subscription(&clean_url)?
         };
 
-        servers = process_servers(app, servers).await;
+        servers = process_servers(app, servers, "").await;
 
         // Fetch subscription traffic info
         let (traffic_used, traffic_total, traffic_expiry) =
@@ -264,6 +260,7 @@ impl ProfileManager {
                                 s
                             })
                             .collect(),
+                        "",
                     )
                     .await;
                 }
@@ -306,7 +303,15 @@ impl ProfileManager {
             }
         }
 
-        servers = process_servers(app, servers).await;
+        servers = process_servers(app, servers, id).await;
+
+        // Notify cache about subscription refresh (remove deleted servers, resurrect survivors)
+        if let Some(cache) = app.try_state::<std::sync::Arc<crate::vpn::cache::ServerCache>>() {
+            let new_ids: std::collections::HashSet<String> =
+                servers.iter().map(|s| s.id.clone()).collect();
+            cache.handle_subscription_refresh(&new_ids).await;
+            cache.save_to_disk().await;
+        }
 
         // Guard: don't overwrite servers with empty list (e.g. content:// URLs)
         if servers.is_empty() {
@@ -338,7 +343,7 @@ impl ProfileManager {
 
 /// Deduplicate servers, apply user filters, run TCP ping, enrich GeoIP flag.
 /// Logs each step (dedup count, testing, unreachable count, final count).
-pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Vec<ServerProfile> {
+pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profile_id: &str) -> Vec<ServerProfile> {
     let initial_count = servers.len();
     let logger = app.state::<Mutex<Logger>>();
 
@@ -604,20 +609,25 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
         format!("{} server(s) passed and saved", alive.len()),
     );
 
-    // 4. Real latency test via Clash API — start a temporary sing-box with all servers as outbounds.
-    //    Skip if main VPN is running (separate sing-box instances crash the main process on Windows).
+    // 4. Real latency test via ServerCache batch engine.
+    //    Skip if main VPN is running (separate sing-box instances crash on Windows).
     let main_vpn_running =
         crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
     if !alive.is_empty() && !main_vpn_running {
-        // Используем параллельную проверку если серверов больше 20
-        let updated = if alive.len() > 20 {
-            test_servers_via_singbox_parallel(app, &alive).await
-        } else {
-            test_servers_via_singbox_batch(app, &alive).await
-        };
-        if let Ok(mut updated) = updated {
+        // Get the ServerCache from app state
+        let batch_result = if let Some(cache) = app.try_state::<std::sync::Arc<crate::vpn::cache::ServerCache>>() {
+            log(
+                app,
+                &logger,
+                LogLevel::Info,
+                LogSource::Cache,
+                format!("Starting batch test for {} server(s)...", alive.len()),
+            );
+
+            let updated = cache.batch_test(app, &alive, None, profile_id).await;
+
             let before_filter = updated.len();
-            updated.retain(|s| s.ping_ms.is_some());
+            let updated: Vec<ServerProfile> = updated.into_iter().filter(|s| s.ping_ms.is_some()).collect();
             let latency_filtered = before_filter - updated.len();
             if latency_filtered > 0 {
                 log(
@@ -628,7 +638,19 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
                     format!("Removed {latency_filtered} server(s) that failed real latency test"),
                 );
             }
+            Ok(updated)
+        } else {
+            log(
+                app,
+                &logger,
+                LogLevel::Warning,
+                LogSource::Subscription,
+                "ServerCache not initialized — skipping batch test".into(),
+            );
+            Err(())
+        };
 
+        if let Ok(mut updated) = batch_result {
             // Apply CDN node filter if user enabled it
             if let Some(settings) =
                 app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
@@ -676,7 +698,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>) -> Ve
                 &logger,
                 LogLevel::Warning,
                 LogSource::Subscription,
-                "Real latency test via sing-box failed — falling back to TCP ping results".into(),
+                "Batch test failed — falling back to TCP ping results".into(),
             );
         }
     } else if main_vpn_running && !alive.is_empty() {
@@ -758,656 +780,6 @@ async fn fetch_outlet_ip(proxy_port: u16) -> Option<String> {
         }
     }
     None
-}
-
-/// Параллельная проверка outlet IP через множественные инстансы sing-box
-async fn test_servers_via_singbox_parallel(
-    app: &AppHandle,
-    servers: &[ServerProfile],
-) -> Result<Vec<ServerProfile>, ()> {
-    use crate::vpn::config::{build_outbound, find_available_port};
-    use serde_json::json;
-    #[cfg(windows)]
-    use std::os::windows::process::CommandExt;
-    use std::time::Duration;
-
-    let logger = app.state::<Mutex<Logger>>();
-    log(
-        app,
-        &logger,
-        LogLevel::Info,
-        LogSource::Subscription,
-        format!(
-            "Testing {} server(s) via parallel sing-box instances...",
-            servers.len()
-        ),
-    );
-
-    let data_dir = app.path().app_data_dir().map_err(|_| ())?;
-    let binary_path = data_dir
-        .join("binaries")
-        .join(crate::vpn::installer::Installer::binary_name());
-
-    // Разбиваем серверы на батчи по 20
-    const BATCH_SIZE: usize = 20;
-    let batches: Vec<&[ServerProfile]> = servers.chunks(BATCH_SIZE).collect();
-
-    log(
-        app,
-        &logger,
-        LogLevel::Info,
-        LogSource::Subscription,
-        format!(
-            "Split into {} batch(es) of up to {} servers each",
-            batches.len(),
-            BATCH_SIZE
-        ),
-    );
-
-    let mut all_results = Vec::new();
-    let mut batch_handles = Vec::new();
-
-    // Запускаем каждый батч параллельно
-    for (batch_idx, batch) in batches.iter().enumerate() {
-        let binary_path = binary_path.clone();
-        let batch = batch.to_vec();
-        let app_clone = app.clone();
-
-        batch_handles.push(tokio::spawn(async move {
-            // Находим свободные порты для этого батча
-            let proxy_port = find_available_port().ok_or(())?;
-            let stats_port = find_available_port().ok_or(())?;
-
-            // Строим конфиг только для этого батча
-            let mut outbounds: Vec<serde_json::Value> = vec![
-                json!({"type": "direct", "tag": "direct"}),
-                json!({"type": "block", "tag": "block"}),
-            ];
-
-            let mut proxy_tags: Vec<String> = Vec::new();
-            for server in &batch {
-                if let Ok(ob) = build_outbound(server) {
-                    let tag = format!("proxy-{}", &server.id);
-                    proxy_tags.push(tag.clone());
-                    let mut ob = ob;
-                    ob["tag"] = json!(tag);
-                    outbounds.push(ob);
-                }
-            }
-
-            let mut selector_outbounds = vec!["direct".to_string()];
-            selector_outbounds.extend(proxy_tags);
-            outbounds.push(json!({"type": "selector", "tag": "proxy", "outbounds": selector_outbounds}));
-
-            let test_dir = std::env::temp_dir().join(format!(
-                "omnitun-batch-{}-{}",
-                batch_idx,
-                uuid::Uuid::new_v4()
-            ));
-            let _ = std::fs::create_dir_all(&test_dir);
-
-            let config_json = json!({
-                "log": { "level": "error", "output": test_dir.join("sing-box.log").to_string_lossy().to_string(), "timestamp": true },
-                "dns": {
-                    "servers": [
-                        {"type": "https", "tag": "remote", "server": "1.1.1.1", "server_port": 443, "detour": "proxy"},
-                        {"type": "https", "tag": "local", "server": "8.8.8.8", "server_port": 443}
-                    ],
-                    "final": "remote"
-                },
-                "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": proxy_port}],
-                "outbounds": outbounds,
-                "experimental": {
-                    "cache_file": { "enabled": false },
-                    "clash_api": {
-                        "external_controller": format!("127.0.0.1:{stats_port}"),
-                        "secret": ""
-                    }
-                },
-                "route": {
-                    "final": "proxy",
-                    "auto_detect_interface": true,
-                    "default_domain_resolver": "local",
-                    "rules": [{"ip_is_private": true, "outbound": "direct"}]
-                },
-            });
-
-            let config_path = test_dir.join("config.json");
-            let config_str = serde_json::to_string_pretty(&config_json).map_err(|_| ())?;
-            std::fs::write(&config_path, &config_str).map_err(|_| ())?;
-
-            // Запускаем sing-box для этого батча
-            #[cfg(windows)]
-            let child = std::process::Command::new(&binary_path)
-                .args(["run", "-c"])
-                .arg(&config_path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .creation_flags(0x08000000)
-                .spawn()
-                .map_err(|_| ())?;
-
-            #[cfg(not(windows))]
-            let child = std::process::Command::new(&binary_path)
-                .args(["run", "-c"])
-                .arg(&config_path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .map_err(|_| ())?;
-
-            let pid = child.id();
-
-            // Ждём запуска
-            tokio::time::sleep(Duration::from_millis(600)).await;
-
-            let client = reqwest::Client::builder()
-                .no_proxy()
-                .timeout(Duration::from_secs(8))
-                .build()
-                .map_err(|_| {
-                    let _ = kill_process(pid);
-                })?;
-
-            let api_url = format!("http://127.0.0.1:{stats_port}");
-
-            // Параллельная проверка задержки
-            let test_url = "http://cp.cloudflare.com/generate_204";
-            let mut updated = Vec::new();
-            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
-            let mut delay_handles = Vec::new();
-
-            for server in &batch {
-                let tag = format!("proxy-{}", &server.id);
-                let delay_url = format!("{api_url}/proxies/{tag}/delay?url={test_url}&timeout=5000");
-                let client = client.clone();
-                let sem = semaphore.clone();
-                let srv = server.clone();
-
-                delay_handles.push(tokio::spawn(async move {
-                    let _permit = sem.acquire().await.unwrap();
-                    let mut result = srv;
-                    result.ping_ms = None;
-                    match client.get(&delay_url).send().await {
-                        Ok(resp) if resp.status().is_success() => {
-                            if let Ok(body) = resp.text().await {
-                                if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
-                                    if let Some(ms) = data["delay"].as_u64() {
-                                        result.ping_ms = Some(ms);
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                    result
-                }));
-            }
-
-            for handle in delay_handles {
-                if let Ok(server) = handle.await {
-                    updated.push(server);
-                }
-            }
-
-            // Log per-batch latency test results
-            let batch_passed = updated.iter().filter(|s| s.ping_ms.is_some()).count();
-            let batch_failed = updated.len() - batch_passed;
-            if batch_failed > 0 {
-                let logger = app_clone.state::<Mutex<Logger>>();
-                log(
-                    &app_clone,
-                    &logger,
-                    LogLevel::Info,
-                    LogSource::Subscription,
-                    format!(
-                        "Batch {batch_idx}: {batch_passed} passed, {batch_failed} failed real latency test"
-                    ),
-                );
-            }
-
-            // Сортируем по задержке
-            updated.sort_by(|a, b| {
-                a.ping_ms
-                    .unwrap_or(u64::MAX)
-                    .cmp(&b.ping_ms.unwrap_or(u64::MAX))
-            });
-
-            // Последовательная проверка outlet IP — проверяем все серверы, кроме
-            // уже помеченных keyword как CDN (им outlet IP не нужен для детекции).
-            let real_ip = fetch_outlet_ip(proxy_port).await.unwrap_or_default();
-
-            for srv in updated.iter_mut().filter(|s| !s.behind_cdn) {
-                let tag = format!("proxy-{}", &srv.id);
-
-                let switched = client
-                    .put(format!("{api_url}/proxies/proxy"))
-                    .json(&json!({"name": tag}))
-                    .send()
-                    .await
-                    .map(|r| r.status().is_success())
-                    .unwrap_or(false);
-
-                if !switched {
-                    continue;
-                }
-
-                tokio::time::sleep(Duration::from_millis(100)).await;
-
-                let ip = fetch_outlet_ip(proxy_port).await;
-
-                // CDN detection via ASN — single fetch, offline lookup (~2µs)
-                if let Some(ref outlet) = ip {
-                    if crate::vpn::geoip::is_cdn_asn(outlet) {
-                        srv.behind_cdn = true;
-                        let l = app_clone.state::<std::sync::Mutex<crate::logging::Logger>>();
-                        crate::logging::log(
-                            &app_clone,
-                            &l,
-                            crate::logging::LogLevel::Info,
-                            crate::logging::LogSource::Subscription,
-                            format!("[CDN] outlet IP {} → {} is behind CDN", outlet, srv.display_name()),
-                        );
-                    }
-                }
-
-                // Outlet IP check: store exit geoip in exit fields (not server location).
-                // Skip for CDN servers — exit IP is just a CDN edge node.
-                if let Some(ip) = ip {
-                    if !srv.behind_cdn && !real_ip.is_empty() && ip != real_ip {
-                        if let Some(info) = crate::vpn::geoip::resolve_hostname(&ip).await {
-                            srv.exit_server = Some(ip.clone());
-                            srv.exit_flag = Some(info.country_code.clone());
-                            srv.exit_country_name = Some(info.country_name.clone());
-                            srv.exit_city_name = if info.city.is_empty() {
-                                None
-                            } else {
-                                Some(info.city.clone())
-                            };
-                        }
-                    }
-                }
-            }
-
-            // Восстанавливаем selector
-            let _ = client
-                .put(format!("{api_url}/proxies/proxy"))
-                .json(&json!({"name": "direct"}))
-                .send()
-                .await;
-
-            // Cleanup
-            let _ = kill_process(pid);
-            let _ = std::fs::remove_dir_all(&test_dir);
-
-            Ok::<Vec<ServerProfile>, ()>(updated)
-        }));
-    }
-
-    // Собираем результаты всех батчей
-    for handle in batch_handles {
-        if let Ok(Ok(batch_results)) = handle.await {
-            all_results.extend(batch_results);
-        }
-    }
-
-    log(
-        app,
-        &logger,
-        LogLevel::Success,
-        LogSource::Subscription,
-        format!(
-            "Parallel test complete: {} server(s) processed",
-            all_results.len()
-        ),
-    );
-
-    Ok(all_results)
-}
-
-async fn test_servers_via_singbox_batch(
-    app: &AppHandle,
-    servers: &[ServerProfile],
-) -> Result<Vec<ServerProfile>, ()> {
-    use crate::vpn::config::{build_outbound, find_available_port};
-    use serde_json::json;
-    #[cfg(windows)]
-    use std::os::windows::process::CommandExt;
-    use std::time::Duration;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let logger = app.state::<Mutex<Logger>>();
-
-    log(
-        app,
-        &logger,
-        LogLevel::Info,
-        LogSource::Subscription,
-        format!(
-            "Testing {} server(s) via real proxy connection...",
-            servers.len()
-        ),
-    );
-
-    let data_dir = app.path().app_data_dir().map_err(|_| ())?;
-    let binary_path = data_dir
-        .join("binaries")
-        .join(crate::vpn::installer::Installer::binary_name());
-
-    let proxy_port = find_available_port().ok_or(())?;
-    let stats_port = find_available_port().ok_or(())?;
-
-    // Build outbounds for all servers
-    let mut outbounds: Vec<serde_json::Value> = vec![
-        json!({"type": "direct", "tag": "direct"}),
-        json!({"type": "block", "tag": "block"}),
-    ];
-    let mut proxy_tags: Vec<String> = Vec::new();
-    for server in servers {
-        if let Ok(ob) = build_outbound(server) {
-            let tag = format!("proxy-{}", &server.id);
-            proxy_tags.push(tag.clone());
-            let mut ob = ob;
-            ob["tag"] = json!(tag);
-            outbounds.push(ob);
-        }
-    }
-
-    // Add selector group for outlet IP routing
-    let mut selector_outbounds = vec!["direct".to_string()];
-    selector_outbounds.extend(proxy_tags);
-    outbounds.push(json!({"type": "selector", "tag": "proxy", "outbounds": selector_outbounds}));
-
-    let test_dir = std::env::temp_dir().join(format!("omnitun-latency-{}", uuid::Uuid::new_v4()));
-    let _ = std::fs::create_dir_all(&test_dir);
-
-    let config_json = json!({
-        "log": { "level": "error", "output": test_dir.join("sing-box.log").to_string_lossy().to_string(), "timestamp": true },
-        "dns": {
-            "servers": [
-                {"type": "https", "tag": "remote", "server": "1.1.1.1", "server_port": 443, "detour": "proxy"},
-                {"type": "https", "tag": "local", "server": "8.8.8.8", "server_port": 443}
-            ],
-            "final": "remote"
-        },
-        "inbounds": [{"type": "mixed", "tag": "mixed-in", "listen": "127.0.0.1", "listen_port": proxy_port}],
-        "outbounds": outbounds,
-        "experimental": {
-            "cache_file": {
-                "enabled": false
-            },
-            "clash_api": {
-                "external_controller": format!("127.0.0.1:{stats_port}"),
-                "secret": ""
-            }
-        },
-        "route": {
-            "final": "proxy",
-            "auto_detect_interface": true,
-            "default_domain_resolver": "local",
-            "rules": [{"ip_is_private": true, "outbound": "direct"}]
-        },
-    });
-
-    let config_path = test_dir.join("test-batch.json");
-    let config_str = serde_json::to_string_pretty(&config_json).map_err(|_| ())?;
-    std::fs::write(&config_path, &config_str).map_err(|_| ())?;
-
-    // Guard: skip if another batch test is already running (must be before spawn)
-    if TESTING_IN_PROGRESS.swap(true, Ordering::AcqRel) {
-        log(
-            app,
-            &logger,
-            LogLevel::Warning,
-            LogSource::Subscription,
-            "Batch test already in progress, skipping".into(),
-        );
-        return Err(());
-    }
-
-    struct TestGuard;
-    impl Drop for TestGuard {
-        fn drop(&mut self) {
-            TESTING_IN_PROGRESS.store(false, Ordering::Release);
-        }
-    }
-    let _guard = TestGuard;
-
-    // Start sing-box
-    #[cfg(windows)]
-    let child = std::process::Command::new(&binary_path)
-        .args(["run", "-c"])
-        .arg(&config_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|_| ())?;
-    #[cfg(not(windows))]
-    let child = std::process::Command::new(&binary_path)
-        .args(["run", "-c"])
-        .arg(&config_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|_| ())?;
-
-    let pid = child.id();
-
-    // Wait for sing-box to start
-    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-
-    // Test each server via Clash API — parallel with concurrency limit
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .map_err(|_| {
-            let _ = kill_process(pid);
-        })?;
-
-    let api_url = format!("http://127.0.0.1:{stats_port}");
-    let test_url = "http://cp.cloudflare.com/generate_204";
-
-    let updated = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let semaphore = Arc::new(Semaphore::new(10));
-    let mut handles = Vec::new();
-
-    for server in servers {
-        let tag = format!("proxy-{}", &server.id);
-        let delay_url = format!("{api_url}/proxies/{tag}/delay?url={test_url}&timeout=5000");
-        let client = client.clone();
-        let updated = updated.clone();
-        let sem = semaphore.clone();
-        let srv = server.clone();
-
-        handles.push(tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
-            let mut result = srv;
-            result.ping_ms = None;
-            match client.get(&delay_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(body) = resp.text().await {
-                        if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
-                            if let Some(ms) = data["delay"].as_u64() {
-                                result.ping_ms = Some(ms);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-            updated.lock().unwrap().push(result);
-        }));
-    }
-
-    // Wait for all parallel tests to complete
-    for handle in handles {
-        let _ = handle.await;
-    }
-
-    // Collect results into a Vec (sorted by ping later, after outlet IP check)
-    let mut updated = Arc::try_unwrap(updated).unwrap().into_inner().unwrap();
-
-    // Log how many servers passed/failed the real latency test
-    let passed = updated.iter().filter(|s| s.ping_ms.is_some()).count();
-    let failed = updated.len() - passed;
-    if failed > 0 {
-        log(
-            app,
-            &logger,
-            LogLevel::Info,
-            LogSource::Subscription,
-            format!(
-                "Real latency test: {passed} passed, {failed} failed (of {} tested)",
-                updated.len()
-            ),
-        );
-    }
-
-    // --- Outlet IP checking via Clash API selector switch (sequential) ---
-    // IMPORTANT: must be sequential — parallel tasks race on the same global
-    // singleton selector and produce garbage results.
-    log(
-        app,
-        &logger,
-        LogLevel::Info,
-        LogSource::Subscription,
-        format!(
-            "Checking outlet IP for {} server(s)...",
-            updated.iter().filter(|s| !s.behind_cdn).count(),
-        ),
-    );
-
-    // Sort by ping — fastest first
-    updated.sort_by(|a, b| {
-        a.ping_ms
-            .unwrap_or(u64::MAX)
-            .cmp(&b.ping_ms.unwrap_or(u64::MAX))
-    });
-
-    // Pre-fetch the local real IP (without proxy) to filter out failed proxy routes
-    let real_ip = fetch_outlet_ip(proxy_port).await.unwrap_or_default();
-
-    // Sequential outlet IP check — skip servers already flagged as CDN by keyword
-    for server_idx in 0..updated.len() {
-        if updated[server_idx].behind_cdn {
-            continue;
-        }
-        let srv = &mut updated[server_idx];
-        let tag = format!("proxy-{}", &srv.id);
-        let switch_url = format!("{api_url}/proxies/proxy");
-
-        let switched = client
-            .put(&switch_url)
-            .json(&json!({"name": tag}))
-            .send()
-            .await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false);
-
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        let ip = if switched {
-            fetch_outlet_ip(proxy_port).await
-        } else {
-            None
-        };
-
-        // CDN detection via ASN
-        if let Some(ref outlet) = ip {
-            if crate::vpn::geoip::is_cdn_asn(outlet) {
-                srv.behind_cdn = true;
-                let l = app.state::<std::sync::Mutex<crate::logging::Logger>>();
-                crate::logging::log(
-                    app,
-                    &l,
-                    crate::logging::LogLevel::Info,
-                    crate::logging::LogSource::Subscription,
-                    format!("[CDN] outlet IP {} → {} is behind CDN", outlet, srv.display_name()),
-                );
-            }
-        }
-
-        // Only update if outlet IP differs from local real IP — store in exit_* fields.
-        if let Some(ip) = ip {
-            if !real_ip.is_empty() && ip != real_ip {
-                if let Some(info) = crate::vpn::geoip::resolve_hostname(&ip).await {
-                    srv.exit_server = Some(ip.clone());
-                    srv.exit_flag = Some(info.country_code.clone());
-                    srv.exit_country_name = Some(info.country_name.clone());
-                    srv.exit_city_name = if info.city.is_empty() {
-                        None
-                    } else {
-                        Some(info.city.clone())
-                    };
-                }
-            }
-        }
-    }
-
-    // Restore selector to direct (best-effort)
-    let _ = client
-        .put(format!("{api_url}/proxies/proxy"))
-        .json(&json!({"name": "direct"}))
-        .send()
-        .await;
-
-    // Log results — cleanup happens after this function returns
-    log(
-        app,
-        &logger,
-        LogLevel::Success,
-        LogSource::Subscription,
-        format!("Real latency test complete for {} server(s)", updated.len()),
-    );
-
-    // Log the PID being killed for debugging
-    log(
-        app,
-        &logger,
-        LogLevel::Info,
-        LogSource::Process,
-        format!("Killing batch temp sing-box PID {pid}"),
-    );
-
-    // Safety check: don't kill if PID matches the main VPN (Windows PID reuse race)
-    if crate::vpn::VPN_PID.load(std::sync::atomic::Ordering::Relaxed) == pid {
-        log(
-            app,
-            &logger,
-            LogLevel::Warning,
-            LogSource::Process,
-            format!("SKIP kill PID {pid} — matches main VPN_PID"),
-        );
-    } else {
-        let _ = kill_process(pid);
-    }
-    let _ = std::fs::remove_dir_all(&test_dir);
-
-    Ok(updated)
-}
-
-/// Kill a process by PID (cross-platform)
-fn kill_process(pid: u32) -> Result<(), ()> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let _ = std::process::Command::new("taskkill")
-            .args(["/pid", &pid.to_string(), "/f"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .map_err(|_| ())?;
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = std::process::Command::new("kill")
-            .arg(pid.to_string())
-            .output()
-            .map_err(|_| ())?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -1899,14 +1271,6 @@ mod extra_tests {
     // -----------------------------------------------------------------------
     // 7. Kill process - verify doesn't panic
     // -----------------------------------------------------------------------
-    #[test]
-    fn test_kill_nonexistent_process() {
-        // kill_process should not panic when PID doesn't exist
-        let result = kill_process(99999999);
-        assert!(result.is_ok() || result.is_err());
-        println!("  kill_process (nonexistent PID): handled gracefully ✓");
-    }
-
     #[test]
     fn test_refresh_preserves_server_ids() -> Result<(), Box<dyn std::error::Error>> {
         let servers = load_real_servers();

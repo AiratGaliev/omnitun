@@ -658,6 +658,105 @@ fn set_tls(outbound: &mut Value, sni: &str) {
     });
 }
 
+// ── Batch test config generation (N inbounds → N outbounds) ─────────────
+
+/// Generate a lightweight sing-box config for parallel batch testing.
+///
+/// Each server gets its own `mixed` inbound on a unique port. Route rules
+/// link each inbound to its corresponding outbound, so requests through port
+/// `listen_port[k]` are routed through `outbounds[k]`.
+///
+/// No Clash API, no cache file, minimal log level. Final outbound is
+/// `direct` (unmatched traffic goes directly, not through any proxy).
+pub fn generate_batch_config(
+    servers: &[(String, ServerProfile)],
+    ports: &[u16],
+    test_dir: &Path,
+) -> Result<Value, VpnError> {
+    use serde_json::json;
+
+    assert_eq!(servers.len(), ports.len(), "servers and ports must have same length");
+
+    let log_path = test_dir.join("sing-box.log");
+    let log_str = log_path.to_string_lossy();
+
+    // Build N inbounds — one mixed inbound per server
+    let mut inbounds: Vec<Value> = Vec::with_capacity(servers.len());
+    for (idx, port) in ports.iter().enumerate() {
+        inbounds.push(json!({
+            "type": "mixed",
+            "tag": format!("in-{idx}"),
+            "listen": "127.0.0.1",
+            "listen_port": *port,
+        }));
+    }
+
+    // Build N outbounds + direct + block
+    let mut outbounds: Vec<Value> = vec![
+        json!({"type": "direct", "tag": "direct"}),
+        json!({"type": "block", "tag": "block"}),
+    ];
+    let mut proxy_tags: Vec<String> = Vec::with_capacity(servers.len());
+    for (idx, (_server_id, profile)) in servers.iter().enumerate() {
+        let tag = format!("out-{idx}");
+        proxy_tags.push(tag.clone());
+        let mut ob = build_outbound(profile)?;
+        ob["tag"] = json!(tag);
+        // Custom tag prefix for debugging
+        outbounds.push(ob);
+    }
+
+    // Build route rules: inbound[N] → outbound[N]
+    let mut rules: Vec<Value> = Vec::with_capacity(servers.len());
+    for idx in 0..servers.len() {
+        rules.push(json!({
+            "inbound": format!("in-{idx}"),
+            "outbound": format!("out-{idx}"),
+        }));
+    }
+    // Private IPs → direct
+    rules.push(json!({
+        "ip_is_private": true,
+        "outbound": "direct",
+    }));
+
+    let mut config = json!({
+        "log": {
+            "level": "error",
+            "output": log_str,
+            "timestamp": true,
+        },
+        "dns": {
+            "servers": [
+                {"type": "https", "tag": "remote", "server": "1.1.1.1", "server_port": 443},
+                {"type": "https", "tag": "local", "server": "8.8.8.8", "server_port": 443}
+            ],
+            "final": "remote",
+            "strategy": "prefer_ipv4",
+        },
+        "inbounds": inbounds,
+        "outbounds": outbounds,
+        "route": {
+            "rules": rules,
+            "final": "direct",
+            "auto_detect_interface": true,
+            "default_domain_resolver": "local",
+        },
+        "experimental": {
+            "cache_file": { "enabled": false },
+            "clash_api": { "external_controller": "127.0.0.1:0", "secret": "" },
+        },
+    });
+
+    // Remove entire experimental section — clash_api with port 0 causes
+    // sing-box 1.13+ to exit with code 1, and batch testing doesn't need it.
+    if let Some(parent) = config.as_object_mut() {
+        parent.remove("experimental");
+    }
+
+    Ok(config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1233,5 +1332,126 @@ mod tests {
             // Default anti_dpi=true means utls IS present
             assert!(t.get("utls").is_some(), "anti_dpi=true (default) should add utls");
         }
+    }
+
+    // ── generate_batch_config tests ───────────────────────────────────────────
+
+    fn test_server_profile(protocol: &str) -> ServerProfile {
+        let mut s = ServerProfile {
+            id: format!("test-{protocol}"),
+            protocol: protocol.into(),
+            server: "127.0.0.1".into(),
+            port: 443,
+            uuid: Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            password: Some("test-pass".into()),
+            method: Some("aes-256-gcm".into()),
+            sni: Some("example.com".into()),
+            flow: None,
+            public_key: None,
+            private_key: None,
+            transport_type: None,
+            transport_path: None,
+            transport_host: None,
+            reality_pbk: None,
+            reality_sid: None,
+            ping_ms: None,
+            flag: None,
+            country_name: None,
+            city_name: None,
+            username: None,
+            behind_cdn: false,
+            exit_server: None,
+            exit_flag: None,
+            exit_country_name: None,
+            exit_city_name: None,
+            original_name: String::new(),
+            wg_local_address: None,
+            wg_allowed_ips: None,
+            wg_dns: None,
+            wg_mtu: None,
+            wg_keepalive: None,
+        };
+        match protocol {
+            "vless" | "vmess" => { s.uuid = Some("550e8400-e29b-41d4-a716-446655440000".into()); }
+            "trojan" => { s.password = Some("trojan-pass".into()); }
+            "shadowsocks" => { s.method = Some("aes-256-gcm".into()); s.password = Some("ss-pass".into()); }
+            "wireguard" => {
+                s.private_key = Some("mNbS7RqMxPkL9JfH2GcV5bN8QwE1YtU3IoP6aDfSgU=".into());
+                s.server = "10.0.0.1".into();
+                s.wg_local_address = Some("10.0.0.2/32".into());
+                s.wg_allowed_ips = Some("0.0.0.0/0".into());
+                s.wg_dns = Some("1.1.1.1".into());
+                s.wg_mtu = Some(1420);
+            }
+            "hysteria2" => { s.password = Some("hy2-pass".into()); }
+            "tuic" => { s.password = Some("tuic-pass".into()); }
+            _ => {}
+        }
+        s
+    }
+
+    #[test]
+    fn test_generate_batch_config_basic() {
+        let servers = vec![
+            ("out-0".to_string(), test_server_profile("trojan")),
+            ("out-1".to_string(), test_server_profile("hysteria2")),
+        ];
+        let ports = vec![20001u16, 20002u16];
+        let test_dir = std::env::temp_dir().join("omnitun-test-batch-config");
+        let _ = std::fs::create_dir_all(&test_dir);
+
+        let result = generate_batch_config(&servers, &ports, &test_dir);
+        assert!(result.is_ok(), "generate_batch_config should succeed");
+        let config = result.unwrap();
+
+        assert_eq!(config["inbounds"].as_array().unwrap().len(), 2);
+        assert_eq!(config["outbounds"].as_array().unwrap().len(), 4);
+
+        let inbounds = config["inbounds"].as_array().unwrap();
+        assert_eq!(inbounds[0]["listen_port"], 20001);
+        assert_eq!(inbounds[1]["listen_port"], 20002);
+
+        let outbounds = config["outbounds"].as_array().unwrap();
+        assert_eq!(outbounds[0]["type"], "direct");
+        assert_eq!(outbounds[1]["type"], "block");
+        assert_eq!(outbounds[2]["tag"], "out-0");
+        assert_eq!(outbounds[3]["tag"], "out-1");
+
+        let rules = config["route"]["rules"].as_array().unwrap();
+        assert!(rules.iter().any(|r| r.get("inbound") == Some(&Value::String("in-0".into()))));
+
+        // DNS should have no detour: direct (fix for sing-box 1.13)
+        let dns_servers = config["dns"]["servers"].as_array().unwrap();
+        for srv in dns_servers {
+            assert!(srv.get("detour").is_none(), "DNS should not have detour: direct");
+        }
+
+        // No clash_api section
+        assert!(config.get("experimental").is_none(), "experimental section should be removed");
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_generate_batch_config_all_protocols() {
+        for proto in &["vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic"] {
+            let profile = test_server_profile(proto);
+            let result = build_outbound(&profile);
+            assert!(result.is_ok(), "build_outbound for {proto} should succeed");
+            let ob = result.unwrap();
+            assert!(ob.get("server").is_some(), "{proto} should have server");
+            assert!(ob.get("server_port").is_some(), "{proto} should have server_port");
+        }
+    }
+
+    #[test]
+    fn test_generate_batch_config_empty() {
+        let servers: Vec<(String, ServerProfile)> = vec![];
+        let ports: Vec<u16> = vec![];
+        let test_dir = std::env::temp_dir().join("omnitun-test-batch-empty");
+        let result = generate_batch_config(&servers, &ports, &test_dir);
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert_eq!(config["inbounds"].as_array().unwrap().len(), 0);
+        assert_eq!(config["outbounds"].as_array().unwrap().len(), 2);
     }
 }
