@@ -627,6 +627,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                     server.server.parse::<std::net::IpAddr>().ok().map(|_| &*server.server)
                 });
                 if let Some(rip) = check_ip {
+                    let cdn_ranges_count = crate::vpn::geoip::cdn_ranges_count();
                     if crate::vpn::geoip::is_cdn_entry_ip(rip) {
                         server.behind_cdn = true;
                         log(
@@ -634,9 +635,25 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                             &logger,
                             LogLevel::Info,
                             LogSource::Subscription,
-                            format!("[CDN] entry IP {} is behind CDN", rip),
+                            format!("[CDN] entry IP {} is behind CDN ({} CIDRs)", rip, cdn_ranges_count),
+                        );
+                    } else if tcp_tested <= 5 {
+                        log(
+                            app,
+                            &logger,
+                            LogLevel::Info,
+                            LogSource::Subscription,
+                            format!("[CDN debug] IP {} not in CDN ranges ({} CIDRs)", rip, cdn_ranges_count),
                         );
                     }
+                } else {
+                    log(
+                        app,
+                        &logger,
+                        LogLevel::Warning,
+                        LogSource::Subscription,
+                        format!("[CDN debug] no IP to check for server {}", server.server),
+                    );
                 }
             }
 

@@ -302,6 +302,11 @@ pub fn is_cdn_ready() -> bool {
     CDN_RANGES.get().is_some()
 }
 
+/// Returns the number of loaded CDN CIDR entries (0 if not loaded).
+pub fn cdn_ranges_count() -> usize {
+    CDN_RANGES.get().map(|r| r.len()).unwrap_or(0)
+}
+
 /// Check whether an IP address falls within any CDN CIDR range from the
 /// downloaded 123jjck/cdn-ip-ranges dataset.
 ///

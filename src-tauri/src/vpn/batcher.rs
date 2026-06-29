@@ -408,6 +408,12 @@ async fn process_batch(
                 cache.update_positive(&result.server_id, positive.clone()).await;
                 let _ = req.reply.send(Ok(positive));
                 success_count += 1;
+                match result.outlet_ip {
+                    Some(ref ip) => batcher_log(app_handle, crate::logging::LogLevel::Info,
+                        format!("[Batcher] server {} passed — ping {}ms, outlet {}", result.server_id, result.ping_ms, ip)),
+                    None => batcher_log(app_handle, crate::logging::LogLevel::Warning,
+                        format!("[Batcher] server {} passed — ping {}ms, NO outlet IP", result.server_id, result.ping_ms)),
+                }
             }
             Ok((req, Err(e))) => {
                 cache.update_negative(&req.server.id, e.clone()).await;
