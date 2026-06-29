@@ -438,8 +438,9 @@ fn build_trojan(profile: &ServerProfile) -> Value {
         .sni
         .as_deref()
         .filter(|s| !s.is_empty())
-        .unwrap_or(&profile.server);
-    set_tls(&mut outbound, sni);
+        .unwrap_or(&profile.server)
+        .to_string();
+    set_tls(&mut outbound, &sni);
 
     // Transport (WebSocket, gRPC) — same as VLESS
     if let Some(t_type) = &profile.transport_type {
@@ -457,9 +458,13 @@ fn build_trojan(profile: &ServerProfile) -> Value {
                     "type": "ws",
                     "path": profile.transport_path.clone().unwrap_or_else(|| "/".into()),
                     "headers": {
-                        "Host": host
+                        "Host": host.clone()
                     }
                 });
+                // Use transport host as TLS server_name (critical for CDN routing)
+                if host != sni {
+                    outbound["tls"]["server_name"] = json!(host);
+                }
             }
             "grpc" => {
                 outbound["transport"] = json!({
@@ -722,17 +727,15 @@ pub fn generate_batch_config(
 
     let mut config = json!({
         "log": {
-            "level": "error",
+            "level": "warn",
             "output": log_str,
             "timestamp": true,
         },
         "dns": {
             "servers": [
-                {"type": "https", "tag": "remote", "server": "1.1.1.1", "server_port": 443},
-                {"type": "https", "tag": "local", "server": "8.8.8.8", "server_port": 443}
+                {"type": "local", "tag": "local"}
             ],
-            "final": "remote",
-            "strategy": "prefer_ipv4",
+            "final": "local",
         },
         "inbounds": inbounds,
         "outbounds": outbounds,

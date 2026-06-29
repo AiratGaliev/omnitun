@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 /// Get proxy port to route subscription fetch through the active proxy.
 /// Returns None in VPN mode — all traffic already goes through TUN, so direct
@@ -558,7 +559,9 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
     }
 
     let mut alive = Vec::new();
+    let mut tcp_tested = 0;
     while let Some(result) = set.join_next().await {
+        tcp_tested += 1;
         if let Ok((mut server, true, ping_ms)) = result {
             server.ping_ms = Some(ping_ms);
 
@@ -588,6 +591,20 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
 
             alive.push(server);
         }
+
+        // Отправка прогресса TCP Ping
+        crate::events::emit_refresh_progress(
+            app,
+            crate::events::RefreshProgress {
+                profile_id: profile_id.to_string(),
+                total: unique_count,
+                tested: tcp_tested,
+                cache_hits: 0,
+                successful: alive.len(),
+                failed: tcp_tested - alive.len(),
+                phase: "tcp_ping".into(),
+            },
+        );
     }
 
     let unreachable = unique_count - alive.len();
@@ -624,7 +641,10 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 format!("Starting batch test for {} server(s)...", alive.len()),
             );
 
-            let updated = cache.batch_test(app, &alive, None, profile_id).await;
+            let cancel_token = app.try_state::<Mutex<CancellationToken>>()
+                .map(|g| g.lock().unwrap().clone());
+
+            let updated = cache.batch_test(app, &alive, cancel_token, profile_id).await;
 
             let before_filter = updated.len();
             let updated: Vec<ServerProfile> = updated.into_iter().filter(|s| s.ping_ms.is_some()).collect();

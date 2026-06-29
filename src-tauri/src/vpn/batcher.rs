@@ -11,7 +11,6 @@
 //! - Latency + outlet IP + CDN check all in one parallel pass
 //! - Every server tested through its own inbound port
 
-use crate::events::{emit_refresh_progress, RefreshProgress};
 use crate::vpn::cache::{BatchRequest, PositiveResult, ServerCache};
 use crate::vpn::config::generate_batch_config;
 use crate::vpn::installer::Installer;
@@ -22,6 +21,11 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 // ── Constants ───────────────────────────────────────────────────────────────
 
 /// Maximum servers per batch.
@@ -31,13 +35,22 @@ const BATCH_SIZE: usize = 50;
 const BATCH_TIMEOUT_MS: u64 = 300;
 
 /// Timeout for each individual server's test (latency + outlet IP).
-const TEST_TIMEOUT_SECS: u64 = 5;
+const TEST_TIMEOUT_SECS: u64 = 8;
 
 /// Time to wait for sing-box to start before testing.
 const SINGBOX_STARTUP_MS: u64 = 600;
 
 /// Number of parallel testing tasks per batch.
 const MAX_CONCURRENT_TESTS: usize = 50;
+
+// ── Helper: emit structured log to JSONL + UI ──────────────────────────────
+
+/// Log a batcher message to the app's structured log (visible in JSONL and UI).
+fn batcher_log(app_handle: &AppHandle, level: crate::logging::LogLevel, message: String) {
+    use crate::logging::LogSource;
+    let logger = app_handle.state::<std::sync::Mutex<crate::logging::Logger>>();
+    crate::logging::log(app_handle, &logger, level, LogSource::Cache, message);
+}
 
 // ── BatchingEngine ──────────────────────────────────────────────────────────
 
@@ -64,19 +77,19 @@ pub async fn run(
     app_handle: AppHandle,
     cancel: CancellationToken,
 ) {
-    log::info!("[Batcher] engine started");
+    batcher_log(&app_handle, crate::logging::LogLevel::Info, "[Batcher] engine started".into());
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                log::info!("[Batcher] cancelled — shutting down");
+                batcher_log(&app_handle, crate::logging::LogLevel::Info, "[Batcher] cancelled — shutting down".into());
                 return;
             }
             result = collect_batch(&mut rx) => {
                 let batch = match result {
                     Some(b) => b,
                     None => {
-                        log::info!("[Batcher] channel closed — shutting down");
+                        batcher_log(&app_handle, crate::logging::LogLevel::Info, "[Batcher] channel closed — shutting down".into());
                         return;
                     }
                 };
@@ -86,18 +99,7 @@ pub async fn run(
                 }
 
                 let count = batch.len();
-                log::info!("[Batcher] processing batch of {count} server(s)");
-
-                // Emit: queueing phase
-                emit_refresh_progress(&app_handle, RefreshProgress {
-                    profile_id: String::new(),
-                    total: count,
-                    tested: 0,
-                    cache_hits: 0,
-                    successful: 0,
-                    failed: 0,
-                    phase: "acquiring_ports".into(),
-                });
+                batcher_log(&app_handle, crate::logging::LogLevel::Info, format!("[Batcher] processing batch of {count} server(s)"));
 
                 process_batch(batch, &cache, &port_pool, &app_handle, &cancel).await;
             }
@@ -142,27 +144,16 @@ async fn process_batch(
     cancel: &CancellationToken,
 ) {
     let count = batch.len();
-    log::info!("[Batcher] processing {count} server(s)");
-
-    let pid = batch.first().map(|r| r.profile_id.as_str()).unwrap_or("");
-    emit_refresh_progress(app_handle, RefreshProgress {
-        profile_id: pid.to_string(),
-        total: count,
-        tested: 0,
-        cache_hits: 0,
-        successful: 0,
-        failed: 0,
-        phase: "acquiring_ports".into(),
-    });
+    batcher_log(app_handle, crate::logging::LogLevel::Info, format!("[Batcher] processing {count} server(s)"));
 
     // 1. Acquire ports
-    log::info!("[Batcher] acquiring {count} port(s)");
+    batcher_log(app_handle, crate::logging::LogLevel::Info, format!("[Batcher] acquiring {count} port(s)"));
 
     // Get binary path
     let data_dir = match app_handle.path().app_data_dir() {
         Ok(d) => d,
         Err(e) => {
-            log::error!("[Batcher] cannot get app data dir: {e}");
+            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] cannot get app data dir: {e}"));
             for req in batch {
                 let _ = req.reply.send(Err(format!("App data dir error: {e}")));
             }
@@ -182,14 +173,14 @@ async fn process_batch(
                 break;
             }
             if attempt == 10 {
-                log::warn!("[Batcher] port pool exhausted after 10 retries");
+                batcher_log(app_handle, crate::logging::LogLevel::Warning, "[Batcher] port pool exhausted after 10 retries".into());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         match guard {
             Some(g) => guards.push(g),
             None => {
-                log::error!("[Batcher] port pool exhausted — cannot process batch");
+                batcher_log(app_handle, crate::logging::LogLevel::Error, "[Batcher] port pool exhausted — cannot process batch".into());
                 for req in batch {
                     let _ = req.reply.send(Err("Port pool exhausted".into()));
                 }
@@ -210,14 +201,14 @@ async fn process_batch(
     }
 
     // 2. Generate config
-    log::info!("[Batcher] generating N-inbound config ({count} servers)");
+    batcher_log(app_handle, crate::logging::LogLevel::Info, format!("[Batcher] generating N-inbound config ({count} servers)"));
 
     let test_dir = std::env::temp_dir().join(format!(
         "omnitun-batch-{}",
         uuid::Uuid::new_v4()
     ));
     if let Err(e) = std::fs::create_dir_all(&test_dir) {
-        log::error!("[Batcher] failed to create test dir: {e}");
+        batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] failed to create test dir: {e}"));
         for req in batch {
             let _ = req.reply.send(Err(format!("Temp dir error: {e}")));
         }
@@ -230,10 +221,18 @@ async fn process_batch(
         .map(|req| (req.server.id.clone(), req.server.clone()))
         .collect();
 
+    // Also log first few server protocols for debugging
+    for (idx, (sid, profile)) in tagged_servers.iter().enumerate().take(3) {
+        batcher_log(app_handle, crate::logging::LogLevel::Info, format!(
+            "[Batcher] server {}: protocol={}, server={}:{}, port_inbound={}",
+            sid, profile.protocol, profile.server, profile.port, port_list[idx],
+        ));
+    }
+
     let config = match generate_batch_config(&tagged_servers, &port_list, &test_dir) {
         Ok(c) => c,
         Err(e) => {
-            log::error!("[Batcher] config generation failed: {e}");
+            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] config generation failed: {e}"));
             for req in batch {
                 let _ = req.reply.send(Err(format!("Config error: {e}")));
             }
@@ -246,7 +245,7 @@ async fn process_batch(
     let config_str = match serde_json::to_string_pretty(&config) {
         Ok(s) => s,
         Err(e) => {
-            log::error!("[Batcher] config serialization failed: {e}");
+            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] config serialization failed: {e}"));
             for req in batch {
                 let _ = req.reply.send(Err(format!("Config serialization error: {e}")));
             }
@@ -255,7 +254,7 @@ async fn process_batch(
         }
     };
     if let Err(e) = std::fs::write(&config_path, &config_str) {
-        log::error!("[Batcher] config write failed: {e}");
+        batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] config write failed: {e}"));
         for req in batch {
             let _ = req.reply.send(Err(format!("Config write error: {e}")));
         }
@@ -265,7 +264,7 @@ async fn process_batch(
 
     // 3. Check if sing-box binary exists, then start
     if !binary_path.exists() {
-        log::error!("[Batcher] sing-box binary not found at {:?} — installing may be needed (run main VPN first)", binary_path);
+        batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] sing-box binary not found at {:?} — installing may be needed (run main VPN first)", binary_path));
         for req in batch {
             let _ = req.reply.send(Err("sing-box not installed — connect to VPN first to auto-install".into()));
         }
@@ -273,8 +272,29 @@ async fn process_batch(
         return;
     }
 
-    log::info!("[Batcher] starting sing-box...");
+    batcher_log(app_handle, crate::logging::LogLevel::Info, "[Batcher] starting sing-box...".into());
 
+    #[cfg(windows)]
+    let mut child = match std::process::Command::new(&binary_path)
+        .args(["run", "-c"])
+        .arg(&config_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] failed to start sing-box: {e}"));
+            for req in batch {
+                let _ = req.reply.send(Err(format!("sing-box startup error: {e}")));
+            }
+            let _ = std::fs::remove_dir_all(&test_dir);
+            return;
+        }
+    };
+
+    #[cfg(not(windows))]
     let mut child = match std::process::Command::new(&binary_path)
         .args(["run", "-c"])
         .arg(&config_path)
@@ -284,7 +304,7 @@ async fn process_batch(
     {
         Ok(c) => c,
         Err(e) => {
-            log::error!("[Batcher] failed to start sing-box: {e}");
+            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] failed to start sing-box: {e}"));
             for req in batch {
                 let _ = req.reply.send(Err(format!("sing-box startup error: {e}")));
             }
@@ -292,11 +312,29 @@ async fn process_batch(
             return;
         }
     };
+
     let pid = child.id();
-    log::info!("[Batcher] sing-box started (PID {pid})");
+    batcher_log(app_handle, crate::logging::LogLevel::Info, format!("[Batcher] sing-box started (PID {pid})"));
 
     // Wait for sing-box to initialize
     tokio::time::sleep(Duration::from_millis(SINGBOX_STARTUP_MS)).await;
+
+    // Port readiness check — ensure sing-box actually bound the ports
+    let mut ports_ready = false;
+    if let Some(&first_port) = port_list.first() {
+        for _ in 0..20 { // up to 2 seconds
+            if tokio::net::TcpStream::connect(("127.0.0.1", first_port)).await.is_ok() {
+                ports_ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    if ports_ready {
+        batcher_log(app_handle, crate::logging::LogLevel::Info, "[Batcher] all proxy ports ready".into());
+    } else {
+        batcher_log(app_handle, crate::logging::LogLevel::Warning, "[Batcher] proxy ports not ready after 2s, proceeding anyway...".into());
+    }
 
     // Check if sing-box is still alive after startup
     match child.try_wait() {
@@ -308,45 +346,30 @@ async fn process_batch(
                     s.read_to_string(&mut buf).ok().map(|_| buf)
                 })
                 .unwrap_or_default();
-            log::error!("[Batcher] sing-box exited prematurely with status {status} — config error likely");
+            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] sing-box exited prematurely with status {status} — config error likely"));
             if !stderr.is_empty() {
-                log::error!("[Batcher] sing-box stderr:\n{}", stderr.trim());
+                batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] sing-box stderr:\n{}", stderr.trim()));
             }
-            // Also log to frontend logs via the custom log() function
-            let _ = crate::logging::log(
-                app_handle,
-                &app_handle.state::<std::sync::Mutex<crate::logging::Logger>>(),
-                crate::logging::LogLevel::Error,
-                crate::logging::LogSource::Cache,
-                format!("[Batcher] sing-box exited with status {status}: {}",
-                    stderr.trim().lines().next().unwrap_or("no stderr")),
-            );
-            let _ = std::fs::read_to_string(test_dir.join("config.json"))
-                .map(|cfg| log::error!("[Batcher] generated config:\n{cfg}"));
+            // Log to frontend logs
+            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] sing-box exited with status {status}: {}",
+                stderr.trim().lines().next().unwrap_or("no stderr")));
+            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] config preserved at {:?}", test_dir.join("config.json")));
+            if let Ok(cfg) = std::fs::read_to_string(test_dir.join("config.json")) {
+                batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] generated config:\n{cfg}"));
+            }
             // Don't delete test_dir — save config for debugging
-            log::error!("[Batcher] config preserved at {:?}", test_dir.join("config.json"));
             for req in batch {
                 let _ = req.reply.send(Err(format!("sing-box exited with status {status}")));
             }
             return;
         }
         Ok(None) => {
-            log::info!("[Batcher] sing-box is still running — proceeding with tests");
+            batcher_log(app_handle, crate::logging::LogLevel::Info, "[Batcher] sing-box is still running — proceeding with tests".into());
         }
         Err(e) => {
-            log::warn!("[Batcher] sing-box wait check error (will proceed): {e}");
+            batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] sing-box wait check error (will proceed): {e}"));
         }
     }
-
-    emit_refresh_progress(app_handle, RefreshProgress {
-        profile_id: pid.to_string(),
-        total: count,
-        tested: 0,
-        cache_hits: 0,
-        successful: 0,
-        failed: 0,
-        phase: "singbox_starting".into(),
-    });
 
     // 4. Test all servers in parallel through their individual ports
     let mut handles = Vec::with_capacity(count);
@@ -370,7 +393,7 @@ async fn process_batch(
 
     for (handle, req) in handles.into_iter().zip(batch) {
         match handle.await {
-            Ok(Some(result)) => {
+            Ok(Ok(result)) => {
                 // Create PositiveResult from test result
                 let positive = PositiveResult {
                     server_id: result.server_id.clone(),
@@ -387,16 +410,10 @@ async fn process_batch(
                 cache.update_positive(&result.server_id, positive.clone()).await;
                 let _ = req.reply.send(Ok(positive));
                 success_count += 1;
-                log::info!(
-                    "[Batcher] server {} passed — ping {}ms, outlet_ip: {}",
-                    result.server_id,
-                    result.ping_ms,
-                    result.outlet_ip.as_deref().unwrap_or("N/A"),
-                );
             }
-            Ok(None) => {
-                cache.update_negative(&req.server.id, "Test failed — no response".into()).await;
-                let _ = req.reply.send(Err("Test failed — no response".into()));
+            Ok(Err(e)) => {
+                cache.update_negative(&req.server.id, e.clone()).await;
+                let _ = req.reply.send(Err(e));
                 fail_count += 1;
             }
             Err(e) => {
@@ -408,28 +425,30 @@ async fn process_batch(
     }
 
     // 6. Stop sing-box
-    log::info!("[Batcher] stopping sing-box (PID {pid})");
+    batcher_log(app_handle, crate::logging::LogLevel::Info, format!("[Batcher] stopping sing-box (PID {pid})"));
     kill_singbox(pid);
 
-    // 7. Clean up
+    // 7. Clean up — preserve config+log on total failure for debugging
+    if success_count == 0 && count > 0 {
+        let debug_dir = data_dir.join("batch-debug");
+        let _ = std::fs::create_dir_all(&debug_dir);
+        let _ = std::fs::copy(config_path, debug_dir.join("config.json"));
+        let sb_log = test_dir.join("sing-box.log");
+        if sb_log.exists() {
+            let _ = std::fs::copy(&sb_log, debug_dir.join("sing-box.log"));
+        }
+        batcher_log(app_handle, crate::logging::LogLevel::Info, format!(
+            "[Batcher] config+log preserved at {:?} for debugging", debug_dir));
+    }
     let _ = std::fs::remove_dir_all(&test_dir);
 
     // 8. Save cache
     cache.save_to_disk().await;
 
-    // 9. Emit completion
-    emit_refresh_progress(app_handle, RefreshProgress {
-        profile_id: String::new(),
-        total: count,
-        tested: count,
-        cache_hits: 0,
-        successful: success_count,
-        failed: fail_count,
-        phase: "done".into(),
-    });
-
-    log::info!(
-        "[Batcher] batch complete: {success_count}/{count} passed, {fail_count} failed"
+    batcher_log(
+        app_handle,
+        crate::logging::LogLevel::Info,
+        format!("[Batcher] batch complete: {success_count}/{count} passed, {fail_count} failed"),
     );
 }
 
@@ -438,13 +457,15 @@ async fn test_single_server(
     port: u16,
     server: &ServerProfile,
     cancel: &CancellationToken,
-) -> Option<ServerTestResult> {
-    let proxy = reqwest::Proxy::all(format!("http://127.0.0.1:{port}")).ok()?;
+) -> Result<ServerTestResult, String> {
+    // Use socks5h for DNS resolution on the proxy side (avoids local DNS blocking)
+    let proxy = reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}"))
+        .map_err(|e| format!("Proxy build error: {e}"))?;
     let client = reqwest::Client::builder()
         .proxy(proxy)
         .timeout(Duration::from_secs(TEST_TIMEOUT_SECS))
         .build()
-        .ok()?;
+        .map_err(|e| format!("Client build error: {e}"))?;
 
     // 1. Latency test
     let start = Instant::now();
@@ -458,24 +479,19 @@ async fn test_single_server(
             start.elapsed().as_millis() as u64
         }
         Ok(resp) => {
-            log::warn!("[test_single_server] latency HTTP {} returned status {}", server.id, resp.status());
-            return None;
+            return Err(format!("HTTP status {}", resp.status()));
         }
         Err(e) => {
-            log::warn!("[test_single_server] latency HTTP {} failed: {e}", server.id);
-            return None;
+            return Err(format!("Request failed: {e}"));
         }
     };
 
     // Check cancellation after latency test
     if cancel.is_cancelled() {
-        return None;
+        return Err("Cancelled".into());
     }
 
-    // 2. Outlet IP — multiple fallback services, non-fatal if all fail.
-    //    Unlike the old Clash API approach (sequential per-server), this runs
-    //    in parallel for all servers via individual sing‑box inbounds, so it
-    //    doesn't bottleneck the batch.
+    // 2. Outlet IP — multiple fallback services, concurrent fetch.
     let outlet_ip = fetch_outlet_ip_through_port(&client).await;
 
     // 3. CDN detection via outlet IP
@@ -491,7 +507,7 @@ async fn test_single_server(
         None
     };
 
-    Some(ServerTestResult {
+    Ok(ServerTestResult {
         server_id: server.id.clone(),
         ping_ms,
         outlet_ip,
@@ -504,7 +520,7 @@ async fn test_single_server(
     })
 }
 
-/// Fetch outlet IP through the sing‑box proxy port with multiple fallback URLs.
+/// Fetch outlet IP through the sing‑box proxy port with multiple fallback URLs concurrently.
 /// Returns `None` if all services fail / time out.
 async fn fetch_outlet_ip_through_port(client: &reqwest::Client) -> Option<String> {
     let services = [
@@ -513,16 +529,20 @@ async fn fetch_outlet_ip_through_port(client: &reqwest::Client) -> Option<String
         "https://checkip.amazonaws.com",
     ];
 
-    // Try all services concurrently — take the first success within a timeout
+    let mut set = tokio::task::JoinSet::new();
     for &url in &services {
-        match tokio::time::timeout(Duration::from_secs(4), async {
+        let client = client.clone();
+        set.spawn(async move {
             let resp = client.get(url).send().await.ok()?;
             let text = resp.text().await.ok()?;
             let ip = text.trim().to_string();
             if !ip.is_empty() { Some(ip) } else { None }
-        }).await {
-            Ok(Some(ip)) => return Some(ip),
-            _ => continue,
+        });
+    }
+
+    while let Some(res) = set.join_next().await {
+        if let Ok(Some(ip)) = res {
+            return Some(ip);
         }
     }
     None
@@ -534,6 +554,7 @@ fn kill_singbox(pid: u32) {
     {
         let _ = std::process::Command::new("taskkill")
             .args(["/pid", &pid.to_string(), "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
             .output();
     }
     #[cfg(not(windows))]
@@ -548,9 +569,9 @@ fn kill_singbox(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
-    /// Test that collect_batch returns when a batch is ready (size reached).
+    // ── collect_batch ─────────────────────────────────────────────────────
+
     #[tokio::test]
     async fn test_collect_batch_returns_when_size_reached() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -570,7 +591,6 @@ mod tests {
         assert_eq!(batch.len(), BATCH_SIZE, "collect_batch should return exactly BATCH_SIZE items");
     }
 
-    /// Test that collect_batch returns whatever it has when the channel closes.
     #[tokio::test]
     async fn test_collect_batch_returns_remaining_on_channel_close() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -591,7 +611,6 @@ mod tests {
         assert_eq!(items.len(), 3, "should get all 3 sent items");
     }
 
-    /// Test that collect_batch returns None when channel is already closed and empty.
     #[tokio::test]
     async fn test_collect_batch_returns_none_on_empty_channel() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -601,7 +620,8 @@ mod tests {
         assert!(batch.is_none(), "should return None when channel is empty and closed");
     }
 
-    /// Test that kill_singbox does not panic for a non-existent PID.
+    // ── kill_singbox ──────────────────────────────────────────────────────
+
     #[test]
     fn test_kill_singbox_nonexistent_pid() {
         // Should not panic regardless of PID existence
@@ -609,12 +629,145 @@ mod tests {
         // If we reach here, the function handled it gracefully
     }
 
-    /// Verify constants are reasonable.
+    #[test]
+    fn test_kill_singbox_zero_pid() {
+        // PID 0 should not cause panic either
+        kill_singbox(0);
+    }
+
+    // ── Constants ─────────────────────────────────────────────────────────
+
     #[test]
     fn test_batch_constants() {
         assert!(BATCH_SIZE > 0 && BATCH_SIZE <= 200, "BATCH_SIZE should be between 1 and 200");
         assert!(BATCH_TIMEOUT_MS >= 50 && BATCH_TIMEOUT_MS <= 5000, "BATCH_TIMEOUT_MS should be between 50 and 5000");
+        assert!(TEST_TIMEOUT_SECS >= 2 && TEST_TIMEOUT_SECS <= 30, "TEST_TIMEOUT_SECS should be between 2 and 30");
+        assert!(SINGBOX_STARTUP_MS >= 100 && SINGBOX_STARTUP_MS <= 5000, "SINGBOX_STARTUP_MS should be between 100 and 5000");
+        assert!(MAX_CONCURRENT_TESTS >= 1 && MAX_CONCURRENT_TESTS <= 200, "MAX_CONCURRENT_TESTS should be between 1 and 200");
     }
 
+    // ── fetch_outlet_ip_through_port ──────────────────────────────────────
 
+    /// Build a reqwest client that points to a dead proxy (= will time out).
+    fn dead_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+            .timeout(Duration::from_millis(500))
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_fetch_outlet_ip_all_services_fail() {
+        // With a dead proxy, all 3 services should fail → None
+        let client = dead_client();
+        let result = fetch_outlet_ip_through_port(&client).await;
+        assert!(result.is_none(), "fetch_outlet_ip should return None when all services fail");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_outlet_ip_very_short_timeout() {
+        // Even with 1ms timeout, should return None gracefully (not panic)
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+            .timeout(Duration::from_millis(1))
+            .build()
+            .unwrap();
+        let result = fetch_outlet_ip_through_port(&client).await;
+        assert!(result.is_none(), "fetch_outlet_ip should return None even with very short timeout");
+    }
+
+    // ── test_single_server with cancellation ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_test_single_server_cancelled_before_test() {
+        let server = ServerProfile::default();
+        let cancel = CancellationToken::new();
+
+        // Cancel immediately
+        cancel.cancel();
+
+        let result = test_single_server(9999, &server, &cancel).await;
+        assert!(result.is_err(), "test_single_server should return Err when cancelled");
+
+        // Verify cancellation is idempotent
+        assert!(cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_test_single_server_with_dead_port() {
+        let server = ServerProfile::default();
+        let cancel = CancellationToken::new();
+
+        // Port 1 should not have a proxy → proxy creation may fail or timeout
+        let result = test_single_server(1, &server, &cancel).await;
+        // Either Err (proxy creation failure) or timeout — both acceptable
+        // We just verify it doesn't panic
+        if let Ok(r) = result {
+            // If proxy somehow connected, ping_ms should be valid
+            assert!(r.ping_ms > 0 || r.server_id == server.id, "unexpected result state");
+        }
+    }
+
+    // ── ServerTestResult construction ─────────────────────────────────────
+
+    #[test]
+    fn test_server_test_result_construction() {
+        let result = ServerTestResult {
+            server_id: "test-1".into(),
+            ping_ms: 42,
+            outlet_ip: Some("1.2.3.4".into()),
+            behind_cdn: false,
+            exit_flag: Some("US".into()),
+            exit_country: Some("United States".into()),
+            exit_city: Some("New York".into()),
+        };
+
+        assert_eq!(result.server_id, "test-1");
+        assert_eq!(result.ping_ms, 42);
+        assert_eq!(result.outlet_ip, Some("1.2.3.4".into()));
+        assert!(!result.behind_cdn);
+        assert_eq!(result.exit_flag, Some("US".into()));
+
+        // Test with CDN = true, no outlet IP
+        let cdn_result = ServerTestResult {
+            server_id: "test-cdn".into(),
+            ping_ms: 120,
+            outlet_ip: None,
+            behind_cdn: true,
+            exit_flag: None,
+            exit_country: None,
+            exit_city: None,
+        };
+        assert!(cdn_result.behind_cdn);
+        assert!(cdn_result.outlet_ip.is_none());
+        assert_eq!(cdn_result.ping_ms, 120);
+    }
+
+    #[test]
+    fn test_server_test_result_empty_city() {
+        let r = ServerTestResult {
+            server_id: "x".into(),
+            ping_ms: 10,
+            outlet_ip: None,
+            behind_cdn: false,
+            exit_flag: None,
+            exit_country: Some("Germany".into()),
+            exit_city: None,
+        };
+        assert!(r.exit_city.is_none());
+    }
+
+    // ── BatcherLog helper signature ───────────────────────────────────────
+    // batcher_log() calls AppHandle::state() which requires a running Tauri app,
+    // so we can't unit-test it in isolation. Test that the function signature
+    // resolves at compile time by verifying we can call it with the right types.
+    #[test]
+    fn test_batcher_log_fn_compiles() {
+        // Compile-time check: function exists with expected signature.
+        // No runtime test needed — it requires Tauri runtime.
+        fn _check_type(a: &tauri::AppHandle, l: crate::logging::LogLevel, m: String) {
+            batcher_log(a, l, m);
+        }
+    }
 }

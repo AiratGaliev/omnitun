@@ -256,7 +256,9 @@ function ProfileItem({
                       <Loader2 size={12} className="animate-spin" />
                       {progress.phase === 'testing'
                         ? `${t('testingServers')}: ${progress.tested}/${progress.total}`
-                        : progress.phase === 'singbox_starting'
+                        : progress.phase === 'tcp_ping'
+                          ? `TCP Ping: ${progress.tested}/${progress.total}`
+                          : progress.phase === 'singbox_starting'
                           ? t('startingSingbox')
                           : progress.phase === 'acquiring_ports'
                             ? t('acquiringPorts')

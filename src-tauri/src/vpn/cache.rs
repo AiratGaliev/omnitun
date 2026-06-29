@@ -310,11 +310,11 @@ impl ServerCache {
                         if is_positive_stale(entry.last_updated, now) {
                             // SWR: return stale value, spawn background refresh
                             if let Some(result) = entry.to_positive() {
-                                let sid = server_id.to_string();
+                                let cache = self.clone();
+                                let srv = server.clone();
                                 tokio::spawn(async move {
-                                    log::info!(
-                                        "[Cache] SWR background refresh skipped for {sid} — no ServerProfile available in stale entry"
-                                    );
+                                    let rx = cache.queue_test(&srv, "");
+                                    let _ = rx.await;
                                 });
                                 return Ok(result);
                             }
@@ -496,9 +496,7 @@ impl ServerCache {
                     match &entry.status {
                         CacheStatus::Positive { .. } => {
                             if is_positive_stale(entry.last_updated, now) {
-                                // SWR: return stale, spawn background (same as before)
-                                // For batch_test, we accept stale as valid
-                                cached = entry.to_positive();
+                                // Stale — don't return from cache in batch_test, force re-test
                             } else {
                                 // Fresh — promote to hot
                                 cached = entry.to_positive();
@@ -531,6 +529,18 @@ impl ServerCache {
                 s.exit_country_name = positive.exit_country;
                 s.exit_city_name = positive.exit_city;
                 result_slots.push(Some(s));
+            } else if server.behind_cdn {
+                // CDN servers can't be batch-tested reliably (Fastly rejects TLS on port 80).
+                // Keep TCP ping result as-is.
+                cache_hits += 1;
+                log(
+                    app,
+                    &logger,
+                    LogLevel::Info,
+                    LogSource::Cache,
+                    format!("[Cache] server {} behind CDN — skipping batch test, using TCP ping", server.id),
+                );
+                result_slots.push(Some(server.clone()));
             } else {
                 // Queue for batch test (don't await yet!)
                 let rx = self.queue_test(server, profile_id);
@@ -552,63 +562,82 @@ impl ServerCache {
             return result_slots.into_iter().map(|s| s.unwrap()).collect();
         }
 
-        // Phase 2: Await all queued results in parallel
+        // Phase 2: Await all queued results using JoinSet with progress reporting
+        let mut set = tokio::task::JoinSet::new();
+        for (_idx, server, rx) in pending {
+            set.spawn(async move {
+                let res = rx.await;
+                (server, res)
+            });
+        }
+
         let mut completed = 0usize;
         let mut failed = 0usize;
+        let mut successful = 0usize;
 
-        // Process receivers as they complete
-        for (_idx, server, rx) in pending {
-            match rx.await {
-                Ok(Ok(positive)) => {
-                    completed += 1;
-                    let mut s = server;
-                    s.ping_ms = Some(positive.ping_ms);
-                    s.behind_cdn = positive.behind_cdn;
-                    s.exit_server = positive.exit_ip;
-                    s.exit_flag = positive.exit_flag;
-                    s.exit_country_name = positive.exit_country;
-                    s.exit_city_name = positive.exit_city;
-                    // Find and update the right slot
-                    for slot in &mut result_slots {
-                        if slot.is_none() {
-                            *slot = Some(s);
-                            break;
-                        }
+        while let Some(res) = set.join_next().await {
+            if let Some(ref token) = _cancel {
+                if token.is_cancelled() {
+                    log::info!("[Cache] batch_test cancelled");
+                    break;
+                }
+            }
+
+            if let Ok((server, rx_res)) = res {
+                completed += 1;
+                let mut s = server.clone();
+                match rx_res {
+                    Ok(Ok(positive)) => {
+                        successful += 1;
+                        s.ping_ms = Some(positive.ping_ms);
+                        s.behind_cdn = positive.behind_cdn;
+                        s.exit_server = positive.exit_ip;
+                        s.exit_flag = positive.exit_flag;
+                        s.exit_country_name = positive.exit_country;
+                        s.exit_city_name = positive.exit_city;
+                    }
+                    Ok(Err(e)) => {
+                        failed += 1;
+                        log(
+                            app,
+                            &logger,
+                            LogLevel::Warning,
+                            LogSource::Cache,
+                            format!("[Cache] server {} batch test failed: {e}", server.id),
+                        );
+                    }
+                    Err(_) => {
+                        failed += 1;
+                        log(
+                            app,
+                            &logger,
+                            LogLevel::Warning,
+                            LogSource::Cache,
+                            format!("[Cache] server {} batch worker dropped", server.id),
+                        );
                     }
                 }
-                Ok(Err(e)) => {
-                    failed += 1;
-                    log(
-                        app,
-                        &logger,
-                        LogLevel::Warning,
-                        LogSource::Cache,
-                        format!("[Cache] server {} batch test failed: {e}", server.id),
-                    );
-                    // Fallback: keep TCP ping result
-                    for slot in &mut result_slots {
-                        if slot.is_none() {
-                            *slot = Some(server);
-                            break;
-                        }
+
+                // Find and fill the right slot
+                for slot in &mut result_slots {
+                    if slot.is_none() {
+                        *slot = Some(s);
+                        break;
                     }
                 }
-                Err(_) => {
-                    failed += 1;
-                    log(
-                        app,
-                        &logger,
-                        LogLevel::Warning,
-                        LogSource::Cache,
-                        format!("[Cache] server {} batch worker dropped", server.id),
-                    );
-                    for slot in &mut result_slots {
-                        if slot.is_none() {
-                            *slot = Some(server);
-                            break;
-                        }
-                    }
-                }
+
+                crate::events::emit_refresh_progress(
+                    app,
+                    crate::events::RefreshProgress {
+                        profile_id: profile_id.to_string(),
+                        total,
+                        tested: cache_hits + completed,
+                        cache_hits,
+                        successful: cache_hits + successful,
+                        failed,
+                        phase: "testing".into(),
+                    },
+                );
             }
         }
 
