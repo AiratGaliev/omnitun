@@ -483,6 +483,13 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
         }
     }
     let duplicates = initial_count - unique.len();
+    log(
+        app,
+        &logger,
+        LogLevel::Info,
+        LogSource::Subscription,
+        format!("Parsed {initial_count} servers from subscription, {duplicates} duplicates removed, {} unique", unique.len()),
+    );
     if duplicates > 0 {
         log(
             app,

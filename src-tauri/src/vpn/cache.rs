@@ -459,6 +459,7 @@ impl ServerCache {
         let logger = app.state::<std::sync::Mutex<Logger>>();
         let total = servers.len();
         let mut cache_hits = 0usize;
+        let mut cdn_skip_count = 0usize;
         let mut queued = 0usize;
 
         log(
@@ -544,7 +545,7 @@ impl ServerCache {
             } else if server.behind_cdn {
                 // CDN servers can't be batch-tested reliably (Fastly rejects TLS on port 80).
                 // Keep TCP ping result as-is.
-                cache_hits += 1;
+                cdn_skip_count += 1;
                 log(
                     app,
                     &logger,
@@ -567,7 +568,7 @@ impl ServerCache {
             &logger,
             LogLevel::Info,
             LogSource::Cache,
-            format!("[Cache] batch_test: {total} total, {cache_hits} cache hits, {queued} queued"),
+            format!("[Cache] batch_test: {total} total, {cache_hits} cache hits, {cdn_skip_count} CDN skip, {queued} queued"),
         );
 
         if queued == 0 {
