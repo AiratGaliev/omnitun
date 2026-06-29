@@ -255,9 +255,9 @@ function ProfileItem({
                     <span className="text-xs font-medium text-emerald-400 flex items-center gap-1.5">
                       <Loader2 size={12} className="animate-spin" />
                       {progress.phase === 'testing'
-                        ? `${t('testingServers')}: ${progress.tested}/${progress.total}`
+                        ? `${t('testingServers')}: ${progress.tested}/${progress.total} (${Math.round((progress.tested / Math.max(1, progress.total)) * 100)}%)`
                         : progress.phase === 'tcp_ping'
-                          ? `TCP Ping: ${progress.tested}/${progress.total}`
+                          ? `TCP Ping: ${progress.tested}/${progress.total} (${Math.round((progress.tested / Math.max(1, progress.total)) * 100)}%)`
                           : progress.phase === 'singbox_starting'
                           ? t('startingSingbox')
                           : progress.phase === 'acquiring_ports'

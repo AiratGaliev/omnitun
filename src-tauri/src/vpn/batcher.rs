@@ -372,29 +372,28 @@ async fn process_batch(
     }
 
     // 4. Test all servers in parallel through their individual ports
-    let mut handles = Vec::with_capacity(count);
+    let mut set = tokio::task::JoinSet::new();
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TESTS));
 
-    for (idx, req) in batch.iter().enumerate() {
+    for (idx, req) in batch.into_iter().enumerate() {
         let port = port_list[idx];
-        let req_server = req.server.clone();
         let sem = semaphore.clone();
         let cancel = cancel.clone();
 
-        handles.push(tokio::spawn(async move {
+        set.spawn(async move {
             let _permit = sem.acquire().await;
-            test_single_server(port, &req_server, &cancel).await
-        }));
+            let res = test_single_server(port, &req.server, &cancel).await;
+            (req, res)
+        });
     }
 
     // 5. Collect results
     let mut success_count = 0usize;
     let mut fail_count = 0usize;
 
-    for (handle, req) in handles.into_iter().zip(batch) {
-        match handle.await {
-            Ok(Ok(result)) => {
-                // Create PositiveResult from test result
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok((req, Ok(result))) => {
                 let positive = PositiveResult {
                     server_id: result.server_id.clone(),
                     ping_ms: result.ping_ms,
@@ -406,19 +405,17 @@ async fn process_batch(
                     tested_at: chrono::Utc::now().timestamp(),
                 };
 
-                // Update caches
                 cache.update_positive(&result.server_id, positive.clone()).await;
                 let _ = req.reply.send(Ok(positive));
                 success_count += 1;
             }
-            Ok(Err(e)) => {
+            Ok((req, Err(e))) => {
                 cache.update_negative(&req.server.id, e.clone()).await;
                 let _ = req.reply.send(Err(e));
                 fail_count += 1;
             }
             Err(e) => {
-                cache.update_negative(&req.server.id, format!("Task panicked: {e}")).await;
-                let _ = req.reply.send(Err(format!("Test panicked: {e}")));
+                batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] Task panicked: {e}"));
                 fail_count += 1;
             }
         }
