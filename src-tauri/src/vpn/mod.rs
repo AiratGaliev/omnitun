@@ -149,7 +149,7 @@ fn keyword_cdn_check(host: &str) -> bool {
 /// Lightweight initial CDN detection via keyword check on transport_host, sni.
 ///
 /// The real detection happens during batch testing via GeoLite2-ASN.mmdb
-/// (`geoip::is_cdn_asn()`), which examines the actual outlet IP. This function
+/// (`geoip::is_cdn_entry_ip()`), which examines the actual entry IP.
 /// is a fast pre-check for obviously serverless domains, so the UI can show
 /// the CDN badge even before batch testing runs.
 ///

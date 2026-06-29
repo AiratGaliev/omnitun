@@ -523,11 +523,23 @@ impl ServerCache {
                 cache_hits += 1;
                 let mut s = server.clone();
                 s.ping_ms = Some(positive.ping_ms);
-                s.behind_cdn = positive.behind_cdn;
-                s.exit_server = positive.exit_ip;
-                s.exit_flag = positive.exit_flag;
-                s.exit_country_name = positive.exit_country;
-                s.exit_city_name = positive.exit_city;
+                // Preserve live behind_cdn flag — entry IP check (step 1c in process_servers)
+                // is authoritative. Cache may have stale false from before CDN detection.
+                if !s.behind_cdn {
+                    s.behind_cdn = positive.behind_cdn;
+                }
+                // CDN servers must not retain outlet IP data — clear it
+                if s.behind_cdn {
+                    s.exit_server = None;
+                    s.exit_flag = None;
+                    s.exit_country_name = None;
+                    s.exit_city_name = None;
+                } else {
+                    s.exit_server = positive.exit_ip;
+                    s.exit_flag = positive.exit_flag;
+                    s.exit_country_name = positive.exit_country;
+                    s.exit_city_name = positive.exit_city;
+                }
                 result_slots.push(Some(s));
             } else if server.behind_cdn {
                 // CDN servers can't be batch-tested reliably (Fastly rejects TLS on port 80).

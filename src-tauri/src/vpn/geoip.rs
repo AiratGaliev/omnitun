@@ -349,10 +349,10 @@ fn prefix_mask(ip: IpAddr, len: u8) -> u128 {
         }
     }
 }
-
-/// Check if an IP address belongs to a known CDN provider — legacy alias.
-/// Still used by `profile/mod.rs` in batch/parallel server tests.
-pub fn is_cdn_asn(ip: &str) -> bool {
+/// Check if an IP address belongs to a known CDN provider.
+/// Delegates to .srs CIDR database (123jjck + PentiumB).
+/// Used to determine if a server's entry IP is a CDN edge node.
+pub fn is_cdn_entry_ip(ip: &str) -> bool {
     is_cdn_ip(ip)
 }
 
@@ -1113,35 +1113,34 @@ mod tests {
     // ── ASN / CDN detection tests ─────────────────────────────────────
 
     #[test]
-    fn test_is_cdn_asn_cloudflare() {
-        // Without a real ASN database, all calls return false.
-        assert!(!is_cdn_asn("1.1.1.1"));
-        assert!(!is_cdn_asn("8.8.8.8"));
+    fn test_is_cdn_entry_ip_cloudflare() {
+        assert!(!is_cdn_entry_ip("1.1.1.1"));
+        assert!(!is_cdn_entry_ip("8.8.8.8"));
     }
 
     #[test]
-    fn test_is_cdn_asn_fastly_when_db_ready() {
-        assert!(!is_cdn_asn("151.101.1.1"));
+    fn test_is_cdn_entry_ip_fastly_when_db_ready() {
+        assert!(!is_cdn_entry_ip("151.101.1.1"));
     }
 
     #[test]
-    fn test_is_cdn_asn_aws() {
-        assert!(!is_cdn_asn("13.32.0.1"));
-        assert!(!is_cdn_asn("52.84.0.1"));
+    fn test_is_cdn_entry_ip_aws() {
+        assert!(!is_cdn_entry_ip("13.32.0.1"));
+        assert!(!is_cdn_entry_ip("52.84.0.1"));
     }
 
     #[test]
-    fn test_is_cdn_asn_regular_asn() {
-        assert!(!is_cdn_asn("12345"));
-        assert!(!is_cdn_asn("42"));
-        assert!(!is_cdn_asn("0"));
+    fn test_is_cdn_entry_ip_regular_asn() {
+        assert!(!is_cdn_entry_ip("12345"));
+        assert!(!is_cdn_entry_ip("42"));
+        assert!(!is_cdn_entry_ip("0"));
     }
 
     #[test]
-    fn test_is_cdn_asn_invalid_input() {
-        assert!(!is_cdn_asn(""));
-        assert!(!is_cdn_asn("not_a_number"));
-        assert!(!is_cdn_asn("abc123"));
+    fn test_is_cdn_entry_ip_invalid_input() {
+        assert!(!is_cdn_entry_ip(""));
+        assert!(!is_cdn_entry_ip("not_a_number"));
+        assert!(!is_cdn_entry_ip("abc123"));
     }
 
     #[test]

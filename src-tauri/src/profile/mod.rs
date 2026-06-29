@@ -412,16 +412,54 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             for name in &["cdn-only_singbox.srs", "merged.srs"] {
                 let path = geo_dir.join(name);
                 if !path.exists() {
+                    log(
+                        app,
+                        &logger,
+                        LogLevel::Warning,
+                        LogSource::System,
+                        format!("CDN .srs {name} not found at {:?}", path),
+                    );
                     continue;
                 }
-                if let Ok(r) = crate::vpn::geoip::parse_srs_file(&path) {
-                    log::info!("CDN .srs {name}: {} CIDR entries (lazy)", r.len());
-                    merged.extend(r);
+                match crate::vpn::geoip::parse_srs_file(&path) {
+                    Ok(r) => {
+                        log(
+                            app,
+                            &logger,
+                            LogLevel::Info,
+                            LogSource::System,
+                            format!("CDN .srs {name}: {} CIDR entries (lazy)", r.len()),
+                        );
+                        merged.extend(r);
+                    }
+                    Err(e) => {
+                        log(
+                            app,
+                            &logger,
+                            LogLevel::Warning,
+                            LogSource::System,
+                            format!("CDN .srs {name} parse failed: {e}"),
+                        );
+                    }
                 }
             }
             if !merged.is_empty() {
-                log::info!("CDN ranges merged: {} total entries (lazy)", merged.len());
+                log(
+                    app,
+                    &logger,
+                    LogLevel::Info,
+                    LogSource::System,
+                    format!("CDN ranges merged: {} total entries (lazy)", merged.len()),
+                );
                 crate::vpn::geoip::set_cdn_ranges(merged);
+            } else {
+                log(
+                    app,
+                    &logger,
+                    LogLevel::Warning,
+                    LogSource::System,
+                    "CDN ranges empty — no .srs files loaded".into(),
+                );
             }
         }
     }
@@ -545,7 +583,12 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
         set.spawn(async move {
             let addr = format!("{}:{}", server.server, server.port);
             let start = std::time::Instant::now();
-            // Single attempt with 3-second timeout (was 3 retries — too permissive)
+            // DNS resolve: get the real entry IP from hostname
+            let entry_ip = tokio::net::lookup_host(&addr).await
+                .ok()
+                .and_then(|mut a| a.next())
+                .map(|s| s.ip().to_string());
+            // TCP connect with 3s timeout
             let reachable = tokio::time::timeout(
                 std::time::Duration::from_secs(3),
                 tokio::net::TcpStream::connect(&addr),
@@ -554,7 +597,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             .is_ok_and(|r| r.is_ok());
             let ping_ms = start.elapsed().as_millis() as u64;
             drop(permit);
-            (server, reachable, ping_ms)
+            (server, reachable, ping_ms, entry_ip)
         });
     }
 
@@ -562,7 +605,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
     let mut tcp_tested = 0;
     while let Some(result) = set.join_next().await {
         tcp_tested += 1;
-        if let Ok((mut server, true, ping_ms)) = result {
+        if let Ok((mut server, true, ping_ms, entry_ip)) = result {
             server.ping_ms = Some(ping_ms);
 
             // GeoIP enrichment: set flag + country/city fields + display name
@@ -573,21 +616,44 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 if !info.city.is_empty() {
                     server.city_name = Some(info.city.clone());
                 }
+            }
+            // If GeoIP fails, keep flag from emoji extraction or leave unset
 
-                // CDN detection via entry IP — if the server's resolved IP
-                // belongs to a known CDN provider, mark it as behind CDN.
-                if !server.behind_cdn && crate::vpn::geoip::is_cdn_asn(&server.server) {
-                    server.behind_cdn = true;
+            // CDN detection on the real entry IP (resolved from hostname if needed).
+            // If lookup_host() failed (common for IP addresses on Windows), fallback
+            // to server.server directly when it's parseable as an IP.
+            if !server.behind_cdn {
+                let check_ip = entry_ip.as_deref().or_else(|| {
+                    server.server.parse::<std::net::IpAddr>().ok().map(|_| &*server.server)
+                });
+                if let Some(rip) = check_ip {
+                    if crate::vpn::geoip::is_cdn_entry_ip(rip) {
+                        server.behind_cdn = true;
+                        log(
+                            app,
+                            &logger,
+                            LogLevel::Info,
+                            LogSource::Subscription,
+                            format!("[CDN] entry IP {} is behind CDN", rip),
+                        );
+                    }
+                }
+            }
+
+            // Replace hostname with resolved IP in server address,
+            // so profiles store IPs, not hostnames. SNI stays intact.
+            if let Some(ref rip) = entry_ip {
+                if rip != &server.server {
                     log(
                         app,
                         &logger,
                         LogLevel::Info,
                         LogSource::Subscription,
-                        format!("[CDN] entry IP {} is behind CDN", &server.server),
+                        format!("[DNS] {} → {}", server.server, rip),
                     );
+                    server.server = rip.clone();
                 }
             }
-            // If GeoIP fails, keep flag from emoji extraction or leave unset
 
             alive.push(server);
         }
@@ -727,7 +793,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             let guard = settings.lock().await;
             if guard.proxy_port > 0 {
                 if let Some(outlet) = fetch_outlet_ip(guard.proxy_port).await {
-                    let is_cdn = crate::vpn::geoip::is_cdn_asn(&outlet);
+                    let is_cdn = crate::vpn::geoip::is_cdn_entry_ip(&outlet);
                     if is_cdn {
                         log(
                             app,
