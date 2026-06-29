@@ -474,7 +474,7 @@ impl ServerCache {
         let mut pending = Vec::new();
         let mut result_slots: Vec<Option<ServerProfile>> = Vec::with_capacity(total);
 
-        for (i, server) in servers.iter().enumerate() {
+        for server in servers.iter() {
             let server_id = &server.id;
             let now = chrono::Utc::now().timestamp();
 
@@ -544,7 +544,7 @@ impl ServerCache {
             } else {
                 // Queue for batch test (don't await yet!)
                 let rx = self.queue_test(server, profile_id);
-                pending.push((i, server.clone(), rx));
+                pending.push((server.clone(), rx));
                 result_slots.push(None);
                 queued += 1;
             }
@@ -564,7 +564,7 @@ impl ServerCache {
 
         // Phase 2: Await all queued results using JoinSet with progress reporting
         let mut set = tokio::task::JoinSet::new();
-        for (_idx, server, rx) in pending {
+        for (server, rx) in pending {
             set.spawn(async move {
                 let res = rx.await;
                 (server, res)
@@ -578,7 +578,13 @@ impl ServerCache {
         while let Some(res) = set.join_next().await {
             if let Some(ref token) = _cancel {
                 if token.is_cancelled() {
-                    log::info!("[Cache] batch_test cancelled");
+                    log(
+                        app,
+                        &logger,
+                        LogLevel::Info,
+                        LogSource::Cache,
+                        "[Cache] batch_test cancelled".into(),
+                    );
                     break;
                 }
             }
