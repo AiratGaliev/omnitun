@@ -455,7 +455,18 @@ async fn process_batch(
     );
 }
 
+/// Test URLs ordered by preference. Tried in sequence within each attempt.
+/// Accessed through the proxy (SOCKS5h), not directly — so HTTPS is safe from
+/// local ISP interception. Cloudflare anycast CDN = lowest global latency.
+const TEST_URLS: &[&str] = &[
+    "https://cp.cloudflare.com/generate_204",
+    "https://www.msftconnecttest.com/connecttest.txt",
+    "https://detectportal.firefox.com/success.txt",
+    "http://cp.cloudflare.com/generate_204",
+];
+
 /// Test a single server through its dedicated proxy port.
+/// Tries multiple test URLs with one retry on total failure.
 async fn test_single_server(
     port: u16,
     server: &ServerProfile,
@@ -470,38 +481,53 @@ async fn test_single_server(
         .build()
         .map_err(|e| format!("Client build error: {e}"))?;
 
-    // 1. Latency test
-    let start = Instant::now();
-    let latency_result = client
-        .get("http://cp.cloudflare.com/generate_204")
-        .send()
-        .await;
+    // 1. Latency test — try URLs in order with 1 retry
+    let mut last_err = "No test URL succeeded".to_string();
+    let mut ping_ms = 0u64;
+    let mut success = false;
 
-    let ping_ms = match latency_result {
-        Ok(resp) if resp.status().is_success() => {
-            start.elapsed().as_millis() as u64
+    for attempt in 0..2 {
+        if cancel.is_cancelled() {
+            return Err("Cancelled".into());
         }
-        Ok(resp) => {
-            return Err(format!("HTTP status {}", resp.status()));
+        for &url in TEST_URLS {
+            if attempt == 0 && url != TEST_URLS[0] {
+                // First attempt only tries primary URL; fallbacks on retry
+                break;
+            }
+            if cancel.is_cancelled() {
+                return Err("Cancelled".into());
+            }
+            let start = Instant::now();
+            match client.get(url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    ping_ms = start.elapsed().as_millis() as u64;
+                    success = true;
+                    break;
+                }
+                Ok(resp) => {
+                    last_err = format!("HTTP status {}", resp.status());
+                }
+                Err(e) => {
+                    last_err = format!("Request failed: {e}");
+                }
+            }
         }
-        Err(e) => {
-            return Err(format!("Request failed: {e}"));
+        if success {
+            break;
         }
-    };
+    }
 
-    // Check cancellation after latency test
-    if cancel.is_cancelled() {
-        return Err("Cancelled".into());
+    if !success {
+        return Err(last_err);
     }
 
     // 2. Outlet IP — multiple fallback services, concurrent fetch.
     let outlet_ip = fetch_outlet_ip_through_port(&client).await;
 
-    // 3. CDN detection via outlet IP
-    let behind_cdn = outlet_ip
-        .as_ref()
-        .map(|ip| crate::vpn::geoip::is_cdn_ip(ip))
-        .unwrap_or(false);
+    // 3. CDN detection is ENTRY IP only (done in TCP ping phase).
+    //    Outlet IP CDN detection is incorrect — traffic CDN ≠ server behind CDN.
+    let behind_cdn = server.behind_cdn;
 
     // 4. Exit GeoIP
     let exit_geoip = if let Some(ref ip) = outlet_ip {
@@ -527,9 +553,9 @@ async fn test_single_server(
 /// Returns `None` if all services fail / time out.
 async fn fetch_outlet_ip_through_port(client: &reqwest::Client) -> Option<String> {
     let services = [
+        "https://www.cloudflare.com/cdn-cgi/trace",
+        "https://api64.ipify.org",
         "https://ifconfig.me/ip",
-        "https://api.ipify.org",
-        "https://checkip.amazonaws.com",
     ];
 
     let mut set = tokio::task::JoinSet::new();
@@ -538,8 +564,16 @@ async fn fetch_outlet_ip_through_port(client: &reqwest::Client) -> Option<String
         set.spawn(async move {
             let resp = client.get(url).send().await.ok()?;
             let text = resp.text().await.ok()?;
-            let ip = text.trim().to_string();
-            if !ip.is_empty() { Some(ip) } else { None }
+            // cloudflare.com/cdn-cgi/trace returns key=value pairs (ip=... loc=...)
+            // Extract the IP line. Other services return just the IP.
+            let ip = text.lines()
+                .find_map(|l| l.strip_prefix("ip="))
+                .map(|s| s.trim().to_string())
+                .or_else(|| {
+                    let trimmed = text.trim().to_string();
+                    if !trimmed.is_empty() { Some(trimmed) } else { None }
+                });
+            ip
         });
     }
 

@@ -13,10 +13,9 @@
         "detour": "proxy"
       },
       {
-        "type": "https",
+        "type": "local",
         "tag": "local",
-        "server": "8.8.8.8",
-        "server_port": 443
+        "detour": "direct"
       }
     ],
     "final": "remote"

@@ -742,7 +742,8 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
     if city_needs {
         let urls = [
             "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb",
-            "https://cdn.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-City.mmdb",
+            "https://fastly.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-City.mmdb",
+            "https://ghproxy.net/https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb",
         ];
         if let Ok(dl) = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -775,7 +776,8 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
     if asn_needs {
         let urls = [
             "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-ASN.mmdb",
-            "https://cdn.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-ASN.mmdb",
+            "https://fastly.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-ASN.mmdb",
+            "https://ghproxy.net/https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-ASN.mmdb",
         ];
         if let Ok(dl) = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -825,17 +827,24 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
     // Sources:
     //   A) 123jjck/cdn-ip-ranges – broad CDN coverage (cdn-only_singbox.srs)
     //   B) PentiumB/CDN-RuleSet   – MaxMind+IPInfo+RouteViews based CDN ranges (merged.srs)
+    //
+    // Note: raw.githubusercontent.com and github.com are blocked in China.
+    // ghproxy.net mirror is used as fallback for both sources.
 
-    let cdn_sources: &[(&str, &str, &str)] = &[
-        ("123jjck", "cdn-only_singbox.srs",
-         "https://raw.githubusercontent.com/123jjck/cdn-ip-ranges/main/cdn-only/cdn-only_singbox.srs"),
-        ("PentiumB", "merged.srs",
-         "https://github.com/PentiumB/CDN-RuleSet/releases/latest/download/merged.srs"),
+    let cdn_sources: &[(&str, &str, &[&str])] = &[
+        ("123jjck", "cdn-only_singbox.srs", &[
+            "https://raw.githubusercontent.com/123jjck/cdn-ip-ranges/main/cdn-only/cdn-only_singbox.srs",
+            "https://ghproxy.net/https://raw.githubusercontent.com/123jjck/cdn-ip-ranges/main/cdn-only/cdn-only_singbox.srs",
+        ]),
+        ("PentiumB", "merged.srs", &[
+            "https://github.com/PentiumB/CDN-RuleSet/releases/latest/download/merged.srs",
+            "https://ghproxy.net/https://github.com/PentiumB/CDN-RuleSet/releases/latest/download/merged.srs",
+        ]),
     ];
 
     let mut all_cdn_ranges: Vec<(IpAddr, u8)> = Vec::new();
 
-    for (name, filename, url) in cdn_sources {
+    for (name, filename, urls) in cdn_sources {
         let path = db_dir.join(filename);
         let needs = !path.exists()
             || std::fs::metadata(&path)
@@ -843,20 +852,28 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
                 .map(|t| t.elapsed().map(|d| d > Duration::from_secs(24 * 3600)).unwrap_or(true))
                 .unwrap_or(true);
         if needs {
-            log::info!("Downloading CDN .srs from {name} ({url}) ...");
-            if let Ok(dl) = reqwest::Client::builder()
-                .user_agent("omnitun/1.0")
-                .danger_accept_invalid_certs(true)
-                .timeout(Duration::from_secs(30))
-                .build()
-            {
-                match download_single(&dl, &path, url, &format!("CDN .srs {name}")).await {
-                    Ok(bytes) => {
-                        update_db_meta(db_dir, filename, None, bytes);
-                        log::info!("CDN .srs {name} downloaded ({bytes} bytes)");
+            let mut downloaded = false;
+            for url in *urls {
+                log::info!("Downloading CDN .srs from {name} ({url}) ...");
+                if let Ok(dl) = reqwest::Client::builder()
+                    .user_agent("omnitun/1.0")
+                    .danger_accept_invalid_certs(true)
+                    .timeout(Duration::from_secs(30))
+                    .build()
+                {
+                    match download_single(&dl, &path, url, &format!("CDN .srs {name}")).await {
+                        Ok(bytes) => {
+                            update_db_meta(db_dir, filename, None, bytes);
+                            log::info!("CDN .srs {name} downloaded ({bytes} bytes)");
+                            downloaded = true;
+                            break;
+                        }
+                        Err(e) => log::warn!("CDN .srs {name} download from {url} failed: {e}"),
                     }
-                    Err(e) => log::warn!("CDN .srs {name} download: {e}"),
                 }
+            }
+            if !downloaded {
+                log::warn!("CDN .srs {name}: all download URLs failed");
             }
         }
         if path.exists() {

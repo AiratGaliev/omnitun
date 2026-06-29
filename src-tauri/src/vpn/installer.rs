@@ -122,29 +122,64 @@ impl Installer {
             .header("User-Agent", "omnitun/0.1.0")
             .header("Accept", "application/json")
             .send()
-            .await
-            .map_err(|e| VpnError::Install(format!("Failed to check latest version: {e}")))?;
+            .await;
 
-        let json: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| VpnError::Install(format!("Failed to parse version: {e}")))?;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                match r.json::<serde_json::Value>().await {
+                    Ok(json) => {
+                        if let Some(tag) = json["tag_name"].as_str() {
+                            let version = tag.trim_start_matches('v').to_string();
+                            log(
+                                app_handle,
+                                &logger,
+                                LogLevel::Info,
+                                LogSource::Installer,
+                                format!("Latest version: {version}"),
+                            );
+                            return Ok(version);
+                        }
+                    }
+                    Err(e) => {
+                        log(
+                            app_handle,
+                            &logger,
+                            LogLevel::Warning,
+                            LogSource::Installer,
+                            format!("Failed to parse GitHub response: {e}"),
+                        );
+                    }
+                }
+            }
+            Ok(r) => {
+                log(
+                    app_handle,
+                    &logger,
+                    LogLevel::Warning,
+                    LogSource::Installer,
+                    format!("GitHub API returned {}", r.status()),
+                );
+            }
+            Err(e) => {
+                log(
+                    app_handle,
+                    &logger,
+                    LogLevel::Warning,
+                    LogSource::Installer,
+                    format!("GitHub API unreachable (blocked?): {e}"),
+                );
+            }
+        }
 
-        let tag = json["tag_name"]
-            .as_str()
-            .ok_or_else(|| VpnError::Install("Missing tag_name in response".into()))?;
-
-        let version = tag.trim_start_matches('v').to_string();
-
+        // Fallback: GitHub API blocked/unreachable (China, Iran, Russia)
         log(
             app_handle,
             &logger,
-            LogLevel::Info,
+            LogLevel::Warning,
             LogSource::Installer,
-            format!("Latest version: {version}"),
+            "GitHub API failed, using fallback version 1.10.1".into(),
         );
-
-        Ok(version)
+        Ok("1.10.1".to_string())
     }
 
     fn extract_zip(bytes: &[u8], bin_dir: &Path, binary_name: &str) -> Result<(), VpnError> {
@@ -222,6 +257,7 @@ impl Installer {
 
     fn download_url(version: &str) -> String {
         let suffix = Self::platform_suffix();
+        // Primary: GitHub releases (blocked in China). Mirror fallback in download fn.
         format!("https://github.com/SagerNet/sing-box/releases/download/v{version}/sing-box-{version}-{suffix}")
     }
 

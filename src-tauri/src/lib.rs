@@ -35,9 +35,10 @@ const PROXY_TIMEOUT_SECS: u64 = 15;
 const PROXY_POLL_MS: u64 = 300;
 
 const IP_URLS: &[&str] = &[
-    "https://ifconfig.me/ip",
     "https://api.ipify.org",
-    "https://icanhazip.com",
+    "https://whatismyip.akamai.com",
+    "http://myip.ipip.net/s",
+    "https://www.cloudflare.com/cdn-cgi/trace",
 ];
 
 struct VpnState {
@@ -1088,9 +1089,13 @@ async fn get_real_ip(app: tauri::AppHandle) -> Result<String, String> {
     for url in IP_URLS {
         if let Ok(resp) = client.get(*url).send().await {
             if let Ok(text) = resp.text().await {
-                let trimmed = text.trim().to_string();
-                if !trimmed.is_empty() {
-                    ip = trimmed;
+                // Try to extract ip=... line (Cloudflare trace)
+                let extracted = text.lines()
+                    .find_map(|l| l.strip_prefix("ip="))
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| text.trim().to_string());
+                if !extracted.is_empty() {
+                    ip = extracted;
                     break;
                 }
             }
@@ -1163,22 +1168,34 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
     let client = client_builder.build().map_err(|e| e.to_string())?;
 
     let mut ip = String::new();
-    for (idx, url) in IP_URLS.iter().enumerate() {
-        if idx > 0 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        if let Ok(resp) = client.get(*url).send().await {
-            if resp.status().is_success() {
-                if let Ok(text) = resp.text().await {
-                    let trimmed = text.trim().to_string();
-                    if !trimmed.is_empty()
-                        && trimmed.chars().all(|c| c.is_ascii_digit() || c == '.')
-                    {
-                        ip = trimmed;
-                        break;
+
+    // Concurrently check all URLs, return first valid IP
+    let mut set = tokio::task::JoinSet::new();
+    for &url in IP_URLS {
+        let client = client.clone();
+        set.spawn(async move {
+            if let Ok(resp) = client.get(url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(text) = resp.text().await {
+                        // Try to extract ip=... (Cloudflare trace)
+                        let extracted = text.lines()
+                            .find_map(|l| l.strip_prefix("ip="))
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_else(|| text.trim().to_string());
+                        if !extracted.is_empty() {
+                            return Some(extracted);
+                        }
                     }
                 }
             }
+            None
+        });
+    }
+
+    while let Some(res) = set.join_next().await {
+        if let Ok(Some(found)) = res {
+            ip = found;
+            break;
         }
     }
 
