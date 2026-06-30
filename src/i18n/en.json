@@ -34,8 +34,6 @@
   "smartRouting": "Smart Routing",
   "bypassingLocal": "Bypassing Local Traffic (GeoIP)",
   "routingDisabled": "Routing Disabled",
-  "vpnMode": "VPN",
-  "vpnModeDesc": "All system traffic routed through tunnel",
   "proxyMode": "Proxy",
   "proxyModeDesc": "Local SOCKS5/HTTP proxy server",
   "systemProxyMode": "System Proxy",

@@ -15,16 +15,6 @@ use tokio_util::sync::CancellationToken;
 fn proxy_port(app: &AppHandle) -> Option<u16> {
     use crate::settings::AppSettings;
 
-    // Check current routing mode: in VPN mode, all traffic routes through TUN
-    // automatically, no need to proxy the subscription fetch.
-    if let Some(state) = app.try_state::<tokio::sync::Mutex<AppSettings>>() {
-        if let Ok(guard) = state.try_lock() {
-            if guard.routing_mode == "vpn" {
-                return None;
-            }
-        }
-    }
-
     // Proxy / system-proxy / local-proxy modes: use the proxy port
     // so the fetch goes through the active outbound.
     if crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0 {
@@ -304,7 +294,29 @@ impl ProfileManager {
             }
         }
 
+        // Preserve exit IP data from existing profiles before processing.
+        // Batch test (the only source of exit IP enrichment) is skipped when
+        // VPN is running, so fresly parsed servers would lose exit data.
+        let old_servers = &self.profiles[idx].servers;
+        let old_exit: std::collections::HashMap<String, (Option<String>, Option<String>, Option<String>, Option<String>)> = old_servers
+            .iter()
+            .map(|s| (
+                s.id.clone(),
+                (s.exit_server.clone(), s.exit_flag.clone(), s.exit_country_name.clone(), s.exit_city_name.clone()),
+            ))
+            .collect();
         servers = process_servers(app, servers, id).await;
+        // Restore preserved exit data if batch test didn't update it.
+        for server in &mut servers {
+            if server.exit_server.is_none() {
+                if let Some(saved) = old_exit.get(&server.id) {
+                    server.exit_server = saved.0.clone();
+                    server.exit_flag = saved.1.clone();
+                    server.exit_country_name = saved.2.clone();
+                    server.exit_city_name = saved.3.clone();
+                }
+            }
+        }
 
         // Notify cache about subscription refresh (remove deleted servers, resurrect survivors)
         if let Some(cache) = app.try_state::<std::sync::Arc<crate::vpn::cache::ServerCache>>() {
@@ -720,6 +732,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
     //    Skip if main VPN is running (separate sing-box instances crash on Windows).
     let main_vpn_running =
         crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
+
     if !alive.is_empty() && !main_vpn_running {
         // Get the ServerCache from app state
         let batch_result = if let Some(cache) = app.try_state::<std::sync::Arc<crate::vpn::cache::ServerCache>>() {
@@ -830,6 +843,22 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 }
             }
         }
+    } else if !alive.is_empty() && main_vpn_running {
+        log(
+            app,
+            &logger,
+            LogLevel::Info,
+            LogSource::Cache,
+            format!("Batch test skipped — main VPN running ({} alive)", alive.len()),
+        );
+    } else if alive.is_empty() {
+        log(
+            app,
+            &logger,
+            LogLevel::Info,
+            LogSource::Cache,
+            "Batch test skipped — no alive servers".into(),
+        );
     }
 
     // Fallback: sort alive servers by TCP ping
@@ -989,13 +1018,16 @@ mod extra_tests {
     use crate::settings::AppSettings;
     use crate::vpn::config::build_outbound;
     use crate::vpn::config::generate_config;
-    use crate::vpn::geoip;
     use serde_json::json;
     use std::collections::HashMap;
     use std::process::Command;
 
     fn test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("omnitun-test-{name}"))
+        std::env::temp_dir().join(format!(
+            "omnitun-test-{}-{}",
+            std::process::id(),
+            name
+        ))
     }
 
     fn app_data_dir() -> PathBuf {
@@ -1047,7 +1079,6 @@ mod extra_tests {
             return;
         }
 
-        let base = include_str!("../../config/base.json");
         let cache = test_dir("singles");
         let _ = std::fs::create_dir_all(&cache);
         let settings = AppSettings::default();
@@ -1055,7 +1086,7 @@ mod extra_tests {
         let mut ok = 0u32;
         let mut fail = 0u32;
         for (i, s) in servers.iter().enumerate() {
-            match generate_config(base, &cache, 2080, "local-proxy", &[s.clone()], &settings) {
+            match generate_config(&cache, 2080, "local-proxy", &[s.clone()], &settings) {
                 Ok((cfg_str, _)) => {
                     let tmp = cache.join(format!("c-{i}.json"));
                     let _ = std::fs::write(&tmp, &cfg_str);
@@ -1154,107 +1185,16 @@ mod extra_tests {
     }
 
     // -----------------------------------------------------------------------
-    // 3. VPN-mode config generation (TUN)
-    // -----------------------------------------------------------------------
-    #[test]
-    fn test_vpn_config_generation_passes_check() {
-        let servers = load_real_servers();
-        let binary = singbox();
-        if !binary.exists() {
-            eprintln!("SKIP");
-            return;
-        }
-
-        let base = include_str!("../../config/base-vpn.json");
-        let cache = test_dir("vpn");
-        let _ = std::fs::create_dir_all(&cache);
-        let settings = AppSettings::default();
-
-        // Test with first server
-        let result = generate_config(base, &cache, 2080, "vpn", &[servers[0].clone()], &settings);
-        assert!(
-            result.is_ok(),
-            "VPN config generation failed for {}",
-            servers[0].display_name()
-        );
-        let (cfg_str, _) = result.unwrap();
-
-        let p = cache.join("vpn.json");
-        std::fs::write(&p, &cfg_str).unwrap();
-        let out = Command::new(&binary)
-            .args(["check", "-c"])
-            .arg(&p)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "VPN config check failed:\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-
-        let _ = std::fs::remove_dir_all(&cache);
-        println!("  VPN config: sing-box check ✓");
-    }
-
-    // -----------------------------------------------------------------------
-    // 4. GeoIP enrichment — server entry IP matches country
-    // -----------------------------------------------------------------------
-    #[test]
-    fn test_geoip_matches_entry_country() {
-        let servers = load_real_servers();
-        let db_path = app_data_dir().join("geoip").join("country.mmdb");
-        if !db_path.exists() {
-            eprintln!("SKIP: no GeoIP DB at {:?}", db_path);
-            return;
-        }
-
-        let r = geoip::init_city(&db_path);
-        assert!(
-            r.is_ok() || geoip::is_ready(),
-            "GeoIP not initialized: {:?}",
-            r
-        );
-
-        let mut match_ = 0u32;
-        let mut mismatch = 0u32;
-        for s in &servers {
-            if let Some(geo) = geoip::resolve(&s.server) {
-                if let Some(ref flag) = s.flag {
-                    if geo.country_code == *flag {
-                        match_ += 1;
-                    } else {
-                        mismatch += 1;
-                        println!(
-                            "  ⚠ {}: entry={} geo={}",
-                            s.display_name(),
-                            flag,
-                            geo.country_code
-                        );
-                    }
-                }
-            }
-        }
-        println!(
-            "  GeoIP entry match: {match_}/{total} ({mismatch} diff)",
-            total = match_ + mismatch
-        );
-        // At least some should match (entry IP based GeoIP)
-        assert!(match_ > 0, "No servers matched GeoIP entry country");
-    }
-
-    // -----------------------------------------------------------------------
-    // 5. Full config: DNS + route + bypass_ru + enable_mux settings
+    // 3. Full config: DNS + route + bypass_ru + enable_mux settings
     // -----------------------------------------------------------------------
     #[test]
     fn test_full_config_has_all_required_sections() {
         let servers = load_real_servers();
-        let base = include_str!("../../config/base.json");
         let cache = test_dir("full-check");
         let _ = std::fs::create_dir_all(&cache);
         let settings = AppSettings::default();
 
         let (cfg_str, _) = generate_config(
-            base,
             &cache,
             2080,
             "local-proxy",
@@ -1318,7 +1258,6 @@ mod extra_tests {
         // This tests the logic in lib.rs: when autoConnectFastest=false,
         // alternativeServers must be empty so no urltest group is added
         let servers = load_real_servers();
-        let base = include_str!("../../config/base.json");
         let cache = test_dir("alt-servers");
         let _ = std::fs::create_dir_all(&cache);
 
@@ -1327,7 +1266,6 @@ mod extra_tests {
         settings_no_fastest.auto_connect_fastest = false;
 
         let (cfg_str, _) = generate_config(
-            base,
             &cache,
             2080,
             "local-proxy",
@@ -1356,7 +1294,6 @@ mod extra_tests {
         settings_fastest.auto_connect_fastest = true;
 
         let (cfg_str, _) = generate_config(
-            base,
             &cache,
             2080,
             "local-proxy",

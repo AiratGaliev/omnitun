@@ -295,14 +295,12 @@ describe('SegmentedControl', () => {
     render(
       <SegmentedControl
         options={[
-          { id: 'vpn', label: 'VPN' },
           { id: 'proxy', label: 'Proxy' },
         ]}
-        value="vpn"
+        value="proxy"
         onChange={onChange}
       />,
     );
-    expect(screen.getByText('VPN')).toBeInTheDocument();
     expect(screen.getByText('Proxy')).toBeInTheDocument();
     fireEvent.click(screen.getByText('Proxy'));
     expect(onChange).toHaveBeenCalledWith('proxy');

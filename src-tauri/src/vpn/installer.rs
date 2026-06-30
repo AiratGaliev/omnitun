@@ -20,17 +20,10 @@ impl Installer {
 
     pub fn is_installed(bin_dir: &Path) -> bool {
         let binary_path = bin_dir.join(Self::binary_name());
-        if !binary_path.exists() {
-            return false;
-        }
-        // Windows: wintun.dll is required for TUN (VPN) mode.
-        // Without it, sing-box will crash on VPN start.
-        #[cfg(target_os = "windows")]
-        if !bin_dir.join("wintun.dll").exists() {
-            return false;
-        }
-        true
+        binary_path.exists()
     }
+
+    // ── sing-box installation ──────────────────────────────────────────────
 
     pub async fn install(
         app_handle: &AppHandle,
@@ -72,19 +65,6 @@ impl Installer {
             Self::extract_zip(&bytes, bin_dir, binary_name)?;
         } else {
             Self::extract_tar_gz(&bytes, bin_dir, binary_name)?;
-        }
-
-        // Fallback: download wintun.dll separately if still missing (Windows)
-        #[cfg(target_os = "windows")]
-        if !bin_dir.join("wintun.dll").exists() {
-            log(
-                app_handle,
-                &logger,
-                LogLevel::Info,
-                LogSource::Installer,
-                "wintun.dll not found in sing-box archive, downloading separately...".into(),
-            );
-            Self::download_wintun(bin_dir).await?;
         }
 
         let binary_path = bin_dir.join(binary_name);
@@ -182,6 +162,8 @@ impl Installer {
         Ok("1.10.1".to_string())
     }
 
+    // ── ZIP / tar.gz extraction ────────────────────────────────────────────
+
     fn extract_zip(bytes: &[u8], bin_dir: &Path, binary_name: &str) -> Result<(), VpnError> {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
             .map_err(|e| VpnError::Install(format!("Failed to open zip: {e}")))?;
@@ -231,7 +213,7 @@ impl Installer {
 
         for entry in archive
             .entries()
-            .map_err(|e| VpnError::Install(format!("Failed to read tar: {e}")))?
+            .map_err(|e| VpnError::Install(format!("Failed to read tar: {e}")))? 
         {
             let mut entry =
                 entry.map_err(|e| VpnError::Install(format!("Failed to read tar entry: {e}")))?;
@@ -257,7 +239,6 @@ impl Installer {
 
     fn download_url(version: &str) -> String {
         let suffix = Self::platform_suffix();
-        // Primary: GitHub releases (blocked in China). Mirror fallback in download fn.
         format!("https://github.com/SagerNet/sing-box/releases/download/v{version}/sing-box-{version}-{suffix}")
     }
 
@@ -270,46 +251,6 @@ impl Installer {
         {
             "linux-amd64.tar.gz"
         }
-    }
-
-    #[cfg(target_os = "windows")]
-    async fn download_wintun(bin_dir: &Path) -> Result<(), VpnError> {
-        let url = "https://www.wintun.net/builds/wintun-0.14.1.zip";
-        let response = reqwest::get(url)
-            .await
-            .map_err(|e| VpnError::Install(format!("Failed to download wintun: {e}")))?;
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| VpnError::Install(format!("Failed to read wintun response: {e}")))?;
-
-        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
-            .map_err(|e| VpnError::Install(format!("Failed to open wintun zip: {e}")))?;
-
-        for i in 0..archive.len() {
-            let mut entry = archive
-                .by_index(i)
-                .map_err(|e| VpnError::Install(format!("Failed to read wintun zip entry: {e}")))?;
-
-            if entry.is_dir() {
-                continue;
-            }
-
-            let entry_name = entry.name().to_string();
-            // Inside wintun-0.14.1.zip the DLL is at: wintun-0.14.1/amd64/wintun.dll
-            if entry_name.ends_with("amd64/wintun.dll") {
-                let out_path = bin_dir.join("wintun.dll");
-                let mut out = std::fs::File::create(&out_path)
-                    .map_err(|e| VpnError::Install(format!("Failed to create wintun.dll: {e}")))?;
-                std::io::copy(&mut entry, &mut out)
-                    .map_err(|e| VpnError::Install(format!("Failed to extract wintun.dll: {e}")))?;
-                return Ok(());
-            }
-        }
-
-        Err(VpnError::Install(
-            "wintun.dll not found in wintun archive".into(),
-        ))
     }
 }
 
@@ -352,16 +293,11 @@ mod tests {
         assert!(!Installer::is_installed(&dir));
     }
 
-    /// Verify that extract_zip extracts ALL files (binary + wintun.dll + others)
-    /// from the archive structure that the official sing-box release uses.
     #[test]
     fn test_extract_zip_all_files() {
         let mut buf = std::io::Cursor::new(Vec::new());
         {
             let mut zip_writer = zip::ZipWriter::new(&mut buf);
-            // Simulate official sing-box archive structure:
-            // sing-box-{version}-windows-amd64/sing-box.exe
-            // sing-box-{version}-windows-amd64/wintun.dll
             zip_writer
                 .start_file(
                     "sing-box-1.0.0-windows-amd64/sing-box.exe",
@@ -404,14 +340,13 @@ mod tests {
         );
         assert!(
             temp_dir.join("wintun.dll").exists(),
-            "wintun.dll must be extracted"
+            "bundled DLL must be extracted"
         );
         assert!(
             temp_dir.join("README.md").exists(),
             "README.md must be extracted"
         );
 
-        // Verify content integrity
         assert_eq!(
             std::fs::read(temp_dir.join("sing-box.exe")).unwrap(),
             b"fake binary content"
@@ -424,7 +359,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
-    /// Verify that extract_zip returns an error when the archive is empty.
     #[test]
     fn test_extract_zip_empty_archive() {
         let mut buf = std::io::Cursor::new(Vec::new());
@@ -434,8 +368,10 @@ mod tests {
         }
 
         let bytes = buf.into_inner();
-        let temp_dir =
-            std::env::temp_dir().join(format!("omnitun-test-zip-empty-{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "omnitun-test-zip-empty-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 

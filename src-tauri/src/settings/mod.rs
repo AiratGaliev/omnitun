@@ -44,7 +44,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             accept_terms: false,
-            routing_mode: "vpn".to_string(),
+            routing_mode: "system-proxy".to_string(),
             proxy_port: 1080,
             bypass_ru: true,
             start_with_windows: true,
@@ -118,7 +118,7 @@ mod tests {
         let result = mgr.load();
         assert!(result.is_ok(), "expected Ok for missing file, got Err");
         let settings = result.unwrap();
-        assert_eq!(settings.routing_mode, "vpn");
+        assert_eq!(settings.routing_mode, "system-proxy");
         assert_eq!(settings.proxy_port, 1080);
         assert!(settings.bypass_ru);
 
@@ -185,7 +185,7 @@ mod tests {
     fn test_default_values() {
         let s = AppSettings::default();
         assert!(!s.accept_terms);
-        assert_eq!(s.routing_mode, "vpn");
+        assert_eq!(s.routing_mode, "system-proxy");
         assert_eq!(s.proxy_port, 1080);
         assert!(s.bypass_ru);
         assert!(s.start_with_windows);

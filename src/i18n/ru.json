@@ -34,8 +34,6 @@
   "smartRouting": "Умный роутинг",
   "bypassingLocal": "Обход локальных (GeoIP)",
   "routingDisabled": "Роутинг отключен",
-  "vpnMode": "VPN",
-  "vpnModeDesc": "Весь трафик системы идет через туннель",
   "proxyMode": "Прокси",
   "proxyModeDesc": "Локальный SOCKS5/HTTP прокси-сервер",
   "systemProxyMode": "Системный прокси",

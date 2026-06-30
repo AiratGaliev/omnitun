@@ -15,13 +15,13 @@ pub(crate) fn find_available_port() -> Option<u16> {
 }
 
 pub fn generate_config(
-    base_template: &str,
     cache_dir: &Path,
     proxy_port: u16,
-    routing_mode: &str,
+    _routing_mode: &str,
     server_profiles: &[ServerProfile],
     settings: &AppSettings,
 ) -> Result<(String, u16), VpnError> {
+    let base_template = include_str!("../../config/base.json");
     let mut config: Value =
         serde_json::from_str(base_template).map_err(|e| VpnError::Config(e.to_string()))?;
 
@@ -56,11 +56,14 @@ pub fn generate_config(
     if let Some(outbounds) = config["outbounds"].as_array_mut() {
         if proxy_outbounds.len() > 1 {
             // Create Selector — keeps user's chosen server active, but allows
-            // Clash API to switch to alternatives (health check detects death).
+            // Clash API to switch to alternatives if the current one dies.
+            // The final outbound in the config provides a `urltest`-style
+            // health check via sing-box's built-in URLTest, but the selector
+            // ensures the user's choice is respected until failure.
             let tags: Vec<String> = (0..proxy_outbounds.len())
                 .map(|i| format!("proxy-{i}"))
                 .collect();
-            let selector = json!({
+            let group = json!({
                 "type": "selector",
                 "tag": "proxy",
                 "outbounds": tags.clone()
@@ -68,7 +71,7 @@ pub fn generate_config(
             for ob in proxy_outbounds {
                 outbounds.push(ob);
             }
-            outbounds.push(selector);
+            outbounds.push(group);
         } else {
             // Single server — use it as the proxy outbound
             outbounds.push(proxy_outbounds.into_iter().next().unwrap());
@@ -79,33 +82,9 @@ pub fn generate_config(
         ));
     }
 
-    // Set proxy listen port from user settings (HTTP/SOCKS proxy — set for all proxy modes)
-    if routing_mode == "proxy" || routing_mode == "local-proxy" || routing_mode == "system-proxy" {
-        if let Some(inbound) = config["inbounds"].get_mut(0) {
-            inbound["listen_port"] = json!(proxy_port);
-        }
-    }
-
-    // In VPN mode, add routing rules to send proxy server traffic via "direct".
-    // This ensures the proxy connection doesn't loop through the TUN.
-    if routing_mode == "vpn" {
-        if let Some(rules) = config["route"]["rules"].as_array_mut() {
-            let mut bypass_cidrs = Vec::new();
-            for sp in server_profiles {
-                let ip = sp.server.clone();
-                // Only add if it's a valid IP address — hostnames can't be CIDR
-                if !ip.is_empty() && ip.parse::<std::net::IpAddr>().is_ok() {
-                    bypass_cidrs.push(format!("{ip}/32"));
-                }
-            }
-            if !bypass_cidrs.is_empty() {
-                let bypass_rule = json!({
-                    "ip_cidr": bypass_cidrs,
-                    "outbound": "direct",
-                });
-                rules.insert(0, bypass_rule);
-            }
-        }
+    // Set proxy listen port from user settings (HTTP/SOCKS proxy)
+    if let Some(inbound) = config["inbounds"].get_mut(0) {
+        inbound["listen_port"] = json!(proxy_port);
     }
 
     // Set cache file to absolute path so it doesn't appear in the project root
@@ -305,11 +284,6 @@ pub fn generate_config(
                 }),
             );
         }
-    }
-
-    // Apply kill switch setting for TUN mode
-    if settings.kill_switch && routing_mode == "vpn" {
-        apply_kill_switch(&mut config);
     }
 
     let json_string =
@@ -608,17 +582,6 @@ fn apply_mux(outbound: &mut Value) {
     }
 }
 
-/// Apply kill switch to TUN inbound (block traffic when VPN drops).
-fn apply_kill_switch(config: &mut Value) {
-    if let Some(inbounds) = config["inbounds"].as_array_mut() {
-        for inbound in inbounds.iter_mut() {
-            if inbound["type"] == "tun" {
-                inbound["auto_redirect"] = json!(true);
-            }
-        }
-    }
-}
-
 fn build_socks(profile: &ServerProfile) -> Value {
     let mut outbound = json!({
         "type": "socks",
@@ -768,79 +731,6 @@ mod tests {
         AppSettings::default()
     }
 
-    fn base_template() -> &'static str {
-        r#"{
-            "log": { "level": "debug", "timestamp": true },
-            "inbounds": [{
-                "type": "mixed",
-                "tag": "mixed-in",
-                "listen": "127.0.0.1",
-                "listen_port": 10809
-            }],
-            "outbounds": [
-                { "type": "direct", "tag": "direct" },
-                { "type": "block", "tag": "block" }
-            ],
-            "route": {
-                "rules": [
-                    { "ip_is_private": true, "outbound": "direct" }
-                ],
-                "final": "proxy",
-                "auto_detect_interface": true
-            }
-        }"#
-    }
-
-    /// VPN template using NEW sing-box 1.12+ DNS server format
-    fn vpn_template() -> &'static str {
-        r#"{
-            "log": { "level": "info", "timestamp": true },
-            "dns": {
-                "servers": [
-                    {
-                        "type": "https",
-                        "tag": "remote",
-                        "server": "1.1.1.1",
-                        "server_port": 443,
-                        "detour": "proxy"
-                    },
-                    {
-                        "type": "https",
-                        "tag": "local",
-                        "server": "8.8.8.8",
-                        "server_port": 443
-                    }
-                ],
-                "final": "remote"
-            },
-            "inbounds": [{
-                "type": "tun",
-                "tag": "tun-in",
-                "interface_name": "omnitun",
-                "address": "172.19.0.1/24",
-                "mtu": 1500,
-                "stack": "mixed",
-                "auto_route": true,
-                "strict_route": true
-            }],
-            "outbounds": [
-                { "type": "direct", "tag": "direct" },
-                { "type": "block", "tag": "block" }
-            ],
-            "route": {
-                "rules": [
-                    { "ip_is_private": true, "outbound": "direct" }
-                ],
-                "final": "proxy",
-                "auto_detect_interface": true,
-                "default_domain_resolver": "local"
-            },
-            "experimental": {
-                "cache_file": { "enabled": true, "path": "cache.db" }
-            }
-        }"#
-    }
-
     fn vless_profile() -> ServerProfile {
         ServerProfile {
             id: "test-1".into(),
@@ -874,84 +764,8 @@ mod tests {
     }
 
     #[test]
-    fn test_vpn_tun_inbound() {
-        let result = generate_config(
-            vpn_template(),
-            &cache_dir(),
-            1080,
-            "vpn",
-            &[vless_profile()],
-            &default_settings(),
-        );
-        assert!(
-            result.is_ok(),
-            "VPN config generation failed: {:?}",
-            result.err()
-        );
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let inbounds = config["inbounds"].as_array().unwrap();
-        assert_eq!(inbounds[0]["type"], "tun");
-        assert!(inbounds[0].get("listen_port").is_none());
-    }
-
-    #[test]
-    fn test_vpn_dns_new_format() {
-        let result = generate_config(
-            vpn_template(),
-            &cache_dir(),
-            1080,
-            "vpn",
-            &[vless_profile()],
-            &default_settings(),
-        );
-        assert!(result.is_ok());
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-
-        // DNS servers should use new type-based format
-        let servers = config["dns"]["servers"].as_array().unwrap();
-
-        // Remote server: type=https, server=1.1.1.1, detour=proxy
-        assert_eq!(servers[0]["type"], "https");
-        assert_eq!(servers[0]["server"], "1.1.1.1");
-        assert_eq!(servers[0]["server_port"], 443);
-        assert_eq!(servers[0]["detour"], "proxy");
-
-        // Local server: type=https, server=8.8.8.8, no detour
-        assert_eq!(servers[1]["type"], "https");
-        assert_eq!(servers[1]["server"], "8.8.8.8");
-        assert!(servers[1].get("detour").is_none());
-
-        // DNS final should route to remote server (no deprecated outbound in rules)
-        assert_eq!(config["dns"]["final"], "remote");
-        // No DNS rules needed — final handles default routing
-        assert!(config["dns"].get("rules").is_none());
-    }
-
-    #[test]
-    fn test_vpn_outbound_added() {
-        let result = generate_config(
-            vpn_template(),
-            &cache_dir(),
-            1080,
-            "vpn",
-            &[vless_tls_profile()],
-            &default_settings(),
-        );
-        assert!(result.is_ok());
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let outbounds = config["outbounds"].as_array().unwrap();
-        assert_eq!(outbounds.len(), 3);
-        assert_eq!(outbounds[2]["tag"], "proxy");
-        assert_eq!(config["route"]["final"], "proxy");
-    }
-
-    #[test]
     fn test_proxy_listen_port_set() {
         let result = generate_config(
-            base_template(),
             &cache_dir(),
             9999,
             "proxy",
@@ -972,7 +786,6 @@ mod tests {
         };
 
         let result = generate_config(
-            base_template(),
             &cache_dir(),
             10809,
             "proxy",
@@ -980,124 +793,6 @@ mod tests {
             &default_settings(),
         );
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_vpn_config_full_structure() {
-        let result = generate_config(
-            vpn_template(),
-            &cache_dir(),
-            1080,
-            "vpn",
-            &[vless_profile()],
-            &default_settings(),
-        );
-        assert!(result.is_ok());
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-
-        // === TUN inbound ===
-        let tun = &config["inbounds"][0];
-        assert_eq!(tun["type"], "tun");
-        assert_eq!(tun["auto_route"], true);
-        assert_eq!(tun["strict_route"], true);
-        assert_eq!(tun["stack"], "mixed");
-        assert!(
-            tun.get("listen_port").is_none(),
-            "TUN must not have listen_port"
-        );
-
-        // === DNS ===
-        let dns = &config["dns"];
-        assert_eq!(dns["final"], "remote");
-        let servers = dns["servers"].as_array().unwrap();
-        assert_eq!(servers.len(), 2);
-
-        // Remote DNS (via proxy)
-        assert_eq!(servers[0]["type"], "https");
-        assert_eq!(servers[0]["server"], "1.1.1.1");
-        assert_eq!(servers[0]["server_port"], 443);
-        assert_eq!(servers[0]["detour"], "proxy");
-
-        // Local DNS (direct)
-        assert_eq!(servers[1]["type"], "https");
-        assert_eq!(servers[1]["server"], "8.8.8.8");
-        assert_eq!(servers[1]["server_port"], 443);
-        assert!(servers[1].get("detour").is_none());
-
-        // === Route ===
-        let route = &config["route"];
-        assert_eq!(route["final"], "proxy");
-        assert_eq!(route["auto_detect_interface"], true);
-        assert_eq!(route["default_domain_resolver"], "local");
-
-        // === Outbounds ===
-        let outbounds = config["outbounds"].as_array().unwrap();
-        assert_eq!(outbounds.len(), 3);
-        assert_eq!(outbounds[0]["tag"], "direct");
-        assert_eq!(outbounds[1]["tag"], "block");
-        assert_eq!(outbounds[2]["tag"], "proxy");
-        assert_eq!(outbounds[2]["type"], "vless");
-
-        // === Experimental ===
-        let exp = &config["experimental"];
-        assert!(exp["cache_file"]["enabled"].as_bool().unwrap_or(false));
-        assert!(
-            exp.get("clash_api").is_some(),
-            "clash_api must be added for traffic stats"
-        );
-        assert!(exp["clash_api"]["external_controller"]
-            .as_str()
-            .unwrap_or("")
-            .contains("127.0.0.1:"));
-    }
-
-    #[test]
-    fn test_custom_dns_updates_remote_server() {
-        let mut settings = default_settings();
-        settings.custom_dns = true;
-        settings.dns_address = "https://9.9.9.9/dns-query".into();
-
-        let result = generate_config(
-            vpn_template(),
-            &cache_dir(),
-            1080,
-            "vpn",
-            &[vless_profile()],
-            &settings,
-        );
-        assert!(result.is_ok());
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let servers = config["dns"]["servers"].as_array().unwrap();
-
-        // Remote server should be updated to custom DNS
-        assert_eq!(servers[0]["server"], "9.9.9.9");
-        assert_eq!(servers[0]["server_port"], 443);
-        // Local server stays unchanged
-        assert_eq!(servers[1]["server"], "8.8.8.8");
-    }
-
-    #[test]
-    fn test_custom_dns_plain_ip() {
-        let mut settings = default_settings();
-        settings.custom_dns = true;
-        settings.dns_address = "1.0.0.1".into();
-
-        let result = generate_config(
-            vpn_template(),
-            &cache_dir(),
-            1080,
-            "vpn",
-            &[vless_profile()],
-            &settings,
-        );
-        assert!(result.is_ok());
-
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let servers = config["dns"]["servers"].as_array().unwrap();
-        assert_eq!(servers[0]["server"], "1.0.0.1");
-        assert_eq!(servers[0]["server_port"], 443);
     }
 
     // ── Edge cases: settings affect config structure ────────────────────────
@@ -1108,7 +803,6 @@ mod tests {
         settings.allow_lan = false;
 
         let result = generate_config(
-            base_template(),
             &cache_dir(),
             1080,
             "local-proxy",
@@ -1128,7 +822,6 @@ mod tests {
         settings.allow_lan = true;
 
         let result = generate_config(
-            base_template(),
             &cache_dir(),
             1080,
             "local-proxy",
@@ -1148,7 +841,6 @@ mod tests {
         settings.bypass_ru = true;
 
         let result = generate_config(
-            base_template(),
             &cache_dir(),
             1080,
             "local-proxy",
@@ -1172,7 +864,6 @@ mod tests {
         settings.bypass_ru = false;
 
         let result = generate_config(
-            base_template(),
             &cache_dir(),
             1080,
             "local-proxy",
@@ -1191,55 +882,11 @@ mod tests {
     }
 
     #[test]
-    fn test_kill_switch_true_sets_auto_redirect_on_tun() {
-        let mut settings = default_settings();
-        settings.kill_switch = true;
-
-        let result = generate_config(
-            vpn_template(),  // kill_switch only applies in VPN mode
-            &cache_dir(),
-            1080,
-            "vpn",           // must be vpn mode
-            &[vless_profile()],
-            &settings,
-        );
-        assert!(result.is_ok());
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let tun = &config["inbounds"][0];
-        assert_eq!(tun["type"], "tun");
-        // kill_switch adds auto_redirect: true to TUN inbound
-        assert_eq!(tun["auto_redirect"], true,
-            "kill_switch=true should set auto_redirect on TUN inbound");
-    }
-
-    #[test]
-    fn test_kill_switch_false_no_auto_redirect() {
-        let settings = default_settings();
-        // kill_switch = false by default
-
-        let result = generate_config(
-            vpn_template(),
-            &cache_dir(),
-            1080,
-            "vpn",
-            &[vless_profile()],
-            &settings,
-        );
-        assert!(result.is_ok());
-        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let tun = &config["inbounds"][0];
-        // Without kill_switch, auto_redirect should not be set
-        assert!(tun.get("auto_redirect").is_none() || tun["auto_redirect"] == false,
-            "kill_switch=false should NOT add auto_redirect");
-    }
-
-    #[test]
     fn test_enable_mux_true_adds_mux_section() {
         let mut settings = default_settings();
         settings.enable_mux = true;
 
         let result = generate_config(
-            base_template(),
             &cache_dir(),
             1080,
             "local-proxy",
@@ -1268,7 +915,6 @@ mod tests {
         // enable_mux = false by default
 
         let result = generate_config(
-            base_template(),
             &cache_dir(),
             1080,
             "local-proxy",
@@ -1291,7 +937,6 @@ mod tests {
         settings.anti_dpi = true;
 
         let result = generate_config(
-            base_template(),
             &cache_dir(),
             1080,
             "local-proxy",
@@ -1318,7 +963,6 @@ mod tests {
         // anti_dpi = true by default in AppSettings
 
         let result = generate_config(
-            base_template(),
             &cache_dir(),
             1080,
             "local-proxy",

@@ -8,7 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({
     if (cmd === 'get_settings') {
       return Promise.resolve({
         acceptTerms: false,
-        routingMode: 'vpn',
+        routingMode: 'system-proxy',
         proxyPort: 1080,
         bypassRu: true,
         startWithWindows: true,

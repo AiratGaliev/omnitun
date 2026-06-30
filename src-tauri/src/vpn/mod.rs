@@ -270,13 +270,7 @@ impl VpnManager {
             LogSource::Vpn,
             "Generating sing-box config...".into(),
         );
-        let base_template = if routing_mode == "vpn" {
-            include_str!("../../config/base-vpn.json")
-        } else {
-            include_str!("../../config/base.json")
-        };
         let (config_json, _stats_port) = config::generate_config(
-            base_template,
             &self.config_dir,
             proxy_port,
             routing_mode,
@@ -299,13 +293,11 @@ impl VpnManager {
             LogSource::Process,
             "Starting sing-box process...".into(),
         );
-        let elevated = routing_mode == "vpn";
-        self.process_mgr.start(&config_path, elevated).await?;
+        self.process_mgr.start(&config_path).await?;
 
-        // Set system proxy for system-proxy mode (TCP via system proxy, UDP via TUN if present)
-        // VPN mode relies solely on TUN (auto_route + gVisor) for all traffic.
-        // Local proxy mode (local-proxy) starts a mixed inbound on localhost without system proxy.
-        if routing_mode == "proxy" || routing_mode == "system-proxy" {
+        // Set system proxy for system-proxy mode.
+        // Local-proxy mode starts a mixed inbound on localhost without system proxy.
+        if routing_mode == "system-proxy" {
             log(
                 app_handle,
                 &logger,

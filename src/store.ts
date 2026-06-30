@@ -339,7 +339,7 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   _isReconnecting: false,
   settings: {
     acceptTerms: false,
-    routingMode: 'vpn',
+    routingMode: 'system-proxy',
     proxyPort: 1080,
     bypassRu: true,
     startWithWindows: true,
@@ -580,8 +580,9 @@ export const useVPNStore = create<VPNStore>((set, get) => ({
   loadSettings: async () => {
     try {
       const result = await invoke<Settings>('get_settings');
-      // Migration: old 'proxy' mode → 'system-proxy'
-      if ((result as { routingMode: string }).routingMode === 'proxy') {
+      // Migration: old 'vpn' or 'proxy' mode → 'system-proxy'
+      const rawMode = (result as { routingMode: string }).routingMode;
+      if (rawMode === 'vpn' || rawMode === 'proxy') {
         (result as { routingMode: string }).routingMode = 'system-proxy';
       }
       set({ settings: result });

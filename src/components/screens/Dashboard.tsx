@@ -369,7 +369,6 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 <div className="w-full flex flex-col items-center z-20">
                   <SegmentedControl
                     options={[
-                      { id: 'vpn', label: t('vpnMode') },
                       { id: 'system-proxy', label: t('systemProxyMode') },
                       { id: 'local-proxy', label: t('proxyMode') },
                     ]}
@@ -394,11 +393,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                         className="absolute inset-0 flex flex-col items-center justify-start text-center"
                       >
                         <p className="text-xs text-zinc-400 font-medium">
-                          {settings.routingMode === 'vpn'
-                            ? t('vpnModeDesc')
-                            : settings.routingMode === 'system-proxy'
-                              ? t('systemProxyModeDesc')
-                              : t('proxyModeDesc')}
+                          {settings.routingMode === 'system-proxy'
+                            ? t('systemProxyModeDesc')
+                            : t('proxyModeDesc')}
                         </p>
                         {(settings.routingMode === 'system-proxy' ||
                           settings.routingMode === 'local-proxy') && (

@@ -151,7 +151,7 @@ beforeEach(() => {
     _isReconnecting: false,
     settings: {
       acceptTerms: false,
-      routingMode: 'vpn',
+      routingMode: 'system-proxy',
       proxyPort: 1080,
       bypassRu: true,
       startWithWindows: true,
@@ -635,7 +635,7 @@ describe('store — toggleConnection', () => {
     expect(mockInvoke).toHaveBeenCalledWith(
       'start_vpn',
       expect.objectContaining({
-        routingMode: 'vpn',
+        routingMode: 'system-proxy',
         proxyPort: 1080,
       }),
     );

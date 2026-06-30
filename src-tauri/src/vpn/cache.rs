@@ -610,10 +610,18 @@ impl ServerCache {
                         successful += 1;
                         s.ping_ms = Some(positive.ping_ms);
                         s.behind_cdn = positive.behind_cdn;
-                        s.exit_server = positive.exit_ip;
-                        s.exit_flag = positive.exit_flag;
-                        s.exit_country_name = positive.exit_country;
-                        s.exit_city_name = positive.exit_city;
+                        // CDN servers must not retain outlet IP
+                        if s.behind_cdn {
+                            s.exit_server = None;
+                            s.exit_flag = None;
+                            s.exit_country_name = None;
+                            s.exit_city_name = None;
+                        } else {
+                            s.exit_server = positive.exit_ip;
+                            s.exit_flag = positive.exit_flag;
+                            s.exit_country_name = positive.exit_country;
+                            s.exit_city_name = positive.exit_city;
+                        }
                     }
                     Ok(Err(e)) => {
                         failed += 1;
@@ -744,7 +752,6 @@ impl ServerCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vpn::cache;
 
     fn make_entry(server_id: &str, ping_ms: u64) -> CacheEntry {
         CacheEntry {

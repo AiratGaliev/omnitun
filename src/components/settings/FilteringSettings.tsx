@@ -60,7 +60,10 @@ export function FilteringSettings() {
       }
     }
 
-    updateSettings({ allowedCountries: newAllowed, blockedCountries: newBlocked });
+    // Country filtering is meaningless for CDN servers (unstable exit IP).
+    // Automatically enable blockCdnNodes when any country filter is set.
+    const hasAnyCountry = newAllowed.length > 0 || newBlocked.length > 0;
+    updateSettings({ allowedCountries: newAllowed, blockedCountries: newBlocked, blockCdnNodes: hasAnyCountry });
     const action =
       listType === 'allow'
         ? settings.allowedCountries.includes(countryCode)
@@ -98,6 +101,7 @@ export function FilteringSettings() {
         title={t('blockCdnNodes')}
         description={t('blockCdnNodesDesc')}
         checked={settings.blockCdnNodes}
+        disabled={hasAllowed || hasBlocked}
         onChange={(checked) => {
           updateSettings({ blockCdnNodes: checked });
         }}

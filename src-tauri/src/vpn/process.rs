@@ -43,7 +43,7 @@ impl ProcessManager {
         self.pid.lock().unwrap().is_some()
     }
 
-    pub async fn start(&self, config_path: &Path, elevated: bool) -> Result<(), VpnError> {
+    pub async fn start(&self, config_path: &Path) -> Result<(), VpnError> {
         let existing_pid = *self.pid.lock().unwrap();
         if let Some(pid) = existing_pid {
             // Process crash recovery: stale PID that no longer exists
@@ -58,7 +58,7 @@ impl ProcessManager {
             .to_str()
             .ok_or_else(|| VpnError::Process("Invalid config path".into()))?;
 
-        let new_pid = self.launch(config_str, elevated).await?;
+        let new_pid = self.launch(config_str).await?;
         *self.pid.lock().unwrap() = Some(new_pid);
         crate::vpn::VPN_PID.store(new_pid, std::sync::atomic::Ordering::Relaxed);
         Ok(())
@@ -137,7 +137,7 @@ impl ProcessManager {
         }
     }
 
-    async fn launch(&self, config_path: &str, elevated: bool) -> Result<u32, VpnError> {
+    async fn launch(&self, config_path: &str) -> Result<u32, VpnError> {
         let binary = self
             .binary_path
             .to_str()
@@ -145,104 +145,30 @@ impl ProcessManager {
 
         #[cfg(target_os = "windows")]
         {
-            // Compute log file paths for output redirection (non-elevated mode)
+            // Compute log file paths for output redirection
             let config_dir = std::path::Path::new(config_path)
                 .parent()
                 .unwrap_or(std::path::Path::new("."));
             let log_path_stdout = config_dir.join("sing-box-stdout.log");
             let log_path_stderr = config_dir.join("sing-box-stderr.log");
 
-            if elevated {
-                // FIX: Launch sing-box elevated with proper PID tracking.
-                // Writes a .ps1 launcher script to disk, then runs it elevated.
-                // The script captures sing-box.exe PID via Start-Process -PassThru
-                // and writes it to a known file for the app to read.
-                let pid_file = config_dir.join("sing-box.pid");
-                let pid_file_str = pid_file.to_str().unwrap_or("sing-box.pid");
-                let launcher_path = std::env::temp_dir().join("omnitun-singbox-launcher.ps1");
+            // Launch sing-box directly with output redirection
+            let child = std::process::Command::new(binary)
+                .args(["run", "-c", config_path])
+                // Redirect stdout/stderr to separate log files for crash diagnostics
+                .stdout(match std::fs::File::create(&log_path_stdout) {
+                    Ok(f) => f.into(),
+                    Err(_) => std::process::Stdio::null(),
+                })
+                .stderr(match std::fs::File::create(&log_path_stderr) {
+                    Ok(f) => std::process::Stdio::from(f),
+                    Err(_) => std::process::Stdio::null(),
+                })
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;
 
-                let launcher_content = format!(
-                    r#"$p = Start-Process -FilePath '{}' -ArgumentList 'run','-c','{}' -PassThru -WindowStyle Hidden -RedirectStandardError '{}'; $p.Id | Out-File -FilePath '{}' -Encoding ASCII"#,
-                    binary,
-                    config_path,
-                    log_path_stderr.to_str().unwrap_or("NUL"),
-                    pid_file_str,
-                );
-
-                std::fs::write(&launcher_path, &launcher_content).map_err(|e| {
-                    VpnError::Process(format!("Failed to write launcher script: {e}"))
-                })?;
-
-                let output = std::process::Command::new("powershell")
-                    .args([
-                        "-NoProfile",
-                        "-ExecutionPolicy", "Bypass",
-                        "-Command",
-                        &format!(
-                            "Start-Process 'powershell' -Verb RunAs -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','{}'",
-                            launcher_path.to_str().unwrap_or(""),
-                        ),
-                    ])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output()
-                    .map_err(|e| VpnError::Process(format!("Elevation launch failed: {e}")))?;
-
-                if !output.status.success() {
-                    let err = String::from_utf8_lossy(&output.stderr);
-                    return Err(VpnError::Process(format!(
-                        "User denied elevation or elevation failed: {err}"
-                    )));
-                }
-
-                // Read PID from the file written by the elevated launcher.
-                // Poll up to ~15 seconds to allow for UAC prompt response time.
-                let pid = {
-                    let mut found_pid = None;
-                    // Cumulative wait: 500+1000+2000+3000+4000+5000 = 15500ms
-                    for delay_ms in [500u64, 1000, 2000, 3000, 4000, 5000] {
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                        if pid_file.exists() {
-                            if let Ok(content) = std::fs::read_to_string(&pid_file) {
-                                if let Ok(p) = content.trim().parse::<u32>() {
-                                    if p > 0 {
-                                        found_pid = Some(p);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    found_pid.ok_or_else(|| VpnError::Process(
-                        "Could not obtain sing-box PID after 15 seconds. The UAC prompt may have been denied, \
-                         or the elevated PowerShell could not launch sing-box. Try running OmniTun as \
-                         Administrator, or check Task Manager for hung sing-box.exe processes."
-                            .into(),
-                    ))?
-                };
-                // Clean up temporary files
-                let _ = std::fs::remove_file(&pid_file);
-                let _ = std::fs::remove_file(&launcher_path);
-
-                Ok(pid)
-            } else {
-                // Non-elevated: launch sing-box directly with output redirection
-                let child = std::process::Command::new(binary)
-                    .args(["run", "-c", config_path])
-                    // Redirect stdout/stderr to separate log files for crash diagnostics
-                    .stdout(match std::fs::File::create(&log_path_stdout) {
-                        Ok(f) => f.into(),
-                        Err(_) => std::process::Stdio::null(),
-                    })
-                    .stderr(match std::fs::File::create(&log_path_stderr) {
-                        Ok(f) => std::process::Stdio::from(f),
-                        Err(_) => std::process::Stdio::null(),
-                    })
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .spawn()
-                    .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;
-
-                Ok(child.id())
-            }
+            Ok(child.id())
         }
 
         #[cfg(not(target_os = "windows"))]
@@ -253,40 +179,16 @@ impl ProcessManager {
                 .unwrap_or(std::path::Path::new("."));
             let log_path = config_dir.join("sing-box.log");
 
-            if elevated {
-                let child = std::process::Command::new("pkexec")
-                    .args([binary, "run", "-c", config_path])
-                    .stdout(std::fs::File::create(&log_path).ok())
-                    .stderr(std::process::Stdio::from(
-                        std::fs::File::create(&log_path).ok().unwrap(),
-                    ))
-                    .spawn()
-                    .or_else(|_| {
-                        std::process::Command::new("sudo")
-                            .args(["-n", binary, "run", "-c", config_path])
-                            .stdout(std::fs::File::create(&log_path).ok())
-                            .stderr(std::process::Stdio::from(
-                                std::fs::File::create(&log_path).ok().unwrap(),
-                            ))
-                            .spawn()
-                    })
-                    .map_err(|e| {
-                        VpnError::Process(format!("Failed to start sing-box elevated: {e}"))
-                    })?;
+            let child = std::process::Command::new(binary)
+                .args(["run", "-c", config_path])
+                .stdout(std::fs::File::create(&log_path).ok())
+                .stderr(std::process::Stdio::from(
+                    std::fs::File::create(&log_path).ok().unwrap(),
+                ))
+                .spawn()
+                .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;
 
-                Ok(child.id())
-            } else {
-                let child = std::process::Command::new(binary)
-                    .args(["run", "-c", config_path])
-                    .stdout(std::fs::File::create(&log_path).ok())
-                    .stderr(std::process::Stdio::from(
-                        std::fs::File::create(&log_path).ok().unwrap(),
-                    ))
-                    .spawn()
-                    .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;
-
-                Ok(child.id())
-            }
+            Ok(child.id())
         }
     }
 }

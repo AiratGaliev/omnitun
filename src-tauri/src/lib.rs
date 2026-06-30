@@ -86,9 +86,14 @@ async fn start_vpn(
     let manager = manager_arc.lock().await;
     let settings = settings_state.lock().await.clone();
 
-    // Collect all servers for smart selector group
+    // Collect all servers for smart selector group.
+    // Filter out CDN servers — they can't route VPN traffic.
     let mut all_servers = vec![profile.clone()];
-    all_servers.extend(alternative_servers);
+    for s in alternative_servers {
+        if !s.behind_cdn {
+            all_servers.push(s);
+        }
+    }
 
     match manager
         .start(&app, proxy_port, &routing_mode, &all_servers, &settings)
@@ -104,7 +109,7 @@ async fn start_vpn(
             );
 
             let result = match manager.process_pid() {
-                Some(pid) => wait_for_proxy_ready(pid, proxy_port, &routing_mode).await,
+                Some(pid) => wait_for_proxy_ready(pid, proxy_port).await,
                 None => Err("no PID".into()),
             };
             match result {
@@ -128,14 +133,12 @@ async fn start_vpn(
                     // Verify proxy actually routes traffic — make real request through it
                     {
                         let mut cb = reqwest::Client::builder().timeout(Duration::from_secs(5));
-                        // In VPN mode traffic goes through TUN — no mixed inbound on proxy_port
-                        if routing_mode != "vpn" {
-                            if let Ok(proxy) =
+                        // In proxy modes traffic goes through the mixed inbound — route through proxy
+                        if let Ok(proxy) =
                                 reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}"))
                             {
                                 cb = cb.proxy(proxy);
                             }
-                        }
                         let check_client = cb.build().ok();
                         if let Some(c) = check_client {
                             let mut got_response = false;
@@ -474,7 +477,19 @@ async fn stop_vpn(app: tauri::AppHandle, state: tauri::State<'_, VpnState>) -> R
         *last = None;
     }
 
-    // Step 2: Kill sing-box by PID from global atomic (no manager lock needed)
+    // Step 2: Reset Clash API port so downstream checks (proxy_port, process_servers)
+    // know the VPN is no longer running.
+    crate::vpn::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
+
+    // Step 3: Disable system proxy — best effort, don't block on it
+    if let Ok(mut sysproxy) = sysproxy::Sysproxy::get_system_proxy() {
+        if sysproxy.enable {
+            sysproxy.enable = false;
+            let _ = sysproxy.set_system_proxy();
+        }
+    }
+
+    // Step 4: Kill sing-box by PID from global atomic (no manager lock needed)
     let pid = crate::vpn::VPN_PID.swap(0, std::sync::atomic::Ordering::AcqRel);
     if pid > 0 {
         #[cfg(target_os = "windows")]
@@ -609,11 +624,17 @@ async fn remove_subscription(
 }
 
 /// Filter servers by country & protocol settings.
-/// Country filter uses exit IP for non-CDN servers, entry IP for CDN servers.
+/// Country filter uses exit IP only — CDN servers have no reliable exit IP.
+/// When country filtering is active (allowed/blocked countries non-empty),
+/// CDN servers are automatically excluded: their exit IP is unpredictable,
+/// making country filtering meaningless for them.
 fn filter_servers_by_settings(
     servers: &[ServerProfile],
     settings: &AppSettings,
 ) -> Vec<ServerProfile> {
+    let has_country_filter = !settings.allowed_countries.is_empty()
+        || !settings.blocked_countries.is_empty();
+
     servers
         .iter()
         .filter(|s| {
@@ -628,13 +649,13 @@ fn filter_servers_by_settings(
             {
                 return false;
             }
-            // Country filter: exit IP for non-CDN, entry IP fallback for CDN
-            let country_flag = if !s.behind_cdn {
-                s.exit_flag.as_deref().or(s.flag.as_deref())
-            } else {
-                s.flag.as_deref()
-            };
-            if let Some(flag) = country_flag {
+            // When country filtering is active, CDN servers are excluded:
+            // they have no reliable exit IP for meaningful country matching.
+            if has_country_filter && s.behind_cdn {
+                return false;
+            }
+            // Country filter: only exit IP, never entry IP (flag).
+            if let Some(flag) = s.exit_flag.as_deref() {
                 if !settings.allowed_countries.is_empty()
                     && !settings.allowed_countries.contains(&flag.to_string())
                 {
@@ -1145,15 +1166,13 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
         return Err("VPN not connected".into());
     }
 
-    // Route through proxy only in proxy modes
-    let mut use_proxy = false;
+    // Always route through proxy in proxy modes
+    let mut use_proxy = true;
     let mut proxy_port = 0u16;
     if let Some(state) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
         if let Ok(guard) = state.try_lock() {
-            if guard.routing_mode != "vpn" {
-                use_proxy = true;
-                proxy_port = guard.proxy_port;
-            }
+            use_proxy = true;
+            proxy_port = guard.proxy_port;
         }
     }
 
@@ -1227,6 +1246,12 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
             for profile in pm.list_mut() {
                 for server in &mut profile.servers {
                     if server.id == *server_id {
+                        // CDN servers have unstable outlet IPs — skip save
+                        if server.behind_cdn {
+                            saved = true;
+                            break;
+                        }
+
                         let cc = if info.flag.is_empty() {
                             None
                         } else {
@@ -1756,39 +1781,17 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
 /// and the integration test in `tests/selector_test.rs` failing with
 /// "Clash API not reachable" after only a 1-second wait.
 ///
-/// Behavior by routing mode:
-/// - **`vpn`**: there is no inbound port to probe (TUN interface is brought
-///   up by sing-box internally and isn't a TCP listener we can poll from
-///   user space). Fall back to PID-liveness polling — same as before — but
-///   also wait an extra 500 ms grace period so the TUN has time to settle.
-/// - **`proxy` / `system-proxy` / `local-proxy`**: actively TCP-connect to
-///   `127.0.0.1:{proxy_port}` until the connect succeeds or the deadline
-///   expires. If the PID dies at any point, return early with an error so
-///   the caller can read sing-box's stderr log.
+/// Actively TCP-connects to `127.0.0.1:{proxy_port}` until the connect
+/// succeeds or the deadline expires. If the PID dies at any point, return
+/// early with an error so the caller can read sing-box's stderr log.
 async fn wait_for_proxy_ready(
     pid: u32,
     proxy_port: u16,
-    routing_mode: &str,
 ) -> Result<u32, String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(PROXY_TIMEOUT_SECS);
     let mut attempts = 0u32;
 
-    // VPN mode: no inbound TCP port to probe. Wait for PID + a small grace
-    // period for the TUN interface to come up.
-    if routing_mode == "vpn" {
-        attempts += 1;
-        if !is_process_alive(pid) {
-            return Err(format!(
-                "sing-box (PID {pid}) exited before TUN was ready (after {attempts} attempt(s))"
-            ));
-        }
-        // PID is alive — give the TUN interface a brief grace period to
-        // finish coming up before we declare "Connected".
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        return Ok(attempts);
-    }
-
-    // Proxy modes: poll TCP connect to the mixed inbound port.
+    // Poll TCP connect to the mixed inbound port.
     loop {
         attempts += 1;
 
@@ -1858,7 +1861,7 @@ mod tests {
             }
         });
 
-        let result = wait_for_proxy_ready(pid, port, "local-proxy").await;
+        let result = wait_for_proxy_ready(pid, port).await;
         assert!(result.is_ok(), "expected Ok, got {:?}", result.err());
         assert!(result.unwrap() > 0);
         accept_handle.abort();
@@ -1885,7 +1888,7 @@ mod tests {
         };
         let pid = std::process::id();
 
-        let result = wait_for_proxy_ready(pid, port, "local-proxy").await;
+        let result = wait_for_proxy_ready(pid, port).await;
         assert!(result.is_err(), "expected Err, got Ok");
         let err = result.unwrap_err();
         assert!(
@@ -1894,27 +1897,13 @@ mod tests {
         );
     }
 
-    /// `wait_for_proxy_ready` returns Err when the PID is dead, even in
-    /// VPN mode (where we can't probe a port). We use PID 999_999_999
-    /// which is guaranteed not to exist.
+    /// `wait_for_proxy_ready` returns Err when the PID is dead.
+    /// Should fail fast (within one poll cycle) instead of waiting for
+    /// the full timeout.
     #[tokio::test]
-    async fn test_wait_for_proxy_ready_vpn_mode_dead_pid() {
-        let result = wait_for_proxy_ready(999_999_999, 0, "vpn").await;
-        assert!(result.is_err(), "expected Err for dead PID, got Ok");
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("exited"),
-            "expected error to mention 'exited', got: {err}"
-        );
-    }
-
-    /// `wait_for_proxy_ready` returns Err when the PID is dead in proxy
-    /// mode too — should fail fast (within one poll cycle) instead of
-    /// waiting for the full timeout.
-    #[tokio::test]
-    async fn test_wait_for_proxy_ready_proxy_mode_dead_pid() {
+    async fn test_wait_for_proxy_ready_dead_pid() {
         let start = tokio::time::Instant::now();
-        let result = wait_for_proxy_ready(999_999_999, 65535, "local-proxy").await;
+        let result = wait_for_proxy_ready(999_999_999, 65535).await;
         let elapsed = start.elapsed();
 
         assert!(result.is_err(), "expected Err for dead PID, got Ok");
