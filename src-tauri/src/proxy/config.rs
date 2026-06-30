@@ -3,7 +3,7 @@
 //   - Custom DNS preserves new format
 
 use crate::settings::AppSettings;
-use crate::vpn::{ServerProfile, VpnError};
+use crate::proxy::{ServerProfile, ProxyError};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -20,13 +20,13 @@ pub fn generate_config(
     _routing_mode: &str,
     server_profiles: &[ServerProfile],
     settings: &AppSettings,
-) -> Result<(String, u16), VpnError> {
+) -> Result<(String, u16), ProxyError> {
     let base_template = include_str!("../../config/base.json");
     let mut config: Value =
-        serde_json::from_str(base_template).map_err(|e| VpnError::Config(e.to_string()))?;
+        serde_json::from_str(base_template).map_err(|e| ProxyError::Config(e.to_string()))?;
 
     if server_profiles.is_empty() {
-        return Err(VpnError::Config("No server profiles provided".into()));
+        return Err(ProxyError::Config("No server profiles provided".into()));
     }
 
     // Build all outbounds
@@ -77,7 +77,7 @@ pub fn generate_config(
             outbounds.push(proxy_outbounds.into_iter().next().unwrap());
         }
     } else {
-        return Err(VpnError::Config(
+        return Err(ProxyError::Config(
             "Missing outbounds array in template".into(),
         ));
     }
@@ -99,7 +99,7 @@ pub fn generate_config(
 
     // Find an available port and enable the clash_api for traffic stats
     let stats_port = find_available_port().unwrap_or(20000);
-    crate::vpn::CLASH_API_PORT.store(stats_port, std::sync::atomic::Ordering::Relaxed);
+    crate::proxy::CLASH_API_PORT.store(stats_port, std::sync::atomic::Ordering::Relaxed);
     config["experimental"]["clash_api"] = json!({
         "external_controller": format!("127.0.0.1:{}", stats_port),
         "external_ui": "",
@@ -287,19 +287,19 @@ pub fn generate_config(
     }
 
     let json_string =
-        serde_json::to_string_pretty(&config).map_err(|e| VpnError::Config(e.to_string()))?;
+        serde_json::to_string_pretty(&config).map_err(|e| ProxyError::Config(e.to_string()))?;
 
     Ok((json_string, stats_port))
 }
 
-pub fn write_config(json: &str, config_dir: &Path) -> Result<std::path::PathBuf, VpnError> {
+pub fn write_config(json: &str, config_dir: &Path) -> Result<std::path::PathBuf, ProxyError> {
     std::fs::create_dir_all(config_dir)?;
     let config_path = config_dir.join("config.json");
     std::fs::write(&config_path, json)?;
     Ok(config_path)
 }
 
-pub fn build_outbound(server_profile: &ServerProfile) -> Result<Value, VpnError> {
+pub fn build_outbound(server_profile: &ServerProfile) -> Result<Value, ProxyError> {
     match server_profile.protocol.as_str() {
         "vless" => Ok(build_vless(server_profile)),
         "vmess" => Ok(build_vmess(server_profile)),
@@ -310,7 +310,7 @@ pub fn build_outbound(server_profile: &ServerProfile) -> Result<Value, VpnError>
         "tuic" => Ok(build_tuic(server_profile)),
         "socks" => Ok(build_socks(server_profile)),
         "http" => Ok(build_http(server_profile)),
-        _ => Err(VpnError::Config(format!(
+        _ => Err(ProxyError::Config(format!(
             "Unsupported protocol: {}",
             server_profile.protocol
         ))),
@@ -640,7 +640,7 @@ pub fn generate_batch_config(
     servers: &[(String, ServerProfile)],
     ports: &[u16],
     test_dir: &Path,
-) -> Result<Value, VpnError> {
+) -> Result<Value, ProxyError> {
     use serde_json::json;
 
     assert_eq!(servers.len(), ports.len(), "servers and ports must have same length");

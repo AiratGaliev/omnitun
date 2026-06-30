@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::vpn::cache::CacheEntry;
+use crate::proxy::cache::CacheEntry;
 
 /// File name for the persistent cache.
 const CACHE_FILE: &str = "cache.json";
@@ -123,7 +123,7 @@ pub fn clear_cache(data_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vpn::cache::{CacheEntry, CacheStatus};
+    use crate::proxy::cache::{CacheEntry, CacheStatus};
     use std::path::PathBuf;
 
     fn test_dir(name: &str) -> PathBuf {

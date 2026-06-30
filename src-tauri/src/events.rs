@@ -1,15 +1,15 @@
-use crate::vpn::VpnStatus;
+use crate::proxy::ConnectionStatus;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VpnStatusPayload {
-    pub status: VpnStatus,
+pub struct ConnectionStatusPayload {
+    pub status: ConnectionStatus,
 }
 
-pub fn emit_status(app_handle: &AppHandle, status: VpnStatus) {
-    let payload = VpnStatusPayload { status };
-    let _ = app_handle.emit("vpn-status-changed", payload);
+pub fn emit_status(app_handle: &AppHandle, status: ConnectionStatus) {
+    let payload = ConnectionStatusPayload { status };
+    let _ = app_handle.emit("connection-status-changed", payload);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,32 +52,32 @@ pub fn emit_refresh_progress(app_handle: &AppHandle, progress: RefreshProgress) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vpn::VpnStatus;
+    use crate::proxy::ConnectionStatus;
 
     #[test]
     fn test_vpn_status_serialization_disconnected() {
-        let s = VpnStatus::Disconnected;
+        let s = ConnectionStatus::Disconnected;
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(json, "\"disconnected\"");
     }
 
     #[test]
     fn test_vpn_status_serialization_connecting() {
-        let s = VpnStatus::Connecting;
+        let s = ConnectionStatus::Connecting;
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(json, "\"connecting\"");
     }
 
     #[test]
     fn test_vpn_status_serialization_connected() {
-        let s = VpnStatus::Connected;
+        let s = ConnectionStatus::Connected;
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(json, "\"connected\"");
     }
 
     #[test]
     fn test_vpn_status_serialization_error() {
-        let s = VpnStatus::Error("test error".into());
+        let s = ConnectionStatus::Error("test error".into());
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("error"));
         assert!(json.contains("test error"));
@@ -86,15 +86,15 @@ mod tests {
     #[test]
     fn test_vpn_status_payload_deserialization() {
         let raw = r#"{"status":"connected"}"#;
-        let p: VpnStatusPayload = serde_json::from_str(raw).unwrap();
-        assert!(matches!(p.status, VpnStatus::Connected));
+        let p: ConnectionStatusPayload = serde_json::from_str(raw).unwrap();
+        assert!(matches!(p.status, ConnectionStatus::Connected));
     }
 
     #[test]
     fn test_vpn_status_payload_deserialization_error() {
         let raw = r#"{"status":{"error":"connection lost"}}"#;
-        let p: VpnStatusPayload = serde_json::from_str(raw).unwrap();
-        assert!(matches!(p.status, VpnStatus::Error(_)));
+        let p: ConnectionStatusPayload = serde_json::from_str(raw).unwrap();
+        assert!(matches!(p.status, ConnectionStatus::Error(_)));
     }
 
     #[test]

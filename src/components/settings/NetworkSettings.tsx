@@ -1,11 +1,11 @@
-import { useVPNStore } from '@/store.ts';
+import { useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { Network, PowerOff, Server, Shield, ShieldAlert, Split } from 'lucide-react';
 import { toast } from 'sonner';
 import { SettingItem } from './SettingItem';
 
 export function NetworkSettings() {
-  const { settings, updateSettings, addLog } = useVPNStore();
+  const { settings, updateSettings, addLog } = useAppStore();
   const { t } = useTranslation();
   return (
     <>

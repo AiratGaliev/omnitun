@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { useVPNStore } from './store';
+import { useAppStore } from './store';
 import { Dashboard } from './components/screens/Dashboard';
 import { Profiles } from './components/screens/Profiles';
 import { Navigation } from './components/Navigation';
@@ -40,7 +40,7 @@ vi.mock('@/hooks/useTranslation', () => ({
 }));
 
 function setConnectedState() {
-  useVPNStore.setState({
+  useAppStore.setState({
     hasAcceptedTerms: true,
     hasOnboarded: true,
     status: 'connected',
@@ -73,13 +73,13 @@ function setConnectedState() {
 describe('Dashboard', () => {
   beforeEach(() => {
     mockInvoke.mockResolvedValue(undefined);
-    useVPNStore.setState({
+    useAppStore.setState({
       hasAcceptedTerms: true,
       hasOnboarded: true,
       status: 'disconnected',
       activeServer: null,
       servers: [],
-      settings: { ...useVPNStore.getState().settings },
+      settings: { ...useAppStore.getState().settings },
     });
   });
 
@@ -89,7 +89,7 @@ describe('Dashboard', () => {
   });
 
   it('shows server list when servers exist', () => {
-    useVPNStore.setState({
+    useAppStore.setState({
       servers: [
         {
           id: 'srv-1',
@@ -110,22 +110,22 @@ describe('Dashboard', () => {
   it('shows connected status', () => {
     setConnectedState();
     render(<Dashboard />);
-    expect(useVPNStore.getState().status).toBe('connected');
+    expect(useAppStore.getState().status).toBe('connected');
   });
 
   it('shows connecting status', () => {
-    useVPNStore.setState({
+    useAppStore.setState({
       status: 'connecting',
       activeServer: { id: 'srv-1', name: 'Srv', server: '10.0.0.1', port: 443 },
     });
     render(<Dashboard />);
-    expect(useVPNStore.getState().status).toBe('connecting');
+    expect(useAppStore.getState().status).toBe('connecting');
   });
 });
 
 describe('Profiles', () => {
   beforeEach(() => {
-    useVPNStore.setState({
+    useAppStore.setState({
       hasAcceptedTerms: true,
       hasOnboarded: true,
       profiles: [
@@ -149,7 +149,7 @@ describe('Profiles', () => {
   });
 
   it('renders empty state', async () => {
-    useVPNStore.setState({ profiles: [] });
+    useAppStore.setState({ profiles: [] });
     render(<Profiles />);
     await waitFor(() => {
       expect(document.body.innerHTML.length).toBeGreaterThan(0);
@@ -159,7 +159,7 @@ describe('Profiles', () => {
 
 describe('Navigation', () => {
   it('renders navigation tabs', () => {
-    useVPNStore.setState({ hasAcceptedTerms: true, hasOnboarded: true, status: 'disconnected' });
+    useAppStore.setState({ hasAcceptedTerms: true, hasOnboarded: true, status: 'disconnected' });
     const { container } = render(<Navigation activeTab="home" onChange={vi.fn()} />);
     expect(container.innerHTML.length).toBeGreaterThan(0);
   });
@@ -167,10 +167,10 @@ describe('Navigation', () => {
 
 describe('Settings panels', () => {
   beforeEach(() => {
-    useVPNStore.setState({
+    useAppStore.setState({
       hasAcceptedTerms: true,
       hasOnboarded: true,
-      settings: useVPNStore.getState().settings,
+      settings: useAppStore.getState().settings,
     });
   });
 
@@ -197,13 +197,13 @@ describe('Settings panels', () => {
 
 describe('Onboarding & Terms', () => {
   it('Onboarding renders', () => {
-    useVPNStore.setState({ hasAcceptedTerms: true, hasOnboarded: false });
+    useAppStore.setState({ hasAcceptedTerms: true, hasOnboarded: false });
     const { container } = render(<Onboarding />);
     expect(container.innerHTML.length).toBeGreaterThan(0);
   });
 
   it('Terms renders', () => {
-    useVPNStore.setState({ hasAcceptedTerms: false });
+    useAppStore.setState({ hasAcceptedTerms: false });
     const { container } = render(<Terms />);
     expect(container.innerHTML.length).toBeGreaterThan(0);
   });
@@ -211,19 +211,19 @@ describe('Onboarding & Terms', () => {
 
 describe('Logs', () => {
   beforeEach(() => {
-    useVPNStore.setState({
+    useAppStore.setState({
       logs: [
         {
           id: '1',
           timestamp: Date.now(),
-          message: 'VPN connected',
+          message: 'Proxy connected',
           level: 'success' as const,
-          source: 'vpn' as const,
+          source: 'proxy' as const,
         },
         {
           id: '2',
           timestamp: Date.now() - 1000,
-          message: 'Starting VPN...',
+          message: 'Starting proxy...',
           level: 'info' as const,
           source: 'system' as const,
         },
@@ -234,12 +234,12 @@ describe('Logs', () => {
   it('renders log entries', async () => {
     render(<Logs />);
     await waitFor(() => {
-      expect(screen.getByText(/vpn connected/i)).toBeInTheDocument();
+      expect(screen.getByText(/proxy connected/i)).toBeInTheDocument();
     });
   });
 
   it('shows empty state when no logs', async () => {
-    useVPNStore.setState({ logs: [] });
+    useAppStore.setState({ logs: [] });
     const { container } = render(<Logs />);
     await waitFor(() => {
       expect(container.innerHTML.length).toBeGreaterThan(0);
@@ -252,7 +252,7 @@ describe('Logs', () => {
       const btn = screen.queryByRole('button', { name: /clear/i });
       if (btn) {
         fireEvent.click(btn);
-        expect(useVPNStore.getState().logs).toHaveLength(0);
+        expect(useAppStore.getState().logs).toHaveLength(0);
       }
     });
   });
@@ -326,7 +326,7 @@ describe('SettingItem', () => {
 describe('Full App Rendering', () => {
   beforeEach(() => {
     mockInvoke.mockResolvedValue(undefined);
-    useVPNStore.setState({
+    useAppStore.setState({
       hasAcceptedTerms: true,
       hasOnboarded: true,
       status: 'disconnected',

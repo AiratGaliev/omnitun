@@ -1,6 +1,6 @@
 use crate::logging::{log, LogLevel, LogSource, Logger};
 use crate::subscription::SubscriptionProfile;
-use crate::vpn::{ServerProfile, VpnError};
+use crate::proxy::{ServerProfile, ProxyError};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ fn proxy_port(app: &AppHandle) -> Option<u16> {
 
     // Proxy / system-proxy / local-proxy modes: use the proxy port
     // so the fetch goes through the active outbound.
-    if crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+    if crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0 {
         if let Some(state) = app.try_state::<tokio::sync::Mutex<AppSettings>>() {
             if let Ok(guard) = state.try_lock() {
                 return Some(guard.proxy_port);
@@ -50,12 +50,12 @@ impl ProfileManager {
         }
     }
 
-    pub fn load(&mut self) -> Result<(), VpnError> {
+    pub fn load(&mut self) -> Result<(), ProxyError> {
         match std::fs::read_to_string(&self.file_path) {
             Ok(json) => {
                 let profiles: Vec<SubscriptionProfile> =
                     serde_json::from_str(&json).map_err(|e| {
-                        VpnError::Subscription(format!("Failed to parse profiles.json: {e}"))
+                        ProxyError::Subscription(format!("Failed to parse profiles.json: {e}"))
                     })?;
                 self.profiles = profiles;
                 Ok(())
@@ -65,14 +65,14 @@ impl ProfileManager {
                 self.profiles = Vec::new();
                 Ok(())
             }
-            Err(e) => Err(VpnError::Io(e)),
+            Err(e) => Err(ProxyError::Io(e)),
         }
     }
 
     /// Run GeoIP enrichment on all servers missing country/city fields.
     /// This fixes data from old profiles.json that only had flag set.
     pub async fn enrich_loaded(&mut self) {
-        if !crate::vpn::geoip::is_ready() {
+        if !crate::proxy::geoip::is_ready() {
             return;
         }
         let mut changed = false;
@@ -82,7 +82,7 @@ impl ProfileManager {
                 if server.country_name.is_some() && server.city_name.is_some() {
                     continue; // already enriched
                 }
-                if let Some(info) = crate::vpn::geoip::resolve_hostname(&server.server).await {
+                if let Some(info) = crate::proxy::geoip::resolve_hostname(&server.server).await {
                     server.flag = Some(info.country_code.clone());
                     server.country_name = Some(info.country_name.clone());
                     if !info.city.is_empty() {
@@ -99,9 +99,9 @@ impl ProfileManager {
         log::info!("GeoIP enrichment: {enriched_count} server(s) updated");
     }
 
-    pub fn save(&self) -> Result<(), VpnError> {
+    pub fn save(&self) -> Result<(), ProxyError> {
         let json = serde_json::to_string_pretty(&self.profiles)
-            .map_err(|e| VpnError::Subscription(format!("Failed to serialize profiles: {e}")))?;
+            .map_err(|e| ProxyError::Subscription(format!("Failed to serialize profiles: {e}")))?;
         std::fs::write(&self.file_path, json)?;
         Ok(())
     }
@@ -119,11 +119,11 @@ impl ProfileManager {
         app: &AppHandle,
         name: String,
         url: String,
-    ) -> Result<SubscriptionProfile, VpnError> {
+    ) -> Result<SubscriptionProfile, ProxyError> {
         let clean_url = url.trim().to_string();
 
         if self.profiles.iter().any(|p| p.url == clean_url) {
-            return Err(VpnError::Subscription(format!(
+            return Err(ProxyError::Subscription(format!(
                 "Subscription with URL '{}' already exists",
                 clean_url
             )));
@@ -178,11 +178,11 @@ impl ProfileManager {
         Ok(profile)
     }
 
-    pub fn remove(&mut self, id: &str) -> Result<(), VpnError> {
+    pub fn remove(&mut self, id: &str) -> Result<(), ProxyError> {
         let len_before = self.profiles.len();
         self.profiles.retain(|p| p.id != id);
         if self.profiles.len() == len_before {
-            return Err(VpnError::Subscription("Profile not found".into()));
+            return Err(ProxyError::Subscription("Profile not found".into()));
         }
         self.save()?;
         Ok(())
@@ -192,12 +192,12 @@ impl ProfileManager {
         &mut self,
         app: &AppHandle,
         id: &str,
-    ) -> Result<SubscriptionProfile, VpnError> {
+    ) -> Result<SubscriptionProfile, ProxyError> {
         let idx = self
             .profiles
             .iter()
             .position(|p| p.id == id)
-            .ok_or_else(|| VpnError::Subscription("Profile not found".into()))?;
+            .ok_or_else(|| ProxyError::Subscription("Profile not found".into()))?;
 
         let url = &self.profiles[idx].url;
         let logger = app.state::<Mutex<Logger>>();
@@ -222,7 +222,7 @@ impl ProfileManager {
                 }
             }
             _ => crate::subscription::parser::parse_subscription(url)
-                .map_err(|e| VpnError::Subscription(format!("Parse error: {e}"))),
+                .map_err(|e| ProxyError::Subscription(format!("Parse error: {e}"))),
         };
 
         // On HTTP/parse error: still bump updated_at so the frontend timer
@@ -256,7 +256,7 @@ impl ProfileManager {
                     .await;
                 }
                 self.save()?;
-                return Err(VpnError::Subscription(format!("{e}")));
+                return Err(ProxyError::Subscription(format!("{e}")));
             }
         };
 
@@ -318,17 +318,21 @@ impl ProfileManager {
             }
         }
 
-        // Notify cache about subscription refresh (remove deleted servers, resurrect survivors)
-        if let Some(cache) = app.try_state::<std::sync::Arc<crate::vpn::cache::ServerCache>>() {
-            let new_ids: std::collections::HashSet<String> =
-                servers.iter().map(|s| s.id.clone()).collect();
-            cache.handle_subscription_refresh(&new_ids).await;
+        // Notify cache about subscription refresh: pass ALL current server IDs
+        // so the cache can remove entries for deleted servers across all profiles,
+        // not just the one being refreshed.
+        if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+            let all_active_ids: std::collections::HashSet<String> = self.profiles
+                .iter()
+                .flat_map(|p| p.servers.iter().map(|s| s.id.clone()))
+                .collect();
+            cache.handle_subscription_refresh(&all_active_ids).await;
             cache.save_to_disk().await;
         }
 
         // Guard: don't overwrite servers with empty list (e.g. content:// URLs)
         if servers.is_empty() {
-            return Err(VpnError::Subscription(
+            return Err(ProxyError::Subscription(
                 "Refresh returned 0 servers — keeping existing servers".into(),
             ));
         }
@@ -367,9 +371,9 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
         let city_path = geo_dir.join("GeoLite2-City.mmdb");
         let asn_path = geo_dir.join("GeoLite2-ASN.mmdb");
 
-        if !crate::vpn::geoip::is_ready() {
+        if !crate::proxy::geoip::is_ready() {
             if city_path.exists() {
-                let _ = crate::vpn::geoip::init_city(&city_path);
+                let _ = crate::proxy::geoip::init_city(&city_path);
             } else {
                 log(
                     app,
@@ -378,7 +382,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                     LogSource::System,
                     "Downloading GeoIP databases (one-time)...".into(),
                 );
-                match crate::vpn::geoip::ensure_downloaded(
+                match crate::proxy::geoip::ensure_downloaded(
                     &geo_dir,
                     &app
                         .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
@@ -408,18 +412,18 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
 
         // Always try to init ASN if the file exists — may have been downloaded
         // on a previous run while is_ready() already returned true for City only.
-        if asn_path.exists() && !crate::vpn::geoip::is_asn_ready() {
-            let _ = crate::vpn::geoip::init_asn(&asn_path);
+        if asn_path.exists() && !crate::proxy::geoip::is_asn_ready() {
+            let _ = crate::proxy::geoip::init_asn(&asn_path);
         }
 
         // Always try to init ipinfo Lite if the file exists
         let ipinfo_path = geo_dir.join("ipinfo_lite.mmdb");
-        if ipinfo_path.exists() && !crate::vpn::geoip::is_ipinfo_ready() {
-            let _ = crate::vpn::geoip::init_ipinfo(&ipinfo_path);
+        if ipinfo_path.exists() && !crate::proxy::geoip::is_ipinfo_ready() {
+            let _ = crate::proxy::geoip::init_ipinfo(&ipinfo_path);
         }
 
         // Always try to init CDN ranges from downloaded .srs files
-        if !crate::vpn::geoip::is_cdn_ready() {
+        if !crate::proxy::geoip::is_cdn_ready() {
             let mut merged: Vec<(std::net::IpAddr, u8)> = Vec::new();
             for name in &["cdn-only_singbox.srs", "merged.srs"] {
                 let path = geo_dir.join(name);
@@ -433,7 +437,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                     );
                     continue;
                 }
-                match crate::vpn::geoip::parse_srs_file(&path) {
+                match crate::proxy::geoip::parse_srs_file(&path) {
                     Ok(r) => {
                         log(
                             app,
@@ -463,7 +467,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                     LogSource::System,
                     format!("CDN ranges merged: {} total entries (lazy)", merged.len()),
                 );
-                crate::vpn::geoip::set_cdn_ranges(merged);
+                crate::proxy::geoip::set_cdn_ranges(merged);
             } else {
                 log(
                     app,
@@ -515,7 +519,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
     // 1b. Fast keyword pre-check for serverless domains (workers.dev, pages.dev).
     //     Full CDN detection via ASN happens during batch latency test.
     for s in &mut unique {
-        s.behind_cdn = crate::vpn::is_cdn_server(s).await;
+        s.behind_cdn = crate::proxy::is_cdn_server(s).await;
         if s.behind_cdn {
             log(
                 app,
@@ -629,7 +633,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
 
             // GeoIP enrichment: set flag + country/city fields + display name
             // (subscription names often contain garbled emoji, components separate)
-            if let Some(info) = crate::vpn::geoip::resolve_hostname(&server.server).await {
+            if let Some(info) = crate::proxy::geoip::resolve_hostname(&server.server).await {
                 server.flag = Some(info.country_code.clone());
                 server.country_name = Some(info.country_name.clone());
                 if !info.city.is_empty() {
@@ -646,8 +650,8 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                     server.server.parse::<std::net::IpAddr>().ok().map(|_| &*server.server)
                 });
                 if let Some(rip) = check_ip {
-                    let cdn_ranges_count = crate::vpn::geoip::cdn_ranges_count();
-                    if crate::vpn::geoip::is_cdn_entry_ip(rip) {
+                    let cdn_ranges_count = crate::proxy::geoip::cdn_ranges_count();
+                    if crate::proxy::geoip::is_cdn_entry_ip(rip) {
                         server.behind_cdn = true;
                         log(
                             app,
@@ -731,11 +735,11 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
     // 4. Real latency test via ServerCache batch engine.
     //    Skip if main VPN is running (separate sing-box instances crash on Windows).
     let main_vpn_running =
-        crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
+        crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
 
     if !alive.is_empty() && !main_vpn_running {
         // Get the ServerCache from app state
-        let batch_result = if let Some(cache) = app.try_state::<std::sync::Arc<crate::vpn::cache::ServerCache>>() {
+        let batch_result = if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
             log(
                 app,
                 &logger,
@@ -830,7 +834,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             let guard = settings.lock().await;
             if guard.proxy_port > 0 {
                 if let Some(outlet) = fetch_outlet_ip(guard.proxy_port).await {
-                    let is_cdn = crate::vpn::geoip::is_cdn_entry_ip(&outlet);
+                    let is_cdn = crate::proxy::geoip::is_cdn_entry_ip(&outlet);
                     if is_cdn {
                         log(
                             app,
@@ -1016,8 +1020,8 @@ fn emoji_flag_from_name(name: &str) -> Option<String> {
 mod extra_tests {
     use super::*;
     use crate::settings::AppSettings;
-    use crate::vpn::config::build_outbound;
-    use crate::vpn::config::generate_config;
+    use crate::proxy::config::build_outbound;
+    use crate::proxy::config::generate_config;
     use serde_json::json;
     use std::collections::HashMap;
     use std::process::Command;
@@ -1048,7 +1052,7 @@ mod extra_tests {
     fn singbox() -> PathBuf {
         let m = app_data_dir()
             .join("binaries")
-            .join(crate::vpn::installer::Installer::binary_name());
+            .join(crate::proxy::installer::Installer::binary_name());
         if m.exists() {
             return m;
         }

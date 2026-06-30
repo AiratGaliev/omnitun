@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Check, ChevronDown, Gauge, Globe, Plus, Power, Server } from 'lucide-react';
 import { toast } from 'sonner';
-import { useVPNStore } from '@/store.ts';
+import { useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { SegmentedControl } from '../SegmentedControl';
 import { hasFlag } from 'country-flag-icons';
@@ -52,9 +52,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     realIp,
     speedTestResult,
     runSpeedTest,
-  } = useVPNStore();
-  const toggleConnection = useVPNStore((state) => state.toggleConnection);
-  const addLog = useVPNStore((state) => state.addLog);
+  } = useAppStore();
+  const toggleConnection = useAppStore((state) => state.toggleConnection);
+  const addLog = useAppStore((state) => state.addLog);
   const { t } = useTranslation();
 
   const formatElapsed = (since: number): string => {
@@ -109,14 +109,14 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     if (status !== 'connected') return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSparklineData((prev) => {
-      const s = useVPNStore.getState().speeds;
+      const s = useAppStore.getState().speeds;
       const total = s.down + s.up;
       const next = [...prev, total];
       return next.length > 30 ? next.slice(next.length - 30) : next;
     });
     const interval = setInterval(() => {
       setSparklineData((prev) => {
-        const s = useVPNStore.getState().speeds;
+        const s = useAppStore.getState().speeds;
         const total = s.down + s.up;
         const next = [...prev, total];
         return next.length > 30 ? next.slice(next.length - 30) : next;

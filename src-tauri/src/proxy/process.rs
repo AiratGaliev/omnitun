@@ -3,7 +3,7 @@
 //   - sing-box stdout/stderr redirected to log file for crash diagnostics
 //   - DNS migrated to sing-box 1.12+ format — deprecated env vars removed
 
-use crate::vpn::VpnError;
+use crate::proxy::ProxyError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -32,7 +32,7 @@ impl ProcessManager {
     }
 
     /// Take the PID from the guard and return it, leaving None.
-    /// Used by stop_vpn to atomically get+clear the PID under the outer lock.
+    /// Used by stop_proxy to atomically get+clear the PID under the outer lock.
     pub fn clear_pid(&self) -> Option<u32> {
         self.pid.lock().unwrap().take()
     }
@@ -43,28 +43,28 @@ impl ProcessManager {
         self.pid.lock().unwrap().is_some()
     }
 
-    pub async fn start(&self, config_path: &Path) -> Result<(), VpnError> {
+    pub async fn start(&self, config_path: &Path) -> Result<(), ProxyError> {
         let existing_pid = *self.pid.lock().unwrap();
         if let Some(pid) = existing_pid {
             // Process crash recovery: stale PID that no longer exists
             if !crate::is_process_alive(pid) {
                 *self.pid.lock().unwrap() = None; // clear stale PID
             } else {
-                return Err(VpnError::Process("VPN is already running".into()));
+                return Err(ProxyError::Process("Proxy is already running".into()));
             }
         }
 
         let config_str = config_path
             .to_str()
-            .ok_or_else(|| VpnError::Process("Invalid config path".into()))?;
+            .ok_or_else(|| ProxyError::Process("Invalid config path".into()))?;
 
         let new_pid = self.launch(config_str).await?;
         *self.pid.lock().unwrap() = Some(new_pid);
-        crate::vpn::VPN_PID.store(new_pid, std::sync::atomic::Ordering::Relaxed);
+        crate::proxy::VPN_PID.store(new_pid, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
-    pub async fn stop(&self) -> Result<(), VpnError> {
+    pub async fn stop(&self) -> Result<(), ProxyError> {
         let pid = {
             let mut guard = self.pid.lock().unwrap();
             guard.take()
@@ -93,7 +93,7 @@ impl ProcessManager {
                 .creation_flags(CREATE_NO_WINDOW)
                 .output();
 
-            crate::vpn::VPN_PID.store(0, std::sync::atomic::Ordering::Relaxed);
+            crate::proxy::VPN_PID.store(0, std::sync::atomic::Ordering::Relaxed);
 
             // Poll for process exit — cumulative ~3s max
             for delay_ms in [200u64, 300, 500, 1000, 1000] {
@@ -124,11 +124,11 @@ impl ProcessManager {
             std::process::Command::new("kill")
                 .args(["-9", &pid.to_string()])
                 .output()
-                .map_err(|e| VpnError::Process(format!("Failed to kill process {pid}: {e}")))?;
+                .map_err(|e| ProxyError::Process(format!("Failed to kill process {pid}: {e}")))?;
 
             tokio::time::sleep(Duration::from_millis(500)).await;
             if crate::is_process_alive(pid) {
-                return Err(VpnError::Process(format!(
+                return Err(ProxyError::Process(format!(
                     "Could not kill sing-box (PID {pid}) even with SIGKILL"
                 )));
             }
@@ -137,11 +137,11 @@ impl ProcessManager {
         }
     }
 
-    async fn launch(&self, config_path: &str) -> Result<u32, VpnError> {
+    async fn launch(&self, config_path: &str) -> Result<u32, ProxyError> {
         let binary = self
             .binary_path
             .to_str()
-            .ok_or_else(|| VpnError::Process("Invalid binary path".into()))?;
+            .ok_or_else(|| ProxyError::Process("Invalid binary path".into()))?;
 
         #[cfg(target_os = "windows")]
         {
@@ -166,7 +166,7 @@ impl ProcessManager {
                 })
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn()
-                .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;
+                .map_err(|e| ProxyError::Process(format!("Failed to start sing-box: {e}")))?;
 
             Ok(child.id())
         }
@@ -186,7 +186,7 @@ impl ProcessManager {
                     std::fs::File::create(&log_path).ok().unwrap(),
                 ))
                 .spawn()
-                .map_err(|e| VpnError::Process(format!("Failed to start sing-box: {e}")))?;
+                .map_err(|e| ProxyError::Process(format!("Failed to start sing-box: {e}")))?;
 
             Ok(child.id())
         }

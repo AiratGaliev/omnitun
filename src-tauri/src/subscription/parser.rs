@@ -5,10 +5,10 @@
 //
 // All other functions are unchanged from the original codebase.
 
-use crate::vpn::{ServerProfile, VpnError};
+use crate::proxy::{ServerProfile, ProxyError};
 use std::collections::HashMap;
 
-pub fn parse_subscription(data: &str) -> Result<Vec<ServerProfile>, VpnError> {
+pub fn parse_subscription(data: &str) -> Result<Vec<ServerProfile>, ProxyError> {
     let decoded = try_base64_decode(data).unwrap_or_else(|_| data.to_string());
 
     let mut servers = Vec::new();

@@ -2,7 +2,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { Check, Globe, Loader2, Lock, Network, Rocket, Timer } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from '@/hooks/useTranslation.ts';
-import { useVPNStore } from '@/store.ts';
+import { useAppStore } from '@/store.ts';
 import { SegmentedControl } from '../SegmentedControl';
 import { GeneralSettings } from '../settings/GeneralSettings';
 import { NetworkSettings } from '../settings/NetworkSettings';
@@ -14,7 +14,7 @@ export function Settings() {
     'general',
   );
   const { t } = useTranslation();
-  const settingsVersion = useVPNStore((state) => state.settingsVersion);
+  const settingsVersion = useAppStore((state) => state.settingsVersion);
   const prevVersionRef = useRef(settingsVersion);
   const [saveState, setSaveState] = useState<'idle' | 'countdown' | 'saving'>('idle');
   const [countdown, setCountdown] = useState(5);
@@ -36,7 +36,7 @@ export function Settings() {
       } else {
         timer = setTimeout(() => {
           setSaveState('saving');
-          void useVPNStore.getState().saveSettings();
+          void useAppStore.getState().saveSettings();
         }, 0);
       }
     } else if (saveState === 'saving') {
@@ -52,7 +52,7 @@ export function Settings() {
   const handleManualSave = () => {
     if (saveState === 'countdown') {
       setSaveState('saving');
-      void useVPNStore.getState().saveSettings();
+      void useAppStore.getState().saveSettings();
     }
   };
 

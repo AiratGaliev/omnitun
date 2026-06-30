@@ -1,11 +1,11 @@
-import { useVPNStore } from '@/store.ts';
+import { useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { i18n } from '../../i18n';
 import { Key, Languages, Minus, RefreshCw, Rocket, Zap } from 'lucide-react';
 import { SettingItem } from './SettingItem';
 
 export function GeneralSettings() {
-  const { settings, updateSettings, addLog } = useVPNStore();
+  const { settings, updateSettings, addLog } = useAppStore();
   const { t, lang } = useTranslation();
 
   return (

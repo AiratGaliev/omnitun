@@ -40,7 +40,7 @@ pub struct LastConnection {
 }
 
 #[derive(Debug, Error)]
-pub enum VpnError {
+pub enum ProxyError {
     #[error("Config generation failed: {0}")]
     Config(String),
     #[error("Process error: {0}")]
@@ -53,8 +53,8 @@ pub enum VpnError {
     Io(#[from] std::io::Error),
 }
 
-impl From<VpnError> for String {
-    fn from(e: VpnError) -> Self {
+impl From<ProxyError> for String {
+    fn from(e: ProxyError) -> Self {
         e.to_string()
     }
 }
@@ -193,21 +193,21 @@ impl ServerProfile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum VpnStatus {
+pub enum ConnectionStatus {
     Disconnected,
     Connecting,
     Connected,
     Error(String),
 }
 
-pub struct VpnManager {
+pub struct ProxyManager {
     process_mgr: ProcessManager,
     bin_dir: PathBuf,
     config_dir: PathBuf,
     installed: Arc<AtomicBool>,
 }
 
-impl VpnManager {
+impl ProxyManager {
     pub fn new(data_dir: PathBuf) -> Self {
         let bin_dir = data_dir.join("binaries");
         let config_dir = data_dir.join("config");
@@ -221,7 +221,7 @@ impl VpnManager {
         }
     }
 
-    pub async fn ensure_installed(&self, app_handle: &AppHandle) -> Result<PathBuf, VpnError> {
+    pub async fn ensure_installed(&self, app_handle: &AppHandle) -> Result<PathBuf, ProxyError> {
         if self.installed.load(Ordering::SeqCst) || Installer::is_installed(&self.bin_dir) {
             self.installed.store(true, Ordering::SeqCst);
             return Ok(self.bin_dir.join(Installer::binary_name()));
@@ -249,7 +249,7 @@ impl VpnManager {
         routing_mode: &str,
         profiles: &[ServerProfile],
         settings: &AppSettings,
-    ) -> Result<(), VpnError> {
+    ) -> Result<(), ProxyError> {
         let logger = app_handle.state::<Mutex<Logger>>();
         log(
             app_handle,
@@ -333,9 +333,9 @@ impl VpnManager {
         Ok(())
     }
 
-    pub async fn stop(&self, app_handle: &AppHandle) -> Result<(), VpnError> {
+    pub async fn stop(&self, app_handle: &AppHandle) -> Result<(), ProxyError> {
         // Reset Clash API port so fetcher goes direct
-        crate::vpn::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Relaxed);
+        crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Disable system proxy — best effort, don't block on it
         if let Ok(mut sysproxy) = sysproxy::Sysproxy::get_system_proxy() {
@@ -360,20 +360,20 @@ impl VpnManager {
         self.process_mgr.pid()
     }
 
-    /// Atomically get + clear the tracked PID. Used by stop_vpn under the outer lock.
+    /// Atomically get + clear the tracked PID. Used by stop_proxy under the outer lock.
     pub fn clear_pid(&self) -> Option<u32> {
         self.process_mgr.clear_pid()
     }
 
-    pub fn status(&self) -> VpnStatus {
+    pub fn status(&self) -> ConnectionStatus {
         if let Some(pid) = self.process_mgr.pid() {
             if crate::is_process_alive(pid) {
-                return VpnStatus::Connected;
+                return ConnectionStatus::Connected;
             }
             // Process died but PID wasn't cleared yet — clean up
             self.process_mgr.clear_pid();
         }
-        VpnStatus::Disconnected
+        ConnectionStatus::Disconnected
     }
 }
 

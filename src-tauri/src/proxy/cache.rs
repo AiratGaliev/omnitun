@@ -18,9 +18,9 @@
 //! - Negative cache entries have exponential backoff TTL.
 
 use crate::logging::{log, LogLevel, LogSource, Logger};
-use crate::vpn::persistence;
-use crate::vpn::port_pool::PortPool;
-use crate::vpn::ServerProfile;
+use crate::proxy::persistence;
+use crate::proxy::port_pool::PortPool;
+use crate::proxy::ServerProfile;
 use moka::future::Cache;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -270,7 +270,7 @@ impl ServerCache {
                     .take()
                     .expect("start_batcher: batch_rx already consumed")
             };
-            crate::vpn::batcher::run(rx, cache, port_pool, app_handle, cancel).await;
+            crate::proxy::batcher::run(rx, cache, port_pool, app_handle, cancel).await;
         });
 
         log::info!("[ServerCache] batch worker started");
@@ -452,10 +452,10 @@ impl ServerCache {
     pub async fn batch_test(
         &self,
         app: &AppHandle,
-        servers: &[crate::vpn::ServerProfile],
+        servers: &[crate::proxy::ServerProfile],
         _cancel: Option<tokio_util::sync::CancellationToken>,
         profile_id: &str,
-    ) -> Vec<crate::vpn::ServerProfile> {
+    ) -> Vec<crate::proxy::ServerProfile> {
         let logger = app.state::<std::sync::Mutex<Logger>>();
         let total = servers.len();
         let mut cache_hits = 0usize;
@@ -572,7 +572,7 @@ impl ServerCache {
         );
 
         if queued == 0 {
-            return result_slots.into_iter().map(|s| s.unwrap()).collect();
+            return result_slots.into_iter().filter_map(|s| s).collect();
         }
 
         // Phase 2: Await all queued results using JoinSet with progress reporting
@@ -665,6 +665,20 @@ impl ServerCache {
                         phase: "testing".into(),
                     },
                 );
+            } else {
+                // JoinError: task panicked or was cancelled — fill slot with TCP-ping data
+                // to avoid panicking on the final .unwrap()
+                failed += 1;
+                log(
+                    app,
+                    &logger,
+                    LogLevel::Warning,
+                    LogSource::Cache,
+                    format!("[Cache] batch_test task panicked or was cancelled"),
+                );
+                // We can't identify which server panicked, so skip slot filling
+                // The slot will be filled by the next completed task, or at worst
+                // the cost is one fewer result in the final list.
             }
         }
 
@@ -676,39 +690,61 @@ impl ServerCache {
             format!("[Cache] batch_test done: {completed}/{queued} completed, {failed} failed"),
         );
 
-        result_slots.into_iter().map(|s| s.unwrap()).collect()
+        result_slots.into_iter().filter_map(|s| s).collect()
     }
 
-    /// Remove entries that no longer exist in a subscription.
-    pub async fn handle_subscription_refresh(&self, new_ids: &std::collections::HashSet<String>) {
+    /// Remove entries that no longer exist in any profile, and resurrect
+    /// surviving negative entries so they get re-tested.
+    ///
+    /// `all_active_ids` — all server IDs currently present across ALL subscriptions.
+    /// Entries whose ID is not in this set are removed from the cache.
+    pub async fn handle_subscription_refresh(&self, all_active_ids: &std::collections::HashSet<String>) {
         let mut store = self.store.write().await;
+        let before = store.len();
 
-        // Remove servers that are no longer in the subscription
-        store.retain(|key, _| new_ids.contains(key));
+        // Remove servers that are no longer in ANY subscription
+        store.retain(|key, _| all_active_ids.contains(key));
+        let removed = before - store.len();
 
         // Resurrection: clear negative cache for surviving servers
         // so they can be tested immediately
-        let mut changed = false;
-        for key in new_ids {
+        let mut resurrected = 0usize;
+        for key in all_active_ids {
             if let Some(entry) = store.get(key) {
                 if matches!(entry.status, CacheStatus::Negative { .. }) {
                     store.remove(key);
-                    changed = true;
+                    resurrected += 1;
                 }
             }
         }
 
-        if changed {
+        if removed > 0 || resurrected > 0 {
             log::info!(
-                "[Cache] subscription refresh: resurrected {} server(s)",
-                new_ids.len()
+                "[Cache] subscription refresh: removed {removed} stale, resurrected {resurrected} server(s) ({} remaining)",
+                store.len(),
             );
         }
+    }
 
-        // Also clear hot cache entries that are no longer valid
-        // (moka doesn't support selective remove by key pattern,
-        // but we can invalidate specific keys)
-        // For now, this is sufficient — hot cache TTL will handle stale entries.
+    /// Remove entries not in `active_ids` and older than `max_age`.
+    /// Grace period: recently-used entries survive `max_age` even without a profile.
+    pub async fn prune_old(&self, active_ids: &std::collections::HashSet<String>, max_age: std::time::Duration) -> usize {
+        let now = chrono::Utc::now().timestamp();
+        let max_age_secs = max_age.as_secs() as i64;
+        let mut store = self.store.write().await;
+        let before = store.len();
+        store.retain(|id, entry| {
+            active_ids.contains(id) || (now - entry.last_updated) < max_age_secs
+        });
+        let removed = before - store.len();
+        if removed > 0 {
+            log::info!(
+                "[Cache] pruned {removed} old entries older than {}d ({} remaining)",
+                max_age_secs / 86400,
+                store.len(),
+            );
+        }
+        removed
     }
 
     /// Persist the current store to disk.

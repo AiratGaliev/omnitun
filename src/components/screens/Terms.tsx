@@ -1,12 +1,12 @@
 import { motion } from 'framer-motion';
 import { Check, Languages, ShieldAlert } from 'lucide-react';
-import { useVPNStore } from '@/store.ts';
+import { useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { i18n } from '../../i18n';
 
 export function Terms() {
-  const addLog = useVPNStore((s) => s.addLog);
-  const { updateSettings } = useVPNStore();
+  const addLog = useAppStore((s) => s.addLog);
+  const { updateSettings } = useAppStore();
   const { t, lang } = useTranslation();
 
   return (
@@ -29,7 +29,7 @@ export function Terms() {
               void i18n.changeLanguage(language);
               updateSettings({ language });
               addLog(`Language changed to ${language} (before terms)`, 'info', 'settings');
-              void useVPNStore.getState().saveSettings();
+              void useAppStore.getState().saveSettings();
             }}
             className="appearance-none bg-transparent text-sm font-medium focus:outline-none cursor-pointer text-zinc-200 pr-4"
           >
@@ -59,7 +59,7 @@ export function Terms() {
           onClick={() => {
             updateSettings({ acceptTerms: true });
             addLog('Terms of service accepted', 'success', 'system');
-            void useVPNStore.getState().saveSettings();
+            void useAppStore.getState().saveSettings();
           }}
           className="w-full bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold rounded-2xl py-4 flex items-center justify-center gap-3 transition-all active:scale-[0.98] shadow-[0_0_30px_rgba(16,185,129,0.25)]"
         >

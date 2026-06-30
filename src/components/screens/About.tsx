@@ -3,11 +3,11 @@ import { useTranslation } from '@/hooks/useTranslation.ts';
 import { RefreshCw, ShieldAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import { check } from '@tauri-apps/plugin-updater';
-import { useVPNStore } from '@/store.ts';
+import { useAppStore } from '@/store.ts';
 
 export function About() {
   const { t } = useTranslation();
-  const addLog = useVPNStore((s) => s.addLog);
+  const addLog = useAppStore((s) => s.addLog);
   const [checkingForUpdates, setCheckingForUpdates] = useState(false);
 
   const handleUpdateCheck = async () => {

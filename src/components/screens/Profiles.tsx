@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { useVPNStore } from '@/store.ts';
+import { useAppStore } from '@/store.ts';
 import { Edit2, Globe2, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useTranslation } from '@/hooks/useTranslation.ts';
@@ -25,7 +25,7 @@ function formatBytes(bytes: number): string {
 }
 
 export function Profiles() {
-  const { profiles, addProfile, removeProfile, refreshProfile, updateProfile, refreshProgress } = useVPNStore();
+  const { profiles, addProfile, removeProfile, refreshProfile, updateProfile, refreshProgress } = useAppStore();
   const { t } = useTranslation();
 
   const [editingId, setEditingId] = useState<string | null>(null);

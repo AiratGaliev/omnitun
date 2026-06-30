@@ -4,7 +4,7 @@ pub mod logging;
 pub mod profile;
 pub(crate) mod settings;
 pub mod subscription;
-pub mod vpn;
+pub mod proxy;
 
 use crate::events::emit_status;
 use crate::events::emit_traffic;
@@ -12,9 +12,9 @@ use crate::logging::{log, LogLevel, LogSource, Logger, MAX_LOG_FILES_COUNT};
 use crate::profile::ProfileManager;
 use crate::settings::{AppSettings, SettingsManager};
 use crate::subscription::SubscriptionProfile;
-use crate::vpn::port_pool::PortPool;
-use crate::vpn::cache::ServerCache;
-use crate::vpn::{ServerProfile, VpnManager, VpnStatus};
+use crate::proxy::port_pool::PortPool;
+use crate::proxy::cache::ServerCache;
+use crate::proxy::{ServerProfile, ProxyManager, ConnectionStatus};
 use chrono::Local;
 use serde::Serialize;
 #[cfg(windows)]
@@ -41,8 +41,8 @@ const IP_URLS: &[&str] = &[
     "https://www.cloudflare.com/cdn-cgi/trace",
 ];
 
-struct VpnState {
-    manager: Arc<Mutex<VpnManager>>,
+struct ProxyState {
+    manager: Arc<Mutex<ProxyManager>>,
 }
 
 struct ProfileState {
@@ -50,9 +50,9 @@ struct ProfileState {
 }
 
 #[tauri::command]
-async fn start_vpn(
+async fn start_proxy(
     app: tauri::AppHandle,
-    state: tauri::State<'_, VpnState>,
+    state: tauri::State<'_, ProxyState>,
     settings_state: tauri::State<'_, Mutex<AppSettings>>,
     profile: ServerProfile,
     routing_mode: String,
@@ -74,11 +74,11 @@ async fn start_vpn(
             server_count
         ),
     );
-    emit_status(&app, VpnStatus::Connecting);
+    emit_status(&app, ConnectionStatus::Connecting);
 
     // Store active server ID for exit IP enrichment
     {
-        let mut active_id = crate::vpn::ACTIVE_SERVER_ID.lock().unwrap();
+        let mut active_id = crate::proxy::ACTIVE_SERVER_ID.lock().unwrap();
         *active_id = Some(profile.id.clone());
     }
 
@@ -128,7 +128,7 @@ async fn start_vpn(
                         LogSource::Vpn,
                         format!("VPN connected to {}", profile.display_name()),
                     );
-                    emit_status(&app, VpnStatus::Connected);
+                    emit_status(&app, ConnectionStatus::Connected);
 
                     // Verify proxy actually routes traffic — make real request through it
                     {
@@ -175,8 +175,8 @@ async fn start_vpn(
 
                     // Save for auto-reconnect on unexpected exit
                     {
-                        let mut last = crate::vpn::LAST_PROFILE.lock().unwrap();
-                        *last = Some(crate::vpn::LastConnection {
+                        let mut last = crate::proxy::LAST_PROFILE.lock().unwrap();
+                        *last = Some(crate::proxy::LastConnection {
                             all_servers: all_servers.clone(),
                             routing_mode: routing_mode.clone(),
                             proxy_port,
@@ -204,7 +204,7 @@ async fn start_vpn(
                                 if !is_process_alive(pid) {
                                     // Stop if the user disconnected (LAST_PROFILE cleared)
                                     {
-                                        let lock = crate::vpn::LAST_PROFILE.lock().unwrap();
+                                        let lock = crate::proxy::LAST_PROFILE.lock().unwrap();
                                         if lock.is_none() {
                                             break; // intentional stop
                                         }
@@ -224,7 +224,7 @@ async fn start_vpn(
                                     // and mgr.stop() would clear the PID guard causing mgr.status()
                                     // to always return Disconnected.
                                     let last = {
-                                        let lock = crate::vpn::LAST_PROFILE.lock().unwrap();
+                                        let lock = crate::proxy::LAST_PROFILE.lock().unwrap();
                                         lock.clone()
                                     };
                                     let mut reconnected = false;
@@ -235,7 +235,7 @@ async fn start_vpn(
 
                                             // User might have disconnected while we were sleeping
                                             {
-                                                let lock = crate::vpn::LAST_PROFILE.lock().unwrap();
+                                                let lock = crate::proxy::LAST_PROFILE.lock().unwrap();
                                                 if lock.is_none() {
                                                     break;
                                                 }
@@ -275,7 +275,7 @@ async fn start_vpn(
                                                     LogSource::Process,
                                                     "Reconnected successfully".into(),
                                                 );
-                                                emit_status(&app_clone, VpnStatus::Connected);
+                                                emit_status(&app_clone, ConnectionStatus::Connected);
                                                 reconnected = true;
                                                 break;
                                             }
@@ -290,7 +290,7 @@ async fn start_vpn(
                                             LogSource::Process,
                                             "Auto-reconnect failed after 3 attempts".into(),
                                         );
-                                        emit_status(&app_clone, VpnStatus::Disconnected);
+                                        emit_status(&app_clone, ConnectionStatus::Disconnected);
                                     }
                                     break;
                                 }
@@ -301,7 +301,7 @@ async fn start_vpn(
                     // Traffic stats: poll Clash API every second
                     // /traffic returns cumulative bytes — we compute speed as delta/timediff
                     let stats_port =
-                        crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                        crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
                     if stats_port > 0 {
                         let app_clone = app.clone();
                         let mgr_arc = manager_arc.clone();
@@ -319,7 +319,7 @@ async fn start_vpn(
                                 // Stop polling if VPN disconnected
                                 {
                                     let mgr = mgr_arc.lock().await;
-                                    if mgr.status() == crate::vpn::VpnStatus::Disconnected {
+                                    if mgr.status() == crate::proxy::ConnectionStatus::Disconnected {
                                         break;
                                     }
                                 }
@@ -406,7 +406,7 @@ async fn start_vpn(
                             // Stop if disconnected
                             {
                                 let mgr = mgr_arc_sched.lock().await;
-                                if mgr.status() != crate::vpn::VpnStatus::Connected {
+                                if mgr.status() != crate::proxy::ConnectionStatus::Connected {
                                     break;
                                 }
                             }
@@ -440,7 +440,7 @@ async fn start_vpn(
                     let _ = manager.stop(&app).await;
                     let msg = format!("Proxy not reachable: {e}");
                     log(&app, &logger, LogLevel::Error, LogSource::Vpn, msg.clone());
-                    emit_status(&app, VpnStatus::Error(msg.clone()));
+                    emit_status(&app, ConnectionStatus::Error(msg.clone()));
                     Err(msg)
                 }
             }
@@ -454,14 +454,14 @@ async fn start_vpn(
                 LogSource::Vpn,
                 format!("Connection failed: {msg}"),
             );
-            emit_status(&app, VpnStatus::Error(msg.clone()));
+            emit_status(&app, ConnectionStatus::Error(msg.clone()));
             Err(msg)
         }
     }
 }
 
 #[tauri::command]
-async fn stop_vpn(app: tauri::AppHandle, state: tauri::State<'_, VpnState>) -> Result<(), String> {
+async fn stop_proxy(app: tauri::AppHandle, state: tauri::State<'_, ProxyState>) -> Result<(), String> {
     let logger = app.state::<StdMutex<Logger>>();
     log(
         &app,
@@ -473,13 +473,13 @@ async fn stop_vpn(app: tauri::AppHandle, state: tauri::State<'_, VpnState>) -> R
 
     // Step 1: Clear LAST_PROFILE so watchdog stops (must be before kill)
     {
-        let mut last = crate::vpn::LAST_PROFILE.lock().unwrap();
+        let mut last = crate::proxy::LAST_PROFILE.lock().unwrap();
         *last = None;
     }
 
     // Step 2: Reset Clash API port so downstream checks (proxy_port, process_servers)
     // know the VPN is no longer running.
-    crate::vpn::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
+    crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
 
     // Step 3: Disable system proxy — best effort, don't block on it
     if let Ok(mut sysproxy) = sysproxy::Sysproxy::get_system_proxy() {
@@ -490,7 +490,7 @@ async fn stop_vpn(app: tauri::AppHandle, state: tauri::State<'_, VpnState>) -> R
     }
 
     // Step 4: Kill sing-box by PID from global atomic (no manager lock needed)
-    let pid = crate::vpn::VPN_PID.swap(0, std::sync::atomic::Ordering::AcqRel);
+    let pid = crate::proxy::VPN_PID.swap(0, std::sync::atomic::Ordering::AcqRel);
     if pid > 0 {
         #[cfg(target_os = "windows")]
         {
@@ -535,13 +535,13 @@ async fn stop_vpn(app: tauri::AppHandle, state: tauri::State<'_, VpnState>) -> R
         LogSource::Vpn,
         "VPN disconnected".into(),
     );
-    emit_status(&app, VpnStatus::Disconnected);
+    emit_status(&app, ConnectionStatus::Disconnected);
 
     Ok(())
 }
 
 #[tauri::command]
-async fn get_vpn_status(state: tauri::State<'_, VpnState>) -> Result<VpnStatus, String> {
+async fn get_status(state: tauri::State<'_, ProxyState>) -> Result<ConnectionStatus, String> {
     let manager = state.manager.lock().await;
     Ok(manager.status())
 }
@@ -916,10 +916,10 @@ pub fn run() {
 
             // Store sing-box binary path for .srs parsing
             let singbox_path = data_dir.join("binaries").join("sing-box.exe");
-            crate::vpn::geoip::set_singbox_bin_path(singbox_path);
+            crate::proxy::geoip::set_singbox_bin_path(singbox_path);
 
-            let vpn_manager = VpnManager::new(data_dir.clone());
-            let vpn_state = VpnState {
+            let vpn_manager = ProxyManager::new(data_dir.clone());
+            let vpn_state = ProxyState {
                 manager: Arc::new(Mutex::new(vpn_manager)),
             };
             app.manage(vpn_state);
@@ -964,7 +964,7 @@ pub fn run() {
 
             // ── System tray ────────────────────────────────────────────────
             let show = MenuItem::with_id(app, "show", "Show OmniTun", true, None::<&str>)?;
-            let toggle_vpn = MenuItem::with_id(app, "toggle_vpn", "Connect", true, None::<&str>)?;
+            let toggle = MenuItem::with_id(app, "toggle_proxy", "Connect", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
             let menu = Menu::with_items(
@@ -972,7 +972,7 @@ pub fn run() {
                 &[
                     &show,
                     &PredefinedMenuItem::separator(app)?,
-                    &toggle_vpn,
+                    &toggle,
                     &PredefinedMenuItem::separator(app)?,
                     &quit,
                 ],
@@ -989,9 +989,9 @@ pub fn run() {
                                 let _ = window.set_focus();
                             }
                         }
-                        "toggle_vpn" => {
+                        "toggle_proxy" => {
                             // Emit toggle event — frontend handles the connect/disconnect
-                            let _ = app.emit("tray-toggle-vpn", ());
+                            let _ = app.emit("tray-toggle-proxy", ());
                         }
                         "quit" => {
                             app.exit(0);
@@ -1044,9 +1044,9 @@ pub fn run() {
 
 
 
-            start_vpn,
-            stop_vpn,
-            get_vpn_status,
+            start_proxy,
+            stop_proxy,
+            get_status,
             add_subscription,
             remove_subscription,
             get_subscriptions,
@@ -1128,7 +1128,7 @@ async fn get_real_ip(app: tauri::AppHandle) -> Result<String, String> {
     }
 
     // GeoIP location from local GeoLite2 database (no network call, no rate limit)
-    let location = crate::vpn::geoip::resolve(&ip)
+    let location = crate::proxy::geoip::resolve(&ip)
         .map(|geo| {
             if !geo.city.is_empty() {
                 format!("{}, {}", geo.city, geo.country_name)
@@ -1161,7 +1161,7 @@ pub struct ExitIpInfo {
 
 #[tauri::command]
 async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
-    let stats_port = crate::vpn::CLASH_API_PORT.load(Ordering::Relaxed);
+    let stats_port = crate::proxy::CLASH_API_PORT.load(Ordering::Relaxed);
     if stats_port == 0 {
         return Err("VPN not connected".into());
     }
@@ -1222,7 +1222,7 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
         return Err("Could not determine external IP".into());
     }
 
-    let info = match crate::vpn::geoip::resolve(&ip) {
+    let info = match crate::proxy::geoip::resolve(&ip) {
         Some(geo) => ExitIpInfo {
             server: ip.clone(),
             flag: geo.country_code.clone(),
@@ -1238,7 +1238,7 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
     };
 
     // Persist exit IP geoip to the active server in profiles.json
-    let active_id = crate::vpn::ACTIVE_SERVER_ID.lock().unwrap().clone();
+    let active_id = crate::proxy::ACTIVE_SERVER_ID.lock().unwrap().clone();
     if let Some(ref server_id) = active_id {
         if let Some(profile_state) = app.try_state::<ProfileState>() {
             let mut pm = profile_state.manager.lock().await;
@@ -1310,7 +1310,7 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
 /// Returns true if the "proxy" outbound/group responds to a delay probe.
 #[tauri::command]
 async fn check_proxy_health() -> Result<bool, String> {
-    let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if stats_port == 0 {
         return Ok(false);
     }
@@ -1335,7 +1335,7 @@ async fn check_proxy_health() -> Result<bool, String> {
 /// Called by health check when the current server is dead.
 #[tauri::command]
 async fn switch_proxy(proxy_tag: String) -> Result<(), String> {
-    let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if stats_port == 0 {
         return Err("VPN not connected".into());
     }
@@ -1359,7 +1359,7 @@ async fn switch_proxy(proxy_tag: String) -> Result<(), String> {
 /// Speed test: test latency of all servers via Clash API delay endpoint
 #[tauri::command]
 async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
-    let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if stats_port == 0 {
         return Err("VPN not connected".into());
     }
@@ -1429,7 +1429,7 @@ async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
 /// Get active connections from sing-box Clash API
 #[tauri::command]
 async fn get_connections() -> Result<Vec<serde_json::Value>, String> {
-    let stats_port = crate::vpn::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if stats_port == 0 {
         return Err("VPN not connected".into());
     }
@@ -1577,7 +1577,7 @@ async fn import_subscription_file(
 #[tauri::command]
 async fn initialize_app(
     app: tauri::AppHandle,
-    state: tauri::State<'_, VpnState>,
+    state: tauri::State<'_, ProxyState>,
 ) -> Result<(), String> {
     let logger = app.state::<StdMutex<Logger>>();
     log(
@@ -1605,12 +1605,26 @@ async fn initialize_app(
         .map(|s| s.try_lock().ok().map(|g| g.ipinfo_token.clone()))
         .flatten()
         .unwrap_or_default();
-    crate::vpn::geoip::ensure_downloaded(&geo_dir, &ipinfo_token).await?;
+    crate::proxy::geoip::ensure_downloaded(&geo_dir, &ipinfo_token).await?;
 
     // 3. Enrich loaded profiles with GeoIP data (fix corrupted names)
     if let Some(profile_state) = app.try_state::<ProfileState>() {
         let mut pm = profile_state.manager.lock().await;
         pm.enrich_loaded().await;
+
+        // 3a. Prune cache: remove entries not seen in any profile for >30 days.
+        //     This prevents the cache from accumulating orphaned entries from
+        //     deleted or long-removed subscriptions.
+        if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+            let active_ids: std::collections::HashSet<String> = pm
+                .list()
+                .iter()
+                .flat_map(|p| p.servers.iter().map(|s| s.id.clone()))
+                .collect();
+            const THIRTY_DAYS_SECS: u64 = 30 * 24 * 3600;
+            cache.prune_old(&active_ids, std::time::Duration::from_secs(THIRTY_DAYS_SECS)).await;
+            cache.save_to_disk().await;
+        }
     }
 
     // 4. Detect and log real IP (no proxy, direct connection)
@@ -1698,7 +1712,7 @@ async fn download_ipinfo_db(app: tauri::AppHandle) -> Result<String, String> {
         .map_err(|e| format!("Failed to get app data dir: {e}"))?;
     let geo_dir = data_dir.join("geoip");
 
-    match crate::vpn::geoip::download_ipinfo_db(&geo_dir, &ipinfo_token).await {
+    match crate::proxy::geoip::download_ipinfo_db(&geo_dir, &ipinfo_token).await {
         Ok(true) => {
             log(
                 &app,
@@ -1736,13 +1750,13 @@ async fn download_ipinfo_db(app: tauri::AppHandle) -> Result<String, String> {
 ///
 /// Used by the frontend to display last-updated timestamps.
 #[tauri::command]
-async fn get_geoip_status(app: tauri::AppHandle) -> Result<crate::vpn::geoip::GeoIpMeta, String> {
+async fn get_geoip_status(app: tauri::AppHandle) -> Result<crate::proxy::geoip::GeoIpMeta, String> {
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {e}"))?;
     let geo_dir = data_dir.join("geoip");
-    Ok(crate::vpn::geoip::get_geoip_meta(&geo_dir))
+    Ok(crate::proxy::geoip::get_geoip_meta(&geo_dir))
 }
 
 /// Check if a process is alive by PID.
@@ -1773,7 +1787,7 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
 
 /// Wait until sing-box is actually ready to accept traffic, not just spawned.
 ///
-/// Replaces the previous `wait_for_alive(pid)` call in `start_vpn`. The old
+/// Replaces the previous `wait_for_alive(pid)` call in `start_proxy`. The old
 /// version returned as soon as `tasklist` showed the PID existed — which
 /// happens ~50–100 ms after `CreateProcess`, long before sing-box has bound
 /// the proxy inbound. This caused the dashboard to show "Connected" while

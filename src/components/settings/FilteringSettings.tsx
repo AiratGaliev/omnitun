@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useVPNStore } from '@/store.ts';
+import { useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { CloudOff, Plus } from 'lucide-react';
 import { toast } from 'sonner';
@@ -26,7 +26,7 @@ const DEFAULT_COUNTRIES = [
 ];
 
 export function FilteringSettings() {
-  const { settings, updateSettings, addLog } = useVPNStore();
+  const { settings, updateSettings, addLog } = useAppStore();
   const { t } = useTranslation();
 
   const [newCode, setNewCode] = useState('');

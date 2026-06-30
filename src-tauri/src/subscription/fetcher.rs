@@ -1,9 +1,9 @@
-use crate::vpn::VpnError;
+use crate::proxy::ProxyError;
 
 /// Trait so the fetcher can be mocked in tests.
 #[async_trait::async_trait]
 pub trait SubscriptionFetcher {
-    async fn fetch(&self, url: &str) -> Result<String, VpnError>;
+    async fn fetch(&self, url: &str) -> Result<String, ProxyError>;
 }
 
 /// Production implementation using reqwest.
@@ -38,18 +38,18 @@ impl Default for HttpFetcher {
 
 #[async_trait::async_trait]
 impl SubscriptionFetcher for HttpFetcher {
-    async fn fetch(&self, url: &str) -> Result<String, VpnError> {
+    async fn fetch(&self, url: &str) -> Result<String, ProxyError> {
         let response = self
             .client
             .get(url)
             .send()
             .await
-            .map_err(|e| VpnError::Subscription(format!("HTTP request failed: {e}")))?;
+            .map_err(|e| ProxyError::Subscription(format!("HTTP request failed: {e}")))?;
 
         let body = response
             .text()
             .await
-            .map_err(|e| VpnError::Subscription(format!("Failed to read response: {e}")))?;
+            .map_err(|e| ProxyError::Subscription(format!("Failed to read response: {e}")))?;
 
         Ok(body)
     }
@@ -63,7 +63,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SubscriptionFetcher for MockFetcher {
-        async fn fetch(&self, _url: &str) -> Result<String, VpnError> {
+        async fn fetch(&self, _url: &str) -> Result<String, ProxyError> {
             Ok("vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.2:8443?remark=Test".into())
         }
     }

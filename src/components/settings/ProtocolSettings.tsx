@@ -1,4 +1,4 @@
-import { useVPNStore } from '@/store.ts';
+import { useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 
 const DEFAULT_PROTOCOLS = [
@@ -14,7 +14,7 @@ const DEFAULT_PROTOCOLS = [
 ];
 
 export function ProtocolSettings() {
-  const { settings, updateSettings, addLog } = useVPNStore();
+  const { settings, updateSettings, addLog } = useAppStore();
   const { t } = useTranslation();
 
   const hasAllowed = settings.allowedProtocols.length > 0;

@@ -6,7 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { readText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTranslation } from '@/hooks/useTranslation';
 import type { RustSubscriptionProfile } from '@/store';
-import { mapRustProfile, useVPNStore } from '@/store';
+import { mapRustProfile, useAppStore } from '@/store';
 import * as z from 'zod';
 
 const manualSchema = z.object({
@@ -77,7 +77,7 @@ export function AddProfileOptions({
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      useVPNStore.getState().addLog(`Clipboard error: ${msg}`, 'error', 'subscription');
+      useAppStore.getState().addLog(`Clipboard error: ${msg}`, 'error', 'subscription');
       invoke('log_message', {
         level: 'error',
         source: 'subscription',
@@ -98,7 +98,7 @@ export function AddProfileOptions({
         content: text,
       });
       const mapped = mapRustProfile(result);
-      useVPNStore
+      useAppStore
         .getState()
         .addLog(
           `Imported "${name}" (${String(mapped.servers.length)} server(s))`,
@@ -107,7 +107,7 @@ export function AddProfileOptions({
         );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      useVPNStore.getState().addLog(`File import error: ${msg}`, 'error', 'subscription');
+      useAppStore.getState().addLog(`File import error: ${msg}`, 'error', 'subscription');
       toast.error(msg);
     }
     // Reset input so same file can be re-imported

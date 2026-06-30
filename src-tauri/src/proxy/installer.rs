@@ -1,5 +1,5 @@
 use crate::logging::{log, LogLevel, LogSource, Logger};
-use crate::vpn::VpnError;
+use crate::proxy::ProxyError;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
@@ -29,7 +29,7 @@ impl Installer {
         app_handle: &AppHandle,
         bin_dir: &PathBuf,
         version: &str,
-    ) -> Result<PathBuf, VpnError> {
+    ) -> Result<PathBuf, ProxyError> {
         let logger = app_handle.state::<Mutex<Logger>>();
         let url = Self::download_url(version);
         let suffix = Self::platform_suffix();
@@ -46,12 +46,12 @@ impl Installer {
         );
         let response = reqwest::get(&url)
             .await
-            .map_err(|e| VpnError::Install(format!("Failed to download sing-box: {e}")))?;
+            .map_err(|e| ProxyError::Install(format!("Failed to download sing-box: {e}")))?;
 
         let bytes = response
             .bytes()
             .await
-            .map_err(|e| VpnError::Install(format!("Failed to read response: {e}")))?;
+            .map_err(|e| ProxyError::Install(format!("Failed to read response: {e}")))?;
 
         log(
             app_handle,
@@ -86,7 +86,7 @@ impl Installer {
         Ok(binary_path)
     }
 
-    pub async fn latest_version(app_handle: &AppHandle) -> Result<String, VpnError> {
+    pub async fn latest_version(app_handle: &AppHandle) -> Result<String, ProxyError> {
         let logger = app_handle.state::<Mutex<Logger>>();
         log(
             app_handle,
@@ -164,15 +164,15 @@ impl Installer {
 
     // ── ZIP / tar.gz extraction ────────────────────────────────────────────
 
-    fn extract_zip(bytes: &[u8], bin_dir: &Path, binary_name: &str) -> Result<(), VpnError> {
+    fn extract_zip(bytes: &[u8], bin_dir: &Path, binary_name: &str) -> Result<(), ProxyError> {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
-            .map_err(|e| VpnError::Install(format!("Failed to open zip: {e}")))?;
+            .map_err(|e| ProxyError::Install(format!("Failed to open zip: {e}")))?;
 
         let mut found_binary = false;
         for i in 0..archive.len() {
             let mut entry = archive
                 .by_index(i)
-                .map_err(|e| VpnError::Install(format!("Failed to read zip entry: {e}")))?;
+                .map_err(|e| ProxyError::Install(format!("Failed to read zip entry: {e}")))?;
 
             if entry.is_dir() {
                 continue;
@@ -195,30 +195,30 @@ impl Installer {
 
             let out_path = bin_dir.join(&file_name);
             let mut out = std::fs::File::create(&out_path)
-                .map_err(|e| VpnError::Install(format!("Failed to create {file_name}: {e}")))?;
+                .map_err(|e| ProxyError::Install(format!("Failed to create {file_name}: {e}")))?;
             std::io::copy(&mut entry, &mut out)
-                .map_err(|e| VpnError::Install(format!("Failed to extract {file_name}: {e}")))?;
+                .map_err(|e| ProxyError::Install(format!("Failed to extract {file_name}: {e}")))?;
         }
 
         if found_binary {
             Ok(())
         } else {
-            Err(VpnError::Install("Binary not found in zip archive".into()))
+            Err(ProxyError::Install("Binary not found in zip archive".into()))
         }
     }
 
-    fn extract_tar_gz(bytes: &[u8], bin_dir: &Path, binary_name: &str) -> Result<(), VpnError> {
+    fn extract_tar_gz(bytes: &[u8], bin_dir: &Path, binary_name: &str) -> Result<(), ProxyError> {
         let decompressed = flate2::read::GzDecoder::new(bytes);
         let mut archive = tar::Archive::new(decompressed);
 
         for entry in archive
             .entries()
-            .map_err(|e| VpnError::Install(format!("Failed to read tar: {e}")))? 
+            .map_err(|e| ProxyError::Install(format!("Failed to read tar: {e}")))? 
         {
             let mut entry =
-                entry.map_err(|e| VpnError::Install(format!("Failed to read tar entry: {e}")))?;
+                entry.map_err(|e| ProxyError::Install(format!("Failed to read tar entry: {e}")))?;
 
-            let path = entry.path().map_err(|e| VpnError::Install(e.to_string()))?;
+            let path = entry.path().map_err(|e| ProxyError::Install(e.to_string()))?;
             let file_name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -227,12 +227,12 @@ impl Installer {
             if file_name == binary_name || file_name == "sing-box" {
                 entry
                     .unpack(bin_dir.join(binary_name))
-                    .map_err(|e| VpnError::Install(format!("Failed to extract binary: {e}")))?;
+                    .map_err(|e| ProxyError::Install(format!("Failed to extract binary: {e}")))?;
                 return Ok(());
             }
         }
 
-        Err(VpnError::Install(
+        Err(ProxyError::Install(
             "Binary not found in tar.gz archive".into(),
         ))
     }

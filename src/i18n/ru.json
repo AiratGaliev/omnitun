@@ -137,7 +137,7 @@
   "noLogs": "Записей пока нет.",
   "logAllSources": "Все источники",
   "logSourceSystem": "Система",
-  "logSourceVpn": "VPN",
+  "logSourceProxy": "Прокси",
   "logSourceInstaller": "Установщик",
   "logSourceProcess": "Процесс",
   "logSourceSubscription": "Подписка",

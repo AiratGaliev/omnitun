@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react';
 import { Toaster } from 'sonner';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Loader2, Shield } from 'lucide-react';
-import { useVPNStore } from './store';
+import { useAppStore } from './store';
 import { i18n } from './i18n';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { Onboarding } from './components/screens/Onboarding';
 import { Dashboard } from './components/screens/Dashboard';
 import { Profiles } from './components/screens/Profiles';
@@ -29,13 +30,13 @@ const pageTransition = {
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('home');
   const [isInitialized, setIsInitialized] = useState(false);
-  const hasOnboarded = useVPNStore((state) => state.hasOnboarded);
-  const settings = useVPNStore((state) => state.settings);
-  const initListener = useVPNStore((state) => state.initListener);
-  const loadProfiles = useVPNStore((state) => state.loadProfiles);
-  const loadSettings = useVPNStore((state) => state.loadSettings);
-  const fetchRealIp = useVPNStore((state) => state.fetchRealIp);
-  const addLog = useVPNStore((state) => state.addLog);
+  const hasOnboarded = useAppStore((state) => state.hasOnboarded);
+  const settings = useAppStore((state) => state.settings);
+  const initListener = useAppStore((state) => state.initListener);
+  const loadProfiles = useAppStore((state) => state.loadProfiles);
+  const loadSettings = useAppStore((state) => state.loadSettings);
+  const fetchRealIp = useAppStore((state) => state.fetchRealIp);
+  const addLog = useAppStore((state) => state.addLog);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -48,6 +49,16 @@ export default function App() {
       unlisten?.();
     };
   }, [initListener]);
+
+  // Listen for tray toggle event (system tray "Connect" button)
+  useEffect(() => {
+    const unlistenPromise = listen('tray-toggle-proxy', () => {
+      useAppStore.getState().toggleConnection().catch(() => undefined);
+    });
+    return () => {
+      unlistenPromise.then((fn) => fn());
+    };
+  }, []);
 
   useEffect(() => {
     void Promise.all([
@@ -63,7 +74,7 @@ export default function App() {
     ]).then(async () => {
       setIsInitialized(true);
       await fetchRealIp().catch(() => undefined);
-      const { profiles: loadedProfiles, settings: loadedSettings } = useVPNStore.getState();
+      const { profiles: loadedProfiles, settings: loadedSettings } = useAppStore.getState();
       addLog(
         `App initialized: ${String(loadedProfiles.length)} profile(s), language: ${loadedSettings.language}`,
         'info',
@@ -80,7 +91,7 @@ export default function App() {
     if (!isInitialized || !settings.autoUpdateInterval || settings.autoUpdateInterval <= 0) return;
 
     const checkAndUpdate = () => {
-      const { profiles, refreshProfile, addLog, settings } = useVPNStore.getState();
+      const { profiles, refreshProfile, addLog, settings } = useAppStore.getState();
       if (!settings.autoUpdateInterval || settings.autoUpdateInterval <= 0) return;
 
       const intervalMs = settings.autoUpdateInterval * 60 * 1000;

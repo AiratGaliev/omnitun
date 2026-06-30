@@ -11,11 +11,11 @@
 //! - Latency + outlet IP + CDN check all in one parallel pass
 //! - Every server tested through its own inbound port
 
-use crate::vpn::cache::{BatchRequest, PositiveResult, ServerCache};
-use crate::vpn::config::generate_batch_config;
-use crate::vpn::installer::Installer;
-use crate::vpn::port_pool::PortPool;
-use crate::vpn::ServerProfile;
+use crate::proxy::cache::{BatchRequest, PositiveResult, ServerCache};
+use crate::proxy::config::generate_batch_config;
+use crate::proxy::installer::Installer;
+use crate::proxy::port_pool::PortPool;
+use crate::proxy::ServerProfile;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -531,7 +531,7 @@ async fn test_single_server(
 
     // 4. Exit GeoIP
     let exit_geoip = if let Some(ref ip) = outlet_ip {
-        crate::vpn::geoip::resolve_hostname(ip).await
+        crate::proxy::geoip::resolve_hostname(ip).await
     } else {
         None
     };

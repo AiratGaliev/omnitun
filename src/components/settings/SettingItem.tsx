@@ -1,6 +1,6 @@
 import { type ReactNode } from 'react';
 import { toast } from 'sonner';
-import { useVPNStore } from '@/store.ts';
+import { useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 
 interface SettingItemProps {
@@ -14,7 +14,7 @@ interface SettingItemProps {
 
 export function SettingItem({ icon, title, description, checked, disabled, onChange }: SettingItemProps) {
   const { t } = useTranslation();
-  const addLog = useVPNStore((state) => state.addLog);
+  const addLog = useAppStore((state) => state.addLog);
 
   const handleChange = (v: boolean) => {
     if (disabled) return;

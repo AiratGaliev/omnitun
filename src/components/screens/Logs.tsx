@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from '@/hooks/useTranslation.ts';
-import { useVPNStore } from '@/store.ts';
+import { useAppStore } from '@/store.ts';
 import {
   AlertCircle,
   AlertTriangle,
@@ -17,7 +17,7 @@ import type { LogSource } from '@/types.ts';
 const SOURCE_OPTIONS: { value: 'all' | LogSource; labelKey: string }[] = [
   { value: 'all', labelKey: 'logAllSources' },
   { value: 'system', labelKey: 'logSourceSystem' },
-  { value: 'vpn', labelKey: 'logSourceVpn' },
+  { value: 'proxy', labelKey: 'logSourceProxy' },
   { value: 'installer', labelKey: 'logSourceInstaller' },
   { value: 'process', labelKey: 'logSourceProcess' },
   { value: 'subscription', labelKey: 'logSourceSubscription' },
@@ -26,7 +26,7 @@ const SOURCE_OPTIONS: { value: 'all' | LogSource; labelKey: string }[] = [
 
 export function Logs() {
   const { t } = useTranslation();
-  const { logs, clearLogs, connections, refreshConnections, status } = useVPNStore();
+  const { logs, clearLogs, connections, refreshConnections, status } = useAppStore();
   const [activeFilter, setActiveFilter] = useState<'all' | LogSource>('all');
   const [tab, setTab] = useState<'logs' | 'connections'>('logs');
 

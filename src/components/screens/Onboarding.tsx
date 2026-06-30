@@ -1,16 +1,16 @@
 import { motion } from 'framer-motion';
 import { Languages, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
-import { useVPNStore } from '@/store.ts';
+import { useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { i18n } from '../../i18n';
 import { AddProfileOptions } from '../AddProfileOptions';
 
 export function Onboarding() {
-  const addLog = useVPNStore((s) => s.addLog);
-  const completeOnboarding = useVPNStore((state) => state.completeOnboarding);
-  const addProfile = useVPNStore((state) => state.addProfile);
-  const { updateSettings } = useVPNStore();
+  const addLog = useAppStore((s) => s.addLog);
+  const completeOnboarding = useAppStore((state) => state.completeOnboarding);
+  const addProfile = useAppStore((state) => state.addProfile);
+  const { updateSettings } = useAppStore();
   const { t, lang } = useTranslation();
 
   const handleConnectImpl = async (linkStr: string, customName?: string) => {
@@ -45,7 +45,7 @@ export function Onboarding() {
               void i18n.changeLanguage(language);
               updateSettings({ language });
               addLog(`Language changed to ${language} (onboarding)`, 'info', 'settings');
-              void useVPNStore.getState().saveSettings();
+              void useAppStore.getState().saveSettings();
             }}
             className="appearance-none bg-transparent text-sm font-medium focus:outline-none cursor-pointer text-zinc-200 pr-4"
           >

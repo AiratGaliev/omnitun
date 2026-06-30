@@ -3,7 +3,7 @@
 pub mod fetcher;
 pub mod parser;
 
-use crate::vpn::{ServerProfile, VpnError};
+use crate::proxy::{ServerProfile, ProxyError};
 use fetcher::{HttpFetcher, SubscriptionFetcher};
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +28,7 @@ pub struct SubscriptionProfile {
 pub async fn fetch_subscription(
     url: &str,
     proxy_port: Option<u16>,
-) -> Result<Vec<ServerProfile>, VpnError> {
+) -> Result<Vec<ServerProfile>, ProxyError> {
     let fetcher = HttpFetcher::new(proxy_port);
     let data = fetcher.fetch(url).await?;
     parser::parse_subscription(&data)
