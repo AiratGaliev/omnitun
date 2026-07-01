@@ -1,13 +1,17 @@
 /* eslint-disable @typescript-eslint/no-unsafe-return, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/restrict-template-expressions */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { useAppStore, mapRustProfile, pickReplacementServer } from './store';
+import { useAppStore, mapRustProfile } from './store';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mock Tauri invoke for the store
 // ─────────────────────────────────────────────────────────────────────────────
 const mockInvoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: (...args: unknown[]) => mockInvoke(...args),
+  invoke: vi.fn().mockImplementation((cmd: string, ...args: unknown[]) => {
+    // log_frontend never consumes mockInvoke's once-queue
+    if (cmd === 'log_frontend') return Promise.resolve(undefined);
+    return mockInvoke(cmd, ...args);
+  }),
 }));
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -80,6 +84,10 @@ interface RustServerProfile {
   wg_keepalive?: number;
   username?: string;
   behind_cdn?: boolean;
+  exit_flag?: string;
+  exit_server?: string;
+  exit_country_name?: string;
+  exit_city_name?: string;
 }
 
 interface RustSubscriptionProfile {
@@ -110,7 +118,7 @@ function makeRustProfile(
         server: '127.0.0.1',
         port: 443,
         country_name: 'Switzerland',
-        exitFlag: 'CH',
+        exit_flag: 'CH',
         ping_ms: 50,
       },
       {
@@ -119,7 +127,7 @@ function makeRustProfile(
         server: '192.168.1.1',
         port: 8443,
         country_name: 'Germany',
-        exitFlag: 'DE',
+        exit_flag: 'DE',
         ping_ms: 100,
       },
     ],
@@ -709,7 +717,7 @@ describe('store — toggleConnection', () => {
     expect(mockInvoke).not.toHaveBeenCalledWith('start_proxy');
     expect(mockInvoke).not.toHaveBeenCalledWith('stop_proxy');
     expect(
-      useAppStore.getState().logs.some((l) => l.message.includes('already in progress')),
+      useAppStore.getState().logs.some((l) => l.message.includes('BLOCKED by guard')),
     ).toBe(true);
   });
 
@@ -818,10 +826,11 @@ describe('store — initListener health check', () => {
     cleanup();
   });
 
-  it('registers log-entry and traffic-update listeners', async () => {
+  it('registers log-entry, traffic-update and refresh-progress listeners', async () => {
     const cleanup = await useAppStore.getState().initListener();
     expect(mockListenFns.some((e) => e.event === 'log-entry')).toBe(true);
     expect(mockListenFns.some((e) => e.event === 'traffic-update')).toBe(true);
+    expect(mockListenFns.some((e) => e.event === 'refresh-progress')).toBe(true);
     cleanup();
   });
 
@@ -869,6 +878,9 @@ describe('store — initListener health check', () => {
   });
 
   it('log-entry event adds to log buffer', async () => {
+    // get_logs and get_status must return clean values so initListener doesn't log errors
+    mockInvoke.mockResolvedValueOnce('disconnected'); // get_status
+    mockInvoke.mockResolvedValueOnce([]); // get_logs
     const cleanup = await useAppStore.getState().initListener();
     expect(useAppStore.getState().logs.length).toBe(0);
     triggerEvent('log-entry', {
@@ -884,6 +896,8 @@ describe('store — initListener health check', () => {
   });
 
   it('cleanup function stops health check and unlistens', async () => {
+    mockInvoke.mockResolvedValueOnce('disconnected'); // get_status
+    mockInvoke.mockResolvedValueOnce([]); // get_logs
     const cleanup = await useAppStore.getState().initListener();
     triggerEvent('connection-status-changed', { status: 'connected' });
     const timer = useAppStore.getState()._healthCheckTimer;
@@ -934,100 +948,6 @@ describe('store — initListener health check', () => {
     // Restore mock
     mockInvoke.mockImplementation(origImpl as typeof mockInvoke);
     cleanup();
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 9. pickReplacementServer
-// ─────────────────────────────────────────────────────────────────────────────
-describe('pickReplacementServer', () => {
-  it('returns null when no servers available', () => {
-    const result = pickReplacementServer(
-      [],
-      { id: 'srv-1', name: 'Dead' },
-      useAppStore.getState().settings,
-    );
-    expect(result).toBeNull();
-  });
-
-  it('prefers same country with fastest ping', () => {
-    const servers = [
-      { id: 'srv-ch-1', name: 'CH Fast', exitFlag: 'CH', ping: 50 } as never,
-      { id: 'srv-ch-2', name: 'CH Slow', exitFlag: 'CH', ping: 200 } as never,
-      { id: 'srv-de', name: 'DE', exitFlag: 'DE', ping: 100 } as never,
-    ];
-    const current = { id: 'srv-ch-1', name: 'Old', exitFlag: 'CH' } as never;
-    const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
-    // Same country (CH) -> picks fastest CH server that's not current
-    expect(result?.id).toBe('srv-ch-2');
-  });
-
-  it('falls back to fastest any country when no same country available', () => {
-    const servers = [
-      { id: 'srv-us', name: 'US', exitFlag: 'US', ping: 300 } as never,
-      { id: 'srv-de', name: 'DE Fast', exitFlag: 'DE', ping: 50 } as never,
-    ];
-    const current = { id: 'srv-ch', name: 'Old', exitFlag: 'CH' } as never;
-    const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
-    expect(result?.id).toBe('srv-de');
-  });
-
-  it('excludes the dead server itself', () => {
-    const servers = [
-      { id: 'srv-dead', name: 'Dead', exitFlag: 'CH', ping: 50 } as never,
-      { id: 'srv-other', name: 'Other', exitFlag: 'DE', ping: 100 } as never,
-    ];
-    const current = { id: 'srv-dead', name: 'Dead', exitFlag: 'CH' } as never;
-    const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
-    expect(result?.id).toBe('srv-other');
-  });
-
-  it('applies allowedCountries filter', () => {
-    const state = useAppStore.getState();
-    state.updateSettings({ allowedCountries: ['DE'] });
-    const servers = [
-      { id: 'srv-us', name: 'US', exitFlag: 'US', ping: 10 } as never,
-      { id: 'srv-de', name: 'DE', exitFlag: 'DE', ping: 100 } as never,
-    ];
-    const current = { id: 'srv-dead', name: 'Dead', exitFlag: 'CH' } as never;
-    const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
-    expect(result?.id).toBe('srv-de');
-  });
-
-  it('applies blockedCountries filter', () => {
-    const state = useAppStore.getState();
-    state.updateSettings({ blockedCountries: ['US'] });
-    const servers = [
-      { id: 'srv-us', name: 'US', exitFlag: 'US', ping: 10 } as never,
-      { id: 'srv-de', name: 'DE', exitFlag: 'DE', ping: 100 } as never,
-    ];
-    const current = { id: 'srv-dead', name: 'Dead', exitFlag: 'CH' } as never;
-    const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
-    expect(result?.id).toBe('srv-de');
-  });
-
-  it('applies blockCdnNodes filter', () => {
-    const state = useAppStore.getState();
-    state.updateSettings({ blockCdnNodes: true });
-    const servers = [
-      { id: 'srv-cdn', name: 'CDN', exitFlag: 'US', ping: 10, behindCdn: true } as never,
-      { id: 'srv-real', name: 'Real', exitFlag: 'US', ping: 50, behindCdn: false } as never,
-    ];
-    const current = { id: 'srv-dead', name: 'Dead', exitFlag: 'CH' } as never;
-    const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
-    expect(result?.id).toBe('srv-real');
-  });
-
-  it('applies allowedProtocols filter', () => {
-    const state = useAppStore.getState();
-    state.updateSettings({ allowedProtocols: ['vless'] });
-    const servers = [
-      { id: 'srv-vless', name: 'VLESS', protocol: 'vless', exitFlag: 'US', ping: 50 } as never,
-      { id: 'srv-trojan', name: 'Trojan', protocol: 'trojan', exitFlag: 'US', ping: 30 } as never,
-    ];
-    const current = { id: 'srv-dead', name: 'Dead', exitFlag: 'CH' } as never;
-    const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
-    expect(result?.id).toBe('srv-vless');
   });
 });
 

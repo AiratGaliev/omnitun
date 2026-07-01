@@ -457,6 +457,19 @@ impl ServerCache {
         store.insert(server_id.to_string(), entry);
     }
 
+    /// Check if a server is in the negative cache with active backoff.
+    /// Returns `true` if the server has a recent negative entry that hasn't expired.
+    pub async fn is_cached_negative(&self, server_id: &str) -> bool {
+        let now = chrono::Utc::now().timestamp();
+        let store = self.store.read().await;
+        match store.get(server_id) {
+            Some(entry) if matches!(entry.status, CacheStatus::Negative { .. }) => {
+                !is_negative_expired(entry, now)
+            }
+            _ => false,
+        }
+    }
+
     /// Batch-test all servers that passed TCP ping. Fills the cache
     /// and returns results.
     ///
@@ -526,9 +539,10 @@ impl ServerCache {
                             }
                         }
                         CacheStatus::Negative { .. } => {
-                            if !is_negative_expired(entry, now) {
-                                // Still negative — skip
-                            }
+                            // Still negative — don't return cached, but don't skip
+                            // either: the server passed TCP ping (it's alive), so it
+                            // deserves a fresh batch test. The batcher will call
+                            // update_negative() again if it fails.
                         }
                     }
                 }
@@ -558,7 +572,8 @@ impl ServerCache {
                 result_slots.push(Some(s));
             } else if server.behind_cdn {
                 // CDN servers can't be batch-tested reliably (Fastly rejects TLS on port 80).
-                // Keep TCP ping result as-is.
+                // Keep TCP ping result as-is, but MUST clear stale exit data — CDN-routed
+                // servers don't have a meaningful exit node.
                 cdn_skip_count += 1;
                 log(
                     app,
@@ -567,7 +582,12 @@ impl ServerCache {
                     LogSource::Cache,
                     format!("[Cache] server {} behind CDN — skipping batch test, using TCP ping", server.id),
                 );
-                result_slots.push(Some(server.clone()));
+                let mut s = server.clone();
+                s.exit_server = None;
+                s.exit_flag = None;
+                s.exit_country_name = None;
+                s.exit_city_name = None;
+                result_slots.push(Some(s));
             } else {
                 // Queue for batch test (don't await yet!)
                 let rx = self.queue_test(server, profile_id);
@@ -720,21 +740,15 @@ impl ServerCache {
         store.retain(|key, _| all_active_ids.contains(key));
         let removed = before - store.len();
 
-        // Resurrection: clear negative cache for surviving servers
-        // so they can be tested immediately
-        let mut resurrected = 0usize;
-        for key in all_active_ids {
-            if let Some(entry) = store.get(key) {
-                if matches!(entry.status, CacheStatus::Negative { .. }) {
-                    store.remove(key);
-                    resurrected += 1;
-                }
-            }
-        }
+        // NOTE: negative cache entries for surviving servers are NOT resurrected
+        // here. The exponential backoff in `is_negative_expired` controls when a
+        // dead server is eligible for re-testing (5 min → 10 min → 20 min → ...).
+        // Resurrection would defeat the negative cache and force a re-test on
+        // every subscription refresh, wasting resources on known-dead servers.
 
-        if removed > 0 || resurrected > 0 {
+        if removed > 0 {
             log::info!(
-                "[Cache] subscription refresh: removed {removed} stale, resurrected {resurrected} server(s) ({} remaining)",
+                "[Cache] subscription refresh: removed {removed} stale server(s) ({} remaining)",
                 store.len(),
             );
         }
@@ -982,9 +996,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_refresh_resurrects_surviving_negative() {
+    async fn test_refresh_keeps_surviving_negative() {
         let dir = std::env::temp_dir().join(format!(
-            "cache-test-resurrect-{}",
+            "cache-test-keep-neg-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1001,11 +1015,12 @@ mod tests {
             ["alive".into(), "dead".into()].into_iter().collect();
         cache.handle_subscription_refresh(&new_ids).await;
 
-        // "dead" was negative — should be resurrected (removed from cache)
+        // Negative entries are NOT resurrected — they stay until backoff expires.
+        // The exponential backoff controls when a dead server is re-tested.
         let store = cache.store.read().await;
-        assert_eq!(store.len(), 1);
+        assert_eq!(store.len(), 2);
         assert!(store.contains_key("alive"));
-        assert!(!store.contains_key("dead"));
+        assert!(store.contains_key("dead"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

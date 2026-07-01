@@ -90,13 +90,14 @@ impl Logger {
     }
 }
 
-/// Create a log entry, push to ring buffer, append to file, emit Tauri event.
-pub fn log(
+/// Create a log entry, push to ring buffer, append to file, optionally emit Tauri event.
+fn log_impl(
     app_handle: &AppHandle,
     logger: &Mutex<Logger>,
     level: LogLevel,
     source: LogSource,
     message: String,
+    emit_event: bool,
 ) {
     let entry = LogEntry {
         id: Uuid::new_v4().to_string(),
@@ -110,7 +111,33 @@ pub fn log(
     l.push(entry.clone());
     l.append_to_file(&entry);
 
-    let _ = app_handle.emit("log-entry", &entry);
+    if emit_event {
+        let _ = app_handle.emit("log-entry", &entry);
+    }
+}
+
+/// Create a log entry, push to ring buffer, append to file, emit Tauri event.
+pub fn log(
+    app_handle: &AppHandle,
+    logger: &Mutex<Logger>,
+    level: LogLevel,
+    source: LogSource,
+    message: String,
+) {
+    log_impl(app_handle, logger, level, source, message, true);
+}
+
+/// Write a log entry to ring buffer and JSONL file WITHOUT emitting a Tauri event.
+/// Used when the frontend is the event originator (via `log_frontend`) and has
+/// already called `addLog` — emitting `log-entry` would create a duplicate.
+pub(crate) fn log_to_file(
+    app_handle: &AppHandle,
+    logger: &Mutex<Logger>,
+    level: LogLevel,
+    source: LogSource,
+    message: String,
+) {
+    log_impl(app_handle, logger, level, source, message, false);
 }
 
 /// Tauri command: log a message from the frontend to the Rust Logger (ring buffer + file).
@@ -125,10 +152,76 @@ pub fn log_message(
     log(&app, &logger, level, source, message);
 }
 
-/// Tauri command: return all current log entries from ring buffer.
+/// Tauri command: return all current log entries from ring buffer
+/// AND from the persistent JSONL file (for cross-session log continuity).
 #[tauri::command]
 pub fn get_logs(logger: tauri::State<'_, Mutex<Logger>>) -> Vec<LogEntry> {
-    logger.lock().unwrap_or_else(|e| e.into_inner()).entries()
+    let l = logger.lock().unwrap_or_else(|e| e.into_inner());
+    let mut all = l.entries(); // ring buffer (in-memory, current session)
+
+    // Also read from the JSONL file for logs from previous sessions.
+    // The file is append-only; we parse the last max_entries lines.
+    if let Some(ref path) = l.log_file {
+        if path.exists() {
+            let file_entries = read_last_entries_from_file(path, l.max_entries);
+            // Dedup by ID — ring buffer entries are newer, file entries supplement history
+            let existing_ids: std::collections::HashSet<String> =
+                all.iter().map(|e| e.id.clone()).collect();
+            for e in file_entries {
+                if !existing_ids.contains(&e.id) {
+                    all.push(e);
+                }
+            }
+            // Sort newest-first, keep top max_entries
+            all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            all.truncate(l.max_entries);
+        }
+    }
+
+    all
+}
+
+/// Read the last `max` log entries from a JSONL file (one JSON object per line).
+/// Memory-efficient: reads file in reverse from the end, keeping only the last N lines.
+fn read_last_entries_from_file(path: &PathBuf, max: usize) -> Vec<LogEntry> {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let file_size = match file.metadata().map(|m| m.len()) {
+        Ok(s) if s > 0 => s,
+        _ => return Vec::new(),
+    };
+
+    let mut reader = BufReader::new(file);
+    // Start near the end: read up to ~max * 200 bytes per line average
+    let read_from = file_size.saturating_sub((max as u64).saturating_mul(200));
+    if reader.seek(SeekFrom::Start(read_from)).is_err() {
+        return Vec::new();
+    }
+
+    let mut lines: Vec<String> = Vec::with_capacity(max);
+    let mut buf = String::new();
+    while reader.read_line(&mut buf).unwrap_or(0) > 0 {
+        let trimmed = buf.trim().to_string();
+        if !trimmed.is_empty() {
+            lines.push(trimmed);
+        }
+        buf.clear();
+    }
+
+    // Keep only the last `max` lines (the buffer starts from read_from,
+    // which may include a partial first line we skip)
+    if lines.len() > max {
+        lines = lines.split_off(lines.len() - max);
+    }
+
+    lines
+        .iter()
+        .filter_map(|line| serde_json::from_str::<LogEntry>(line).ok())
+        .collect()
 }
 
 #[cfg(test)]

@@ -184,6 +184,11 @@ impl ProfileManager {
 
         servers = process_servers(app, servers, "").await;
 
+        // Persist cache to disk so negative entries survive app restart.
+        if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+            cache.save_to_disk().await;
+        }
+
         // Fetch subscription traffic info
         let (traffic_used, traffic_total, traffic_expiry) =
             crate::subscription::fetch_subscription_traffic(&clean_url, proxy_port(app))
@@ -550,6 +555,13 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
     for s in &mut unique {
         s.behind_cdn = crate::proxy::is_cdn_server(s).await;
         if s.behind_cdn {
+            // Clear stale exit IP data from previous batch tests — CDN servers
+            // must never retain exit data (their exit node is dynamic/unstable).
+            let had_exit = s.exit_server.is_some();
+            s.exit_server = None;
+            s.exit_flag = None;
+            s.exit_country_name = None;
+            s.exit_city_name = None;
             log(
                 app,
                 &logger,
@@ -557,6 +569,18 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 LogSource::Subscription,
                 format!("[CDN] keyword match: {} ({})", s.display_name(), s.server),
             );
+            if had_exit {
+                log(
+                    app,
+                    &logger,
+                    LogLevel::Warning,
+                    LogSource::Subscription,
+                    format!(
+                        "[BUG] CDN server {} had stale exit IP data (cleared) — previous batch test stored exit data for a CDN server",
+                        s.id,
+                    ),
+                );
+            }
         }
     }
 
@@ -606,7 +630,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
     }
 
     // 3. TCP ping — up to 50 concurrent connections, 3-second timeout each
-    let unique_count = unique.len();
+    let mut unique_count = unique.len();
     log(
         app,
         &logger,
@@ -614,6 +638,32 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
         LogSource::Subscription,
         format!("Testing {unique_count} server(s) for availability..."),
     );
+
+    // Check negative cache before TCP ping — skip servers known to be dead
+    // (backoff period still active). This avoids spending 3s per dead server.
+    if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+        let mut negative_ids = std::collections::HashSet::new();
+        for server in &unique {
+            if cache.is_cached_negative(&server.id).await {
+                negative_ids.insert(server.id.clone());
+            }
+        }
+        if !negative_ids.is_empty() {
+            let before = unique.len();
+            unique.retain(|s| !negative_ids.contains(&s.id));
+            let skipped = before - unique.len();
+            // Recalculate the total count so progress and unreachable stats
+            // don't miscount skipped servers as failed.
+            unique_count = unique.len();
+            log(
+                app,
+                &logger,
+                LogLevel::Info,
+                LogSource::Subscription,
+                format!("Skipped {skipped} server(s) in negative cache (backoff active)"),
+            );
+        }
+    }
 
     let semaphore = Arc::new(Semaphore::new(50));
     let mut set = tokio::task::JoinSet::new();
@@ -665,82 +715,108 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
     let mut tcp_tested = 0;
     while let Some(result) = set.join_next().await {
         tcp_tested += 1;
-        if let Ok((mut server, true, ping_ms, entry_ip)) = result {
-            server.ping_ms = Some(ping_ms);
+        match result {
+            Ok((mut server, true, ping_ms, entry_ip)) => {
+                server.ping_ms = Some(ping_ms);
 
-            // GeoIP enrichment: set flag + country/city fields + display name
-            // (subscription names often contain garbled emoji, components separate)
-            if let Some(info) = crate::proxy::geoip::resolve_hostname(&server.server).await {
-                server.flag = Some(info.country_code.clone());
-                server.country_name = Some(info.country_name.clone());
-                if !info.city.is_empty() {
-                    server.city_name = Some(info.city.clone());
-                }
-            } else if server.flag.is_none() {
-                log(
-                    app,
-                    &logger,
-                    LogLevel::Warning,
-                    LogSource::Subscription,
-                    format!("GeoIP: country not resolved for {} — IP not in GeoIP database", server.server),
-                );
-            }
-            // If GeoIP fails, keep flag from emoji extraction or leave unset
-
-            // CDN detection on the real entry IP (resolved from hostname if needed).
-            // If lookup_host() failed (common for IP addresses on Windows), fallback
-            // to server.server directly when it's parseable as an IP.
-            if !server.behind_cdn {
-                let check_ip = entry_ip.as_deref().or_else(|| {
-                    server.server.parse::<std::net::IpAddr>().ok().map(|_| &*server.server)
-                });
-                if let Some(rip) = check_ip {
-                    let cdn_ranges_count = crate::proxy::geoip::cdn_ranges_count();
-                    if crate::proxy::geoip::is_cdn_entry_ip(rip) {
-                        server.behind_cdn = true;
-                        log(
-                            app,
-                            &logger,
-                            LogLevel::Info,
-                            LogSource::Subscription,
-                            format!("[CDN] entry IP {} is behind CDN ({} CIDRs)", rip, cdn_ranges_count),
-                        );
-                    } else if tcp_tested <= 5 {
-                        log(
-                            app,
-                            &logger,
-                            LogLevel::Info,
-                            LogSource::Subscription,
-                            format!("[CDN debug] IP {} not in CDN ranges ({} CIDRs)", rip, cdn_ranges_count),
-                        );
+                // GeoIP enrichment: set flag + country/city fields + display name
+                // (subscription names often contain garbled emoji, components separate)
+                if let Some(info) = crate::proxy::geoip::resolve_hostname(&server.server).await {
+                    server.flag = Some(info.country_code.clone());
+                    server.country_name = Some(info.country_name.clone());
+                    if !info.city.is_empty() {
+                        server.city_name = Some(info.city.clone());
                     }
-                } else {
+                } else if server.flag.is_none() {
                     log(
                         app,
                         &logger,
                         LogLevel::Warning,
                         LogSource::Subscription,
-                        format!("[CDN debug] no IP to check for server {}", server.server),
+                        format!("GeoIP: country not resolved for {} — IP not in GeoIP database", server.server),
                     );
                 }
-            }
+                // If GeoIP fails, keep flag from emoji extraction or leave unset
 
-            // Replace hostname with resolved IP in server address,
-            // so profiles store IPs, not hostnames. SNI stays intact.
-            if let Some(ref rip) = entry_ip {
-                if rip != &server.server {
-                    log(
-                        app,
-                        &logger,
-                        LogLevel::Info,
-                        LogSource::Subscription,
-                        format!("[DNS] {} → {}", server.server, rip),
-                    );
-                    server.server = rip.clone();
+                // CDN detection on the real entry IP (resolved from hostname if needed).
+                // If lookup_host() failed (common for IP addresses on Windows), fallback
+                // to server.server directly when it's parseable as an IP.
+                if !server.behind_cdn {
+                    let check_ip = entry_ip.as_deref().or_else(|| {
+                        server.server.parse::<std::net::IpAddr>().ok().map(|_| &*server.server)
+                    });
+                    if let Some(rip) = check_ip {
+                        let cdn_ranges_count = crate::proxy::geoip::cdn_ranges_count();
+                        if crate::proxy::geoip::is_cdn_entry_ip(rip) {
+                            server.behind_cdn = true;
+                            // CDN servers must not retain stale exit data
+                            server.exit_server = None;
+                            server.exit_flag = None;
+                            server.exit_country_name = None;
+                            server.exit_city_name = None;
+                            log(
+                                app,
+                                &logger,
+                                LogLevel::Info,
+                                LogSource::Subscription,
+                                format!("[CDN] entry IP {} is behind CDN ({} CIDRs)", rip, cdn_ranges_count),
+                            );
+                        } else if tcp_tested <= 5 {
+                            log(
+                                app,
+                                &logger,
+                                LogLevel::Info,
+                                LogSource::Subscription,
+                                format!("[CDN debug] IP {} not in CDN ranges ({} CIDRs)", rip, cdn_ranges_count),
+                            );
+                        }
+                    } else {
+                        log(
+                            app,
+                            &logger,
+                            LogLevel::Warning,
+                            LogSource::Subscription,
+                            format!("[CDN debug] no IP to check for server {}", server.server),
+                        );
+                    }
+                }
+
+                // Replace hostname with resolved IP in server address,
+                // so profiles store IPs, not hostnames. SNI stays intact.
+                if let Some(ref rip) = entry_ip {
+                    if rip != &server.server {
+                        log(
+                            app,
+                            &logger,
+                            LogLevel::Info,
+                            LogSource::Subscription,
+                            format!("[DNS] {} → {}", server.server, rip),
+                        );
+                        server.server = rip.clone();
+                    }
+                }
+
+                alive.push(server);
+            }
+            Ok((server, false, _, _)) => {
+                // TCP ping failed — store in negative cache so it's not re-tested
+                // until the backoff period expires.
+                if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+                    cache.update_negative(
+                        &server.id,
+                        "TCP ping: connection refused or timeout (3s)".to_string(),
+                    ).await;
                 }
             }
-
-            alive.push(server);
+            Err(_) => {
+                log(
+                    app,
+                    &logger,
+                    LogLevel::Warning,
+                    LogSource::Subscription,
+                    "TCP ping task panicked".into(),
+                );
+            }
         }
 
         // Отправка прогресса TCP Ping

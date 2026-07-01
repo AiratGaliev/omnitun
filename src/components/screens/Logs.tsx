@@ -22,6 +22,7 @@ const SOURCE_OPTIONS: { value: 'all' | LogSource; labelKey: string }[] = [
   { value: 'process', labelKey: 'logSourceProcess' },
   { value: 'subscription', labelKey: 'logSourceSubscription' },
   { value: 'settings', labelKey: 'logSourceSettings' },
+  { value: 'cache', labelKey: 'logSourceCache' },
 ];
 
 export function Logs() {

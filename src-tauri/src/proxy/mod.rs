@@ -11,6 +11,7 @@ use crate::logging::{log, LogLevel, LogSource, Logger};
 use crate::settings::AppSettings;
 use installer::Installer;
 use process::ProcessManager;
+pub use process::{cleanup_stale_pid, remove_pid_file, set_pid_file_path, write_pid_file};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
@@ -293,7 +294,7 @@ impl ProxyManager {
             LogSource::Process,
             "Starting sing-box process...".into(),
         );
-        self.process_mgr.start(&config_path).await?;
+        self.process_mgr.start(&config_path, app_handle).await?;
 
         // In system-proxy mode, sing-box sets OS proxy automatically
         // via mixed inbound `set_system_proxy: true`.
@@ -312,7 +313,10 @@ impl ProxyManager {
             &logger,
             LogLevel::Info,
             LogSource::Proxy,
-            "sing-box proxy process started".into(),
+            format!(
+                "sing-box proxy process started (PID {})",
+                crate::proxy::PROXY_PID.load(std::sync::atomic::Ordering::Acquire),
+            ),
         );
 
         Ok(())

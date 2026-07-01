@@ -268,65 +268,11 @@ function toRustServerProfile(s: Server | null, fallbackName: string): Record<str
     wg_mtu: s?.wgMtu ?? null,
     wg_keepalive: s?.wgKeepalive ?? null,
     username: s?.username ?? null,
-    behind_cdn: s?.behindCdn ?? false,
+    // NOTE: behind_cdn intentionally NOT sent from frontend — Rust determines
+    // CDN status from the profile manager's enrich_loaded (GeoIP/CIDR lookup).
+    // Sending it from the frontend would allow stale/missing data to bypass
+    // the real CDN check in start_proxy.
   };
-}
-
-/// Pick the best replacement server when the current one dies.
-/// Priority: same country (exit flag) → fastest any country (respecting user filters).
-/// Uses `exitFlag` (exit IP geoip) which matches backend filtering — `flag` is entry IP
-/// and may differ for CDN-routed servers.
-export function pickReplacementServer(
-  servers: Server[],
-  currentServer: Server | null,
-  settings: Settings,
-): Server | null {
-  const currentCountry = currentServer?.exitFlag;
-
-  let candidates = [...servers];
-
-  // Apply user filters using exitFlag (resolved by batch test).
-  // Backend filter_servers_by_settings uses entry flag as a pre-filter
-  // before batch test runs — data is unavailable yet on that side.
-  if (settings.allowedCountries.length > 0) {
-    candidates = candidates.filter(
-      (s) => s.exitFlag && settings.allowedCountries.includes(s.exitFlag),
-    );
-  }
-  if (settings.blockedCountries.length > 0) {
-    candidates = candidates.filter(
-      (s) => !s.exitFlag || !settings.blockedCountries.includes(s.exitFlag),
-    );
-  }
-  if (settings.allowedProtocols.length > 0) {
-    candidates = candidates.filter(
-      (s) => s.protocol && settings.allowedProtocols.includes(s.protocol),
-    );
-  }
-  if (settings.blockedProtocols.length > 0) {
-    candidates = candidates.filter(
-      (s) => !s.protocol || !settings.blockedProtocols.includes(s.protocol),
-    );
-  }
-  if (settings.blockCdnNodes) {
-    candidates = candidates.filter((s) => !s.behindCdn);
-  }
-
-  // Exclude the dead server itself
-  candidates = candidates.filter((s) => s.id !== currentServer?.id);
-
-  // Prefer same country (exit flag), fastest ping
-  if (currentCountry) {
-    const sameCountry = candidates
-      .filter((s) => s.exitFlag === currentCountry)
-      .sort((a, b) => (a.ping ?? 9999) - (b.ping ?? 9999));
-    if (sameCountry.length > 0) return sameCountry[0];
-  }
-
-  // Fallback: fastest available
-  return candidates.length > 0
-    ? candidates.sort((a, b) => (a.ping ?? 9999) - (b.ping ?? 9999))[0]
-    : null;
 }
 
 export const useAppStore = create<ProxyStore>((set, get) => ({
@@ -390,7 +336,13 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   },
   setServers: (servers) => {
     const prev = get().servers;
-    set({ servers });
+    set((state) => {
+      const currentActive = state.activeServer;
+      const updatedActive = currentActive
+        ? servers.find((s) => s.id === currentActive.id) ?? currentActive
+        : null;
+      return { servers, activeServer: updatedActive };
+    });
     if (prev.length !== servers.length) {
       get().addLog(
         `[store] servers: ${String(prev.length)} → ${String(servers.length)}`,
@@ -660,18 +612,6 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   },
 
   fetchExitIp: async () => {
-    // Skip for CDN servers — they cannot route proxy traffic.
-    const s = get().activeServer;
-    if (s?.behindCdn) {
-      // This log helps detect if outlet IP is ever called for CDN servers
-      // (which would indicate a bug in the connection/ping-pong logic).
-      get().addLog(
-        `[BUG] fetchExitIp called for CDN server ${s.id.slice(0, 8)} — outlet IP is meaningless for CDN`,
-        'error',
-        'system',
-      );
-      return;
-    }
     try {
       const info = await invoke<ExitIpInfo>('outlet_ip');
       set({ exitIp: info });
@@ -719,27 +659,34 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
 
   toggleConnection: async () => {
     const { status, activeServer, servers, addLog, settings, _isReconnecting, _isConnecting } = get();
+    const logToggle = (msg: string, level: 'info' | 'warning' | 'error' | 'success' = 'info') => {
+      addLog(`[toggle] ${msg}`, level, 'system');
+      // Also send to Rust JSONL logger — these events are important for debugging
+      invoke('log_frontend', { message: `[toggle] ${msg}`, level, source: 'system' }).catch(() => {});
+    };
+    logToggle(`called — status=${status} _isReconnecting=${String(_isReconnecting)} _isConnecting=${String(_isConnecting)} server=${activeServer?.name ?? 'null'}`);
     if (_isReconnecting || _isConnecting) {
-      addLog('[toggle] already in progress — ignoring toggle', 'warning', 'system');
+      logToggle(`BLOCKED by guard (_isReconnecting=${String(_isReconnecting)} _isConnecting=${String(_isConnecting)})`, 'warning');
       return;
     }
     // Log the server we're connecting to
     const connectServerName = activeServer?.name ?? 'null';
     const connectServerId = activeServer?.id.slice(0, 8) ?? 'null';
-    addLog(
-      `[toggle] connect requested — server: ${connectServerName} (${connectServerId}) proto=${activeServer?.protocol ?? '?'} addr=${activeServer?.server ?? '?'}:${String(activeServer?.port ?? '?')}`,
-      'info',
-      'system',
+    logToggle(
+      `request — server: ${connectServerName} (${connectServerId}) proto=${activeServer?.protocol ?? '?'} addr=${activeServer?.server ?? '?'}:${String(activeServer?.port ?? '?')}`,
     );
     try {
       if (status === 'disconnected' || status === 'error') {
+        logToggle('CONNECT path');
         set({ _isConnecting: true });
         addLog(`Connecting to ${activeServer?.name ?? 'Default'}...`, 'info', 'system');
         set({ status: 'connecting' });
+        logToggle('status set to connecting, _isConnecting=true');
         // Persist settings before connecting (routingMode, proxyPort from Dashboard)
         await get()
           .saveSettings()
           .catch((e) => get().addLog('saveSettings failed: ' + String(e), 'warning', 'system'));
+        logToggle('saveSettings done');
 
         // FIX: build the rust-side profile from `activeServer` WITHOUT
         // dropping WireGuard / username fields. Previously all of these
@@ -759,12 +706,18 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
                 .map((s) => toRustServerProfile(s, 'Default'))
             : [];
 
+        logToggle(`calling invoke('start_proxy') with port=${String(settings.proxyPort)} mode=${settings.routingMode}`);
         const actualPort = await invoke<number>('start_proxy', {
           profile,
           alternativeServers: altServers,
           routingMode: settings.routingMode,
           proxyPort: settings.proxyPort,
         });
+        logToggle(`invoke('start_proxy') returned port=${String(actualPort)}`);
+
+        // Connection established — allow user to disconnect immediately
+        // even during the outlet IP verification that follows.
+        set({ _isConnecting: false });
 
         // Save the actual port (may differ if port fallback was triggered)
         if (actualPort !== settings.proxyPort) {
@@ -776,6 +729,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
           set((state) => ({
             settings: { ...state.settings, proxyPort: actualPort },
           }));
+          logToggle(`port persisted: ${String(actualPort)}`);
           // Persist the new port
           void get().saveSettings();
         }
@@ -783,6 +737,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         // Force Selector to user's chosen server (sing-box Selector may
         // auto-pick the fastest if not explicitly set via Clash API).
         await new Promise((r) => setTimeout(r, 1000));
+        logToggle('calling switch_proxy');
         await invoke('switch_proxy', { proxyTag: 'proxy-0' }).catch((e: unknown) => {
           get().addLog(
             `Failed to switch to proxy-0: ${e instanceof Error ? e.message : String(e)}`,
@@ -790,57 +745,29 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
             'system',
           );
         });
+        logToggle('switch_proxy done');
 
-        // Verify IP changed through proxy — poll outlet IP until different from real IP.
-        // Use increasing delay (2s, 3s, 4s...) to avoid hammering IP check services.
-        // Skip for CDN servers — they cannot route proxy traffic.
-        const realIp = get().realIp ?? (await invoke<string>('get_real_ip').catch(() => null));
-        const isCdn = activeServer?.behindCdn;
-        if (isCdn) {
-          addLog(
-            `Skipping outlet IP check for CDN server ${activeServer?.id?.slice(0, 8) ?? '?'} — CDN servers have dynamic outlet IPs`,
-            'info',
-            'system',
-          );
-        }
-        const maxAttempts = isCdn ? 0 : 12; // ~60 seconds with backoff
-        let ipChanged = false;
-        for (let i = 0; i < maxAttempts; i++) {
-          // Guard: user may have disconnected during the loop
-          if (get().status !== 'connecting' && get().status !== 'connected') break;
-          const delay = 2000 + i * 500; // 2s, 2.5s, 3s, ... (max 7.5s)
-          await new Promise((r) => setTimeout(r, delay));
-          try {
-            const exitIpInfo = await invoke<ExitIpInfo>('outlet_ip');
-            if (realIp && exitIpInfo.server && !exitIpInfo.server.startsWith(realIp.split(' ')[0])) {
-              set({ exitIp: exitIpInfo });
+        // Outlet IP verification is handled by Rust backend during start_proxy.
+        // It checks CDN status from profile manager, skips verification for CDN
+        // servers, logs results to JSONL, and emits exit-ip-changed event.
+        logToggle('outlet IP verification handled by Rust backend — listening for exit-ip-changed event');
 
-              ipChanged = true;
-              break;
-            }
-          } catch (e) {
-            // outlet IP not ready yet, retry
-            get().addLog(`Outlet IP not ready: ${String(e)}`, 'info', 'system');
-          }
-        }
-        if (!ipChanged && realIp) {
-          addLog(
-            'Connected but IP did not change — check your proxy server',
-            'warning',
-            'system',
-          );
-        }
       } else {
+        logToggle('DISCONNECT path');
         addLog('Disconnecting...', 'info', 'system');
         set({ status: 'disconnecting', _isConnecting: false });
+        logToggle('status set to disconnecting, calling stop_proxy');
         await invoke('stop_proxy');
+        logToggle('invoke(stop_proxy) returned — status event should follow');
       }
     } catch (e: unknown) {
+      logToggle(`EXCEPTION: ${e instanceof Error ? e.message : String(e)}`, 'error');
       set({ status: 'error', _isConnecting: false });
       const msg = e instanceof Error ? e.message : String(e);
       addLog(`Connection failed: ${msg}`, 'error', 'system');
       throw e;
     } finally {
+      logToggle(`finally — resetting _isConnecting (was=${String(get()._isConnecting)})`);
       set({ _isConnecting: false });
     }
   },
@@ -869,12 +796,24 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
           if (useAppStore.getState().status !== 'connected') return;
           if (alive) return;
 
-          // Server appears dead — find replacement
-          const replacement = pickReplacementServer(
-            state.servers,
-            state.activeServer,
-            state.settings,
-          );
+          // Server appears dead — find replacement from backend.
+          // The backend applies user filters (country, protocol, CDN) and
+          // picks the best candidate using authoritative exit_flag/ping data.
+          const currentState = useAppStore.getState();
+          const activeId = currentState.activeServer?.id;
+          let replacement: Server | null = null;
+          if (activeId) {
+            try {
+              const result = await invoke<RustServerProfile | null>('pick_replacement_server', {
+                currentServerId: activeId,
+              });
+              if (result) {
+                replacement = currentState.servers.find((s) => s.id === result.id) ?? null;
+              }
+            } catch (e) {
+              get().addLog('Failed to find replacement server: ' + String(e), 'warning', 'system');
+            }
+          }
 
           if (!replacement) {
             state.addLog(
@@ -893,28 +832,41 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
           }
 
           state.addLog(
-            `Server ${state.activeServer.name} died → reconnecting to ${replacement.name} (${replacement.flag ?? '?'})`,
+            `Server ${currentState.activeServer?.name ?? '?'} died → reconnecting to ${replacement.name} (${replacement.flag ?? '?'})`,
             'warning',
             'system',
           );
 
           set({ _isReconnecting: true });
           try {
+            // Check if user disconnected BEFORE stopping the proxy.
+            // The connection-status-changed event is asynchronous and might
+            // not have arrived yet — read the real status from Rust directly.
+            const actualStatus = await invoke<string>('get_status');
+            if (actualStatus !== 'connected') {
+              state.addLog(
+                `Health check abort — status is "${actualStatus}" (not connected)`,
+                'info',
+                'system',
+              );
+              set({ status: 'disconnected', _isReconnecting: false, connectedAt: null });
+              return;
+            }
             await invoke('stop_proxy');
             set({ activeServer: replacement, status: 'connecting' });
 
             const profile = toRustServerProfile(replacement, 'Default');
-            const altServers: ReturnType<typeof toRustServerProfile>[] = state.settings
+            const altServers: ReturnType<typeof toRustServerProfile>[] = currentState.settings
               .autoConnectFastest
-              ? state.servers
+              ? currentState.servers
                   .filter((s) => s.id !== replacement.id)
                   .map((s) => toRustServerProfile(s, 'Default'))
               : [];
             await invoke('start_proxy', {
               profile,
               alternativeServers: altServers,
-              routingMode: state.settings.routingMode,
-              proxyPort: state.settings.proxyPort,
+              routingMode: currentState.settings.routingMode,
+              proxyPort: currentState.settings.proxyPort,
             });
 
             useAppStore
@@ -966,25 +918,28 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     const unlisten = await listen<StatusPayload>('connection-status-changed', (event) => {
       const payload = event.payload;
       const errorMsg = extractError(payload);
+      const logToggle = (msg: string, level: 'info' | 'warning' | 'error' | 'success' = 'info') => {
+        useAppStore.getState().addLog(`[evt:connection-status] ${msg}`, level, 'system');
+        // Also send to Rust JSONL logger for debugging consistency
+        invoke('log_frontend', { message: `[evt:connection-status] ${msg}`, level, source: 'system' }).catch(() => {});
+      };
+      logToggle(`received — payload=${JSON.stringify(payload)} currentStatus=${get().status}`);
       if (errorMsg) {
+        logToggle(`error: ${errorMsg}`, 'error');
         set({ status: 'error', connectedAt: null });
         stopHealthCheck();
       } else {
         const newStatus = mapConnectionStatus(payload);
+        logToggle(`mapped to "${newStatus}" — was "${get().status}"`);
         set({
           status: newStatus,
           connectedAt: newStatus === 'connected' ? Date.now() : null,
         });
         if (newStatus === 'connected') {
           const srv = get().activeServer;
-          get().addLog(
-            `[status] Connected — activeServer: ${srv?.name ?? 'null'} (${srv?.id.slice(0, 8) ?? 'null'}) addr=${srv?.server ?? '?'}:${String(srv?.port ?? '?')}`,
-            'info',
-            'system',
-          );
+          logToggle(`Connected — activeServer: ${srv?.name ?? 'null'} (${srv?.id.slice(0, 8) ?? 'null'})`);
           startHealthCheck();
         } else {
-          // Disconnected / connecting → stop pinging
           stopHealthCheck();
         }
       }
@@ -998,6 +953,11 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     // Listen for real-time traffic stats from sing-box
     const unlistenTraffic = await listen<TrafficPayload>('traffic-update', (event) => {
       set({ speeds: { up: event.payload.up, down: event.payload.down } });
+    });
+
+    // Listen for exit IP changes emitted by Rust after proxy verification
+    const unlistenExitIp = await listen<ExitIpInfo>('exit-ip-changed', (event) => {
+      set({ exitIp: event.payload });
     });
 
     // Listen for batch refresh progress from the BatchingEngine
@@ -1016,6 +976,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       unlisten();
       unlistenLogs();
       unlistenTraffic();
+      unlistenExitIp();
       unlistenRefresh();
     };
   },

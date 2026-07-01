@@ -44,10 +44,13 @@ struct ProfileState {
     manager: Arc<Mutex<ProfileManager>>,
 }
 
+use tokio_util::sync::CancellationToken;
+
 #[tauri::command(rename_all = "camelCase")]
 async fn start_proxy(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProxyState>,
+    profile_state: tauri::State<'_, ProfileState>,
     settings_state: tauri::State<'_, Mutex<AppSettings>>,
     profile: ServerProfile,
     routing_mode: String,
@@ -55,6 +58,8 @@ async fn start_proxy(
     alternative_servers: Vec<ServerProfile>,
 ) -> Result<u16, String> {
     let logger = app.state::<StdMutex<Logger>>();
+    let cancel_state = app.state::<StdMutex<CancellationToken>>();
+    let cancel = cancel_state.lock().unwrap().clone();
     let server_count = alternative_servers.len() + 1;
     log(
         &app,
@@ -173,8 +178,41 @@ async fn start_proxy(
                     );
                     emit_status(&app, ConnectionStatus::Connected);
 
-                    // Verify proxy actually routes traffic — make real request through it
-                    {
+                    // Verify proxy actually routes traffic — make real request through it.
+                    // Check CDN status from the profile manager (where enrich_loaded
+                    // sets it based on GeoIP/CIDR lookup), NOT from the frontend's
+                    // profile which may have stale/missing behind_cdn.
+                    let is_cdn = {
+                        let pm = profile_state.manager.lock().await;
+                        pm.list().iter().any(|p| p.servers.iter().any(|s| s.id == profile.id && s.behind_cdn))
+                    };
+                    if is_cdn {
+                        log(
+                            &app,
+                            &logger,
+                            LogLevel::Info,
+                            LogSource::Proxy,
+                            format!(
+                                "CDN server {} — skipping outlet IP verification (dynamic exit IP)",
+                                profile.display_name(),
+                            ),
+                        );
+                        // Log confirmation that CDN was detected via profile manager
+                        // (the frontend deliberately doesn't send behind_cdn, so the
+                        // profile's `behind_cdn` field from JSON defaults to false).
+                        if !profile.behind_cdn {
+                            log(
+                                &app,
+                                &logger,
+                                LogLevel::Info,
+                                LogSource::Proxy,
+                                format!(
+                                    "[CDN] frontend profile had behind_cdn=false (default) — corrected to true via profile manager for {}",
+                                    profile.display_name(),
+                                ),
+                            );
+                        }
+                    } else {
                         let mut cb = reqwest::Client::builder().timeout(Duration::from_secs(5));
                         // In proxy modes traffic goes through the mixed inbound — route through proxy
                         if let Ok(proxy) =
@@ -203,6 +241,14 @@ async fn start_proxy(
                                                     LogSource::Proxy,
                                                     format!("Proxy verified (exit IP: {ip})"),
                                                 );
+                                                // Emit event so the frontend can update its UI without polling
+                                                let _ = app.emit("exit-ip-changed", ExitIpInfo {
+                                                    server: ip.clone(),
+                                                    flag: String::new(),
+                                                    country_name: String::new(),
+                                                    city_name: String::new(),
+                                                    proxy_tag: String::new(),
+                                                });
                                                 break;
                                             }
                                         }
@@ -285,8 +331,10 @@ async fn start_proxy(
                     if let Some(pid) = watch_pid {
                         let app_clone = app.clone();
                         let mgr_arc = manager_arc.clone();
+                        let cancel_watch = cancel.clone();
                         tokio::spawn(async move {
                             loop {
+                                if cancel_watch.is_cancelled() { break; }
                                 tokio::time::sleep(Duration::from_secs(2)).await;
 
                                 // Guard: If this watchdog is no longer tracking the active PID, exit.
@@ -402,6 +450,7 @@ async fn start_proxy(
                     if stats_port > 0 {
                         let app_clone = app.clone();
                         let mgr_arc = manager_arc.clone();
+                        let cancel_stats = cancel.clone();
                         tokio::spawn(async move {
                             let client = reqwest::Client::builder()
                                 .no_proxy()
@@ -413,6 +462,7 @@ async fn start_proxy(
                             let mut prev_down: Option<f64> = None;
                             let mut prev_time: Option<std::time::Instant> = None;
                             loop {
+                                if cancel_stats.is_cancelled() { break; }
                                 // Stop polling if proxy disconnected
                                 {
                                     let mgr = mgr_arc.lock().await;
@@ -478,17 +528,29 @@ async fn start_proxy(
 
                     // Background latency scheduler: re-test server pings periodically
                     // using the configured auto_update_interval from settings (default 30 min).
+                    // Results are merged back into profile servers WITHOUT removing
+                    // any — a server that fails one TCP check shouldn't disappear
+                    // from the user's list. The negative cache already tracks dead
+                    // servers to skip during the next test cycle.
                     let app_clone = app.clone();
                     let mgr_arc_sched = manager_arc.clone();
+                    let cancel_sched = cancel.clone();
                     tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_secs(15)).await;
+                        tokio::select! {
+                            _ = tokio::time::sleep(Duration::from_secs(15)) => {},
+                            _ = cancel_sched.cancelled() => return,
+                        }
                         loop {
-                            // Read configured interval (minutes → seconds, default 30 min, min 5 min)
+                            if cancel_sched.is_cancelled() { break; }
+                            // Read configured interval (minutes). 0 = disabled.
                             let interval_secs = {
                                 if let Some(state) =
                                     app_clone.try_state::<Mutex<crate::settings::AppSettings>>()
                                 {
                                     let settings = state.lock().await;
+                                    if settings.auto_update_interval == 0 {
+                                        break; // disabled by user
+                                    }
                                     let minutes = if settings.auto_update_interval < 5 {
                                         5
                                     } else {
@@ -508,23 +570,43 @@ async fn start_proxy(
                                 }
                             }
                             let profile_state = app_clone.state::<ProfileState>();
-                            let mut pm = profile_state.manager.lock().await;
+                            let pm = profile_state.manager.lock().await;
                             let profile_ids: Vec<String> =
                                 pm.list().iter().map(|p| p.id.clone()).collect();
+                            let mut all_servers = Vec::new();
                             for pid in &profile_ids {
-                                let servers = {
-                                    let p = pm.list().iter().find(|p| &p.id == pid);
-                                    match p {
-                                        Some(p) if !p.servers.is_empty() => p.servers.clone(),
-                                        _ => continue,
+                                let p = pm.list().iter().find(|p| &p.id == pid);
+                                if let Some(p) = p {
+                                    all_servers.extend(p.servers.clone());
+                                }
+                            }
+                            drop(pm);
+                            // Run process_servers to update caches and get fresh
+                            // ping values, exit IPs, and geoip data.
+                            let re_pinged = crate::profile::process_servers(
+                                &app_clone, all_servers, "",
+                            ).await;
+                            // Merge updated fields back into profile servers
+                            // without removing any — a server that fails one TCP
+                            // check shouldn't disappear from the user's list.
+                            // Negative cache already tracks dead servers for skip.
+                            let mut pm = profile_state.manager.lock().await;
+                            for pid in &profile_ids {
+                                let profile = pm.list_mut().iter_mut().find(|p| &p.id == pid);
+                                if let Some(profile) = profile {
+                                    for updated in &re_pinged {
+                                        if let Some(existing) = profile.servers.iter_mut().find(|s| s.id == updated.id) {
+                                            existing.ping_ms = updated.ping_ms;
+                                            existing.flag.clone_from(&updated.flag);
+                                            existing.country_name.clone_from(&updated.country_name);
+                                            existing.city_name.clone_from(&updated.city_name);
+                                            existing.behind_cdn = updated.behind_cdn;
+                                            existing.exit_server.clone_from(&updated.exit_server);
+                                            existing.exit_flag.clone_from(&updated.exit_flag);
+                                            existing.exit_country_name.clone_from(&updated.exit_country_name);
+                                            existing.exit_city_name.clone_from(&updated.exit_city_name);
+                                        }
                                     }
-                                };
-                                let re_pinged =
-                                    crate::profile::process_servers(&app_clone, servers, "").await;
-                                if let Some(profile) =
-                                    pm.list_mut().iter_mut().find(|p| &p.id == pid)
-                                {
-                                    profile.servers = re_pinged;
                                 }
                             }
                             if let Err(e) = pm.save() {
@@ -562,25 +644,26 @@ async fn start_proxy(
 #[tauri::command]
 async fn stop_proxy(app: tauri::AppHandle, state: tauri::State<'_, ProxyState>) -> Result<(), String> {
     let logger = app.state::<StdMutex<Logger>>();
-    log(
-        &app,
-        &logger,
-        LogLevel::Info,
-        LogSource::System,
-        "Disconnecting...".into(),
-    );
+    let log_stop = |level: LogLevel, msg: String| {
+        log(&app, &logger, level, LogSource::System, msg);
+    };
+
+    log_stop(LogLevel::Info, "[stop_proxy] called".into());
 
     // Step 1: Clear LAST_PROFILE so watchdog stops.
     {
         let mut last = crate::proxy::LAST_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
         *last = None;
     }
+    log_stop(LogLevel::Info, "[stop_proxy] step 1: LAST_PROFILE cleared".into());
 
     // Step 2: Reset Clash API port immediately so health check stops.
     crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
+    log_stop(LogLevel::Info, "[stop_proxy] step 2: CLASH_API_PORT=0".into());
 
     // Step 3: Kill sing-box by PID + fallback by process name.
     let pid = crate::proxy::PROXY_PID.swap(0, std::sync::atomic::Ordering::AcqRel);
+    log_stop(LogLevel::Info, format!("[stop_proxy] step 3: PROXY_PID={pid} — killing..."));
     if pid > 0 {
         #[cfg(target_os = "windows")]
         {
@@ -590,7 +673,9 @@ async fn stop_proxy(app: tauri::AppHandle, state: tauri::State<'_, ProxyState>) 
                 .creation_flags(0x08000000)
                 .output()
             {
-                log::warn!("taskkill (pid) failed: {e}");
+                log_stop(LogLevel::Warning, format!("[stop_proxy] taskkill (pid={pid}) failed: {e}"));
+            } else {
+                log_stop(LogLevel::Info, format!("[stop_proxy] taskkill /pid {pid} OK"));
             }
         }
         #[cfg(not(target_os = "windows"))]
@@ -599,45 +684,64 @@ async fn stop_proxy(app: tauri::AppHandle, state: tauri::State<'_, ProxyState>) 
                 .args(["-9", &pid.to_string()])
                 .output();
         }
+    } else {
+        log_stop(LogLevel::Warning, "[stop_proxy] PID was 0 — process already dead?".into());
     }
 
-    // Fallback: kill ANY sing-box process that might still be running.
-    // This handles stale PIDs where taskkill by PID might have failed.
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        if let Err(e) = std::process::Command::new("taskkill")
-            .args(["/im", "sing-box.exe", "/f"])
-            .creation_flags(0x08000000)
-            .output()
-        {
-            log::warn!("taskkill (/im) failed: {e}");
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = std::process::Command::new("pkill")
-            .args(["-9", "sing-box"])
-            .output();
-    }
-
-    log(
-        &app,
-        &logger,
-        LogLevel::Info,
-        LogSource::Process,
-        "sing-box process terminated".into(),
-    );
+    log_stop(LogLevel::Info, "[stop_proxy] sing-box killed".into());
 
     // Step 4: Best-effort manager cleanup.
     if let Ok(mgr) = state.manager.try_lock() {
         mgr.clear_pid();
+        log_stop(LogLevel::Info, "[stop_proxy] step 4: manager PID cleared".into());
+    } else {
+        log_stop(LogLevel::Warning, "[stop_proxy] step 4: manager lock busy — skip".into());
     }
 
-    // Step 6: Log and emit status.
-    log(&app, &logger, LogLevel::Success, LogSource::System, "Disconnected".into());
+    // Step 5: Log and emit status.
+    log_stop(LogLevel::Success, "[stop_proxy] emitting Disconnected event & returning Ok".into());
+    crate::proxy::remove_pid_file();
     emit_status(&app, ConnectionStatus::Disconnected);
 
+    Ok(())
+}
+
+/// Log from the frontend (stores.ts addLog → invoke('log_frontend'))
+/// so that [toggle] and [evt:connection-status] messages appear in the JSONL file
+/// alongside Rust backend logs, making debugging much easier.
+///
+/// NOTE: does NOT emit `log-entry` event — the frontend already called `addLog`
+/// for this message. Emitting would create a duplicate in the frontend store.
+#[tauri::command]
+async fn log_frontend(
+    app: tauri::AppHandle,
+    message: String,
+    level: String,
+    source: String,
+) -> Result<(), String> {
+    let logger = app.state::<StdMutex<Logger>>();
+    let log_level = match level.as_str() {
+        "error" => LogLevel::Error,
+        "warning" => LogLevel::Warning,
+        "success" => LogLevel::Success,
+        _ => LogLevel::Info,
+    };
+    let log_source = match source.as_str() {
+        "proxy" => LogSource::Proxy,
+        "process" => LogSource::Process,
+        "settings" => LogSource::Settings,
+        "subscription" => LogSource::Subscription,
+        "cache" => LogSource::Cache,
+        // "system" is default
+        _ => LogSource::System,
+    };
+    crate::logging::log_to_file(
+        &app,
+        &logger,
+        log_level,
+        log_source,
+        message,
+    );
     Ok(())
 }
 
@@ -772,6 +876,82 @@ fn filter_servers_by_settings(
         })
         .cloned()
         .collect()
+}
+
+/// Pick the best replacement server when the current one dies during health check.
+/// Priority: same country (exit flag) → fastest any country (respecting user filters).
+/// Uses `exit_flag` (resolved by batch test via the active proxy), matching backend filtering.
+/// This moves the selection logic from the frontend to the backend.
+#[tauri::command]
+async fn pick_replacement_server(
+    app: tauri::AppHandle,
+    profile_state: tauri::State<'_, ProfileState>,
+    settings_state: tauri::State<'_, Mutex<AppSettings>>,
+    current_server_id: String,
+) -> Result<Option<ServerProfile>, String> {
+    let logger = app.state::<StdMutex<Logger>>();
+    let settings = settings_state.lock().await;
+
+    let pm = profile_state.manager.lock().await;
+    let all_servers: Vec<ServerProfile> = pm.list().iter().flat_map(|p| p.servers.iter().cloned()).collect();
+    let total = all_servers.len();
+
+    // Apply user filters (country, protocol, CDN)
+    let mut candidates = filter_servers_by_settings(&all_servers, &settings);
+
+    // Exclude the dead server itself
+    candidates.retain(|s| s.id != current_server_id);
+
+    if candidates.is_empty() {
+        log(
+            &app,
+            &logger,
+            LogLevel::Warning,
+            LogSource::System,
+            format!("[reconnect] no replacement server available (filtered {total} → 0 candidates) — disconnecting"),
+        );
+        return Ok(None);
+    }
+
+    // Find current server's exit country for same-country preference
+    let current_country = all_servers.iter()
+        .find(|s| s.id == current_server_id)
+        .and_then(|s| s.exit_flag.as_deref());
+
+    // Prefer same country (exit flag), fastest ping
+    if let Some(country) = current_country {
+        if let Some(best) = candidates.iter()
+            .filter(|s| s.exit_flag.as_deref() == Some(country))
+            .min_by_key(|s| s.ping_ms.unwrap_or(u64::MAX))
+        {
+            log(
+                &app,
+                &logger,
+                LogLevel::Info,
+                LogSource::System,
+                format!("[reconnect] picked {}/{} (same country {country}, ping {}) from {total} servers",
+                    best.display_name(), best.id, best.ping_ms.unwrap_or(0)),
+            );
+            return Ok(Some(best.clone()));
+        }
+    }
+
+    // Fallback: fastest any country
+    if let Some(best) = candidates.iter()
+        .min_by_key(|s| s.ping_ms.unwrap_or(u64::MAX))
+    {
+        log(
+            &app,
+            &logger,
+            LogLevel::Info,
+            LogSource::System,
+            format!("[reconnect] picked {}/{} (any country, ping {}) from {total} servers",
+                best.display_name(), best.id, best.ping_ms.unwrap_or(0)),
+        );
+        return Ok(Some(best.clone()));
+    }
+
+    Ok(None)
 }
 
 #[tauri::command]
@@ -1034,6 +1214,10 @@ pub fn run() {
             let singbox_path = data_dir.join("binaries").join("sing-box.exe");
             crate::proxy::geoip::set_singbox_bin_path(singbox_path);
 
+            // PID file for orphan cleanup
+            crate::proxy::set_pid_file_path(&data_dir);
+            crate::proxy::cleanup_stale_pid(app.handle());
+
             let proxy_manager = ProxyManager::new(data_dir.clone());
             let proxy_state = ProxyState {
                 manager: Arc::new(Mutex::new(proxy_manager)),
@@ -1116,6 +1300,13 @@ pub fn run() {
                             let _ = app.emit("tray-toggle-proxy", ());
                         }
                         "quit" => {
+                            // Cancel background tasks so AppHandle clones drop
+                            // and WebView2 Manager can deallocate properly.
+                            if let Some(cancel) = app.try_state::<std::sync::Mutex<CancellationToken>>() {
+                                if let Ok(cancel) = cancel.lock() {
+                                    cancel.cancel();
+                                }
+                            }
                             app.exit(0);
                         }
                         _ => {}
@@ -1141,6 +1332,25 @@ pub fn run() {
                 let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        // Kill our own proxy PID only — NOT all sing-box.exe
+                        // by name, because other applications may use sing-box
+                        // and the batcher runs its own sing-box instances.
+                        let pid = crate::proxy::PROXY_PID.load(std::sync::atomic::Ordering::Acquire);
+                        if pid > 0 {
+                            log::info!("[cleanup] killing our proxy (PID {pid})");
+                            #[cfg(target_os = "windows")]
+                            let _ = std::process::Command::new("taskkill")
+                                .args(["/pid", &pid.to_string(), "/f"])
+                                .output();
+                            #[cfg(not(target_os = "windows"))]
+                            let _ = std::process::Command::new("kill")
+                                .args(["-9", &pid.to_string()])
+                                .output();
+                            log::info!("[cleanup] done");
+                        } else {
+                            log::info!("[cleanup] no proxy PID to kill");
+                        }
+
                         let minimize = if let Some(state) =
                             app_handle.try_state::<Mutex<crate::settings::AppSettings>>()
                         {
@@ -1154,6 +1364,16 @@ pub fn run() {
                         if minimize {
                             let _ = app_handle.get_webview_window("main").map(|w| w.hide());
                             api.prevent_close();
+                        } else {
+                            // User is closing the window — cancel background tasks so
+                            // AppHandle clones drop and WebView2 Manager can deallocate.
+                            if let Some(cancel) =
+                                app_handle.try_state::<std::sync::Mutex<CancellationToken>>()
+                            {
+                                if let Ok(cancel) = cancel.lock() {
+                                    cancel.cancel();
+                                }
+                            }
                         }
                     }
                 });
@@ -1169,6 +1389,7 @@ pub fn run() {
             start_proxy,
             stop_proxy,
             get_status,
+            log_frontend,
             add_subscription,
             remove_subscription,
             get_subscriptions,
@@ -1190,6 +1411,7 @@ pub fn run() {
             initialize_app,
             download_ipinfo_db,
             get_geoip_status,
+            pick_replacement_server,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1290,6 +1512,46 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
     let stats_port = crate::proxy::CLASH_API_PORT.load(Ordering::Relaxed);
     if stats_port == 0 {
         return Err("Proxy not connected".into());
+    }
+
+    let logger = app.state::<StdMutex<Logger>>();
+
+    // ── Early CDN check ────────────────────────────────────────────────
+    // If the active server is behind CDN, exit IP is meaningless (dynamic
+    // outlet IP per request). Log a [BUG] warning so the JSONL file has a
+    // record of this — previously this check was only on the frontend.
+    let active_id = crate::proxy::ACTIVE_SERVER_ID
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Some(ref active_id) = active_id {
+        if let Some(profile_state) = app.try_state::<ProfileState>() {
+            let pm = profile_state.manager.lock().await;
+            let is_cdn = pm.list().iter().any(|p| {
+                p.servers
+                    .iter()
+                    .any(|s| s.id == *active_id && s.behind_cdn)
+            });
+            if is_cdn {
+                log(
+                    &app,
+                    &logger,
+                    LogLevel::Warning,
+                    LogSource::System,
+                    format!(
+                        "[BUG] outlet_ip called for CDN server {} — outlet IP is meaningless for CDN",
+                        active_id,
+                    ),
+                );
+                return Ok(ExitIpInfo {
+                    server: String::new(),
+                    flag: String::new(),
+                    country_name: String::new(),
+                    city_name: String::new(),
+                    proxy_tag: String::new(),
+                });
+            }
+        }
     }
 
     // Always route through proxy in proxy modes
@@ -1423,7 +1685,7 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
             }
             if saved {
                 if let Err(e) = pm.save() {
-                    log::warn!("save failed: {e}");
+                    log(&app, &logger, LogLevel::Warning, LogSource::Settings, format!("save failed: {e}"));
                 }
             }
         }
