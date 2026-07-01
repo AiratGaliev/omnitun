@@ -25,6 +25,8 @@ use tokio_util::sync::CancellationToken;
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(windows)]
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -287,45 +289,84 @@ async fn process_batch(
     batcher_log(app_handle, crate::logging::LogLevel::Info, "[Batcher] starting sing-box...".into());
 
     #[cfg(windows)]
-    let mut child = match std::process::Command::new(&binary_path)
-        .args(["run", "-c"])
-        .arg(&config_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] failed to start sing-box: {e}"));
-            for req in batch {
-                if let Err(e) = req.reply.send(Err(format!("sing-box startup error: {e}"))) {
-                    batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] reply send failed: {:?}", e));
+    let (mut child, _job_guard) = {
+        let mut cmd = std::process::Command::new(&binary_path);
+        cmd.args(["run", "-c"])
+            .arg(&config_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
+
+        let child_proc = match cmd.spawn() {
+            Ok(c) => c,
+            Err(_) => {
+                // Fallback: breakaway may be blocked (e.g. terminal job)
+                match std::process::Command::new(&binary_path)
+                    .args(["run", "-c"])
+                    .arg(&config_path)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::piped())
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] failed to start sing-box: {e}"));
+                        for req in batch {
+                            if let Err(e) = req.reply.send(Err(format!("sing-box startup error: {e}"))) {
+                                batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] reply send failed: {:?}", e));
+                            }
+                        }
+                        if let Err(e) = std::fs::remove_dir_all(&test_dir) {
+                            batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to remove test dir: {e}"));
+                        }
+                        return;
+                    }
                 }
             }
-            if let Err(e) = std::fs::remove_dir_all(&test_dir) {
-                batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to remove test dir: {e}"));
+        };
+
+        // Assign to kill-on-close JobObject for orphan protection
+        use std::os::windows::io::AsRawHandle;
+        let mut job_guard = None;
+        if let Some(job) = crate::proxy::process::orphan_guard::create(app_handle) {
+            if crate::proxy::process::orphan_guard::assign(&job, child_proc.as_raw_handle()) {
+                job_guard = Some(job);
             }
-            return;
         }
+        (child_proc, job_guard)
     };
 
     #[cfg(not(windows))]
-    let mut child = match std::process::Command::new(&binary_path)
-        .args(["run", "-c"])
-        .arg(&config_path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] failed to start sing-box: {e}"));
-            for req in batch {
-                let _ = req.reply.send(Err(format!("sing-box startup error: {e}")));
+    let mut child = {
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new(&binary_path);
+        cmd.args(["run", "-c"])
+            .arg(&config_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .process_group(0);
+
+        // Linux: PDEATHSIG so the kernel kills sing-box on parent exit
+        #[cfg(target_os = "linux")]
+        unsafe {
+            cmd.pre_exec(|| {
+                extern "C" { fn prctl(option: i32, arg2: u64, ...) -> i32; }
+                prctl(1, 9); // PR_SET_PDEATHSIG=1, SIGKILL=9
+                Ok(())
+            });
+        }
+
+        match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] failed to start sing-box: {e}"));
+                for req in batch {
+                    let _ = req.reply.send(Err(format!("sing-box startup error: {e}")));
+                }
+                let _ = std::fs::remove_dir_all(&test_dir);
+                return;
             }
-            let _ = std::fs::remove_dir_all(&test_dir);
-            return;
         }
     };
 
@@ -445,6 +486,9 @@ async fn process_batch(
 
     // 6. Stop sing-box
     batcher_log(app_handle, crate::logging::LogLevel::Info, format!("[Batcher] stopping sing-box (PID {pid})"));
+    // Drop JobObject first — triggers KILL_ON_JOB_CLOSE (OS kills process immediately)
+    #[cfg(windows)]
+    drop(_job_guard);
     kill_singbox(pid);
 
     // 7. Clean up — preserve config+log on total failure for debugging

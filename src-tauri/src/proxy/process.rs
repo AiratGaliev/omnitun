@@ -6,6 +6,13 @@
 // PID file: stores the main proxy's PID in `<data_dir>/singbox.pid` so that
 // stale processes from a previous (killed) session are cleaned up on next
 // startup. This is a fallback when Windows Job Objects aren't available.
+//
+// ORPHAN GUARD:
+//   Windows — RAII JobObject with KILL_ON_JOB_CLOSE. When the JobObject is
+//   dropped (either via stop() or on crash/process exit), the OS kernel
+//   immediately terminates sing-box. No handles leaked.
+//   Linux   — prctl(PR_SET_PDEATHSIG, SIGKILL) inside pre_exec.
+//   macOS   — process group kill via process_group(0).
 
 use crate::proxy::ProxyError;
 use std::path::{Path, PathBuf};
@@ -15,8 +22,7 @@ use std::time::Duration;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(windows))]
 use std::os::unix::process::CommandExt;
 
 use tauri::Manager;
@@ -106,8 +112,11 @@ pub fn cleanup_stale_pid(app: &tauri::AppHandle) {
     let _ = std::fs::remove_file(&path);
 }
 
-/// On Windows: create a job object with KILL_ON_JOB_CLOSE so sing-box is
-/// terminated when our process exits (even via IDE stop, Task Manager, or crash).
+// ── Windows orphan guard ─────────────────────────────────────────────
+// RAII JobObject: when dropped (normal stop or process crash), calls
+// CloseHandle on the job, which triggers KILL_ON_JOB_CLOSE and the OS
+// kernel immediately terminates all assigned processes (sing-box).
+
 #[cfg(windows)]
 pub(crate) mod orphan_guard {
     use std::os::windows::io::RawHandle;
@@ -118,34 +127,60 @@ pub(crate) mod orphan_guard {
     const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x00002000;
 
     #[repr(C)]
+    #[derive(Default)]
     struct JOBOBJECT_BASIC_LIMIT_INFORMATION {
         per_process_user_time_limit: i64,
         per_job_user_time_limit: i64,
         limit_flags: u32,
-        min_working_set_size: usize,
-        max_working_set_size: usize,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
         active_process_limit: u32,
         affinity: usize,
-        child_process_count: u32,
-        child_process_limit: u32,
+        priority_class: u32,
+        scheduling_class: u32,
     }
 
     #[repr(C)]
-    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
-        basic_limit_information: JOBOBJECT_BASIC_LIMIT_INFORMATION,
-        io_info: [u8; 48], // IO_COUNTERS (6 × ULONGLONG)
+    #[derive(Default)]
+    struct IO_COUNTERS {
+        read_operation_count: u64,
+        write_operation_count: u64,
+        other_operation_count: u64,
+        read_transfer_count: u64,
+        write_transfer_count: u64,
+        other_transfer_count: u64,
     }
 
-    // Compile-time assertion: JOBOBJECT_EXTENDED_LIMIT_INFORMATION must be exactly
-    // sizeof(BASIC_LIMIT) + sizeof(IO_COUNTERS) = 64 + 48 = 112 bytes on x64.
+    #[repr(C)]
+    #[derive(Default)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION {
+        basic_limit_information: JOBOBJECT_BASIC_LIMIT_INFORMATION,
+        io_info: IO_COUNTERS,
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
 
-    const _: [(); 112] = [(); std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()];
-    const _: [(); 64] = [(); std::mem::size_of::<JOBOBJECT_BASIC_LIMIT_INFORMATION>()];
+    /// RAII wrapper: when dropped, calls CloseHandle which triggers
+    /// KILL_ON_JOB_CLOSE and the OS terminates all processes in the job.
+    pub struct JobObject(pub RawHandle);
+    // RawHandle = *mut c_void which is !Send + !Sync.
+    // Safe because CloseHandle is thread-safe (just decrements kernel refcount).
+    unsafe impl Send for JobObject {}
+    unsafe impl Sync for JobObject {}
 
-    /// Create a job object configured to kill all child processes when the
-    /// job handle is closed (which happens on process exit). Returns the
-    /// raw handle, or None on failure.
-    pub(crate) fn create(app: &tauri::AppHandle) -> Option<RawHandle> {
+    impl Drop for JobObject {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0 as HANDLE);
+            }
+        }
+    }
+
+    /// Create a job object with KILL_ON_JOB_CLOSE.
+    /// Returns None on failure (fallback to taskkill/kill).
+    pub(crate) fn create(app: &tauri::AppHandle) -> Option<JobObject> {
         unsafe {
             let log_it = |msg: &str| {
                 if let Some(logger) = app.try_state::<std::sync::Mutex<crate::logging::Logger>>() {
@@ -158,164 +193,67 @@ pub(crate) mod orphan_guard {
                 }
             };
 
-            // Try 1: unnamed job object (most common, may be blocked by security software)
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if !job.is_null() {
-                return configure_job(job, &log_it);
+            if job.is_null() {
+                log_it(&format!("[orphan_guard] CreateJobObjectW failed: err={}", GetLastError()));
+                return None;
             }
-            log_it(&format!("[orphan_guard] unnamed CreateJobObjectW failed: err={}", GetLastError()));
 
-            // Try 2: named job object (some security software blocks unnamed only)
-            let name: Vec<u16> = format!("OmniTun-{}", std::process::id())
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-            let job2 = CreateJobObjectW(std::ptr::null(), name.as_ptr());
-            if !job2.is_null() {
-                return configure_job(job2, &log_it);
-            }
-            log_it(&format!("[orphan_guard] named CreateJobObjectW failed: err={}", GetLastError()));
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.basic_limit_information.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
 
-            // Try 3: with minimal SECURITY_ATTRIBUTES
-            #[repr(C)]
-            struct SECURITY_ATTRIBUTES {
-                n_length: u32,
-                lp_security_descriptor: *mut std::ffi::c_void,
-                b_inherit_handle: i32,
-            }
-            let mut sa = SECURITY_ATTRIBUTES {
-                n_length: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-                lp_security_descriptor: std::ptr::null_mut(),
-                b_inherit_handle: 0,
-            };
-            let job3 = CreateJobObjectW(&mut sa as *mut _ as *mut std::ffi::c_void, std::ptr::null());
-            if !job3.is_null() {
-                return configure_job(job3, &log_it);
-            }
-            log_it(&format!("[orphan_guard] CreateJobObjectW with SA failed: err={}", GetLastError()));
-
-            None
-        }
-    }
-
-    /// Apply KILL_ON_JOB_CLOSE to an existing job handle.
-    /// log_it is a closure that writes to the JSONL logger.
-    unsafe fn configure_job<F: Fn(&str)>(job: HANDLE, log_it: &F) -> Option<RawHandle> {
-        // Step 0: Query the actual required buffer size from the kernel.
-        // NtQueryInformationJobObject returns STATUS_INFO_LENGTH_MISMATCH
-        // when the buffer is too small, but it also tells us what size it expects
-        // (in the return info, or we can infer from successful calls).
-        let mut buf = [0u8; 256];
-        let mut ret_len: u32 = 0;
-
-        // Try with a reasonably large buffer to see if we can get past the
-        // size check. If 64 bytes is too SMALL, try 256. If 256 works, we'll
-        // know the required size and can use it for the SET call.
-        #[repr(C)]
-        struct BASIC_LIMITS {
-            per_process_user_time_limit: i64,
-            per_job_user_time_limit: i64,
-            limit_flags: u32,
-            min_working_set_size: usize,
-            max_working_set_size: usize,
-            active_process_limit: u32,
-            affinity: usize,
-            child_process_count: u32,
-            child_process_limit: u32,
-        }
-
-        if NtQueryInformationJobObject(
-            job,
-            4, // JobObjectBasicLimitInformation
-            buf.as_mut_ptr() as *mut u8,
-            buf.len() as u32,
-            &mut ret_len,
-        ) == 0
-        {
-            // Success — we now know the actual buffer size required.
-            let actual_size = ret_len as usize;
-            log_it(&format!("[orphan_guard] Query returned size={actual_size}"));
-
-            // Now SET with the correct size.
-            let mut info = BASIC_LIMITS {
-                per_process_user_time_limit: 0,
-                per_job_user_time_limit: 0,
-                limit_flags: JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-                min_working_set_size: 0,
-                max_working_set_size: 0,
-                active_process_limit: 0,
-                affinity: 0,
-                child_process_count: 0,
-                child_process_limit: 0,
-            };
-            if SetInformationJobObject(
+            let res = SetInformationJobObject(
                 job,
-                4,
-                &mut info as *mut _ as *mut u8,
-                actual_size as u32,
-            ) != 0
-            {
-                return Some(job as RawHandle);
-            }
-            let err_set = GetLastError();
-            log_it(&format!("[orphan_guard] SetInformationJobObject (size={actual_size}) failed: err={err_set}"));
-        } else {
-            let status = RtlNtStatusToDosError(
-                NtQueryInformationJobObject(
-                    job,
-                    4,
-                    buf.as_mut_ptr() as *mut u8,
-                    0,   // zero size — force STATUS_INFO_LENGTH_MISMATCH
-                    &mut ret_len,
-                )
+                9, // JobObjectExtendedLimitInformation
+                &mut info as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             );
-            log_it(&format!("[orphan_guard] NtQueryInformationJobObject failed: status={}, ret_len={ret_len}", status));
+
+            if res == 0 {
+                log_it(&format!(
+                    "[orphan_guard] SetInformationJobObject(KILL_ON_JOB_CLOSE) failed: err={}",
+                    GetLastError()
+                ));
+                CloseHandle(job);
+                return None;
+            }
+
+            Some(JobObject(job as RawHandle))
         }
-
-        // All attempts failed — close the job handle and return None.
-        CloseHandle(job);
-        None
     }
 
-    extern "system" {
-        fn NtQueryInformationJobObject(
-            job: HANDLE,
-            info_class: i32,
-            info: *mut u8,
-            info_len: u32,
-            ret_len: *mut u32,
-        ) -> i32;
-        fn RtlNtStatusToDosError(status: i32) -> u32;
-    }
-
-    /// Assign a process handle to a job object.
-    pub(crate) fn assign(job: RawHandle, process_handle: RawHandle) -> bool {
-        unsafe { AssignProcessToJobObject(job as HANDLE, process_handle as HANDLE) != 0 }
+    /// Assign a process to the job object. Returns true on success.
+    pub(crate) fn assign(job: &JobObject, process_handle: RawHandle) -> bool {
+        unsafe { AssignProcessToJobObject(job.0 as HANDLE, process_handle as HANDLE) != 0 }
     }
 
     extern "system" {
         fn CreateJobObjectW(
-            security: *const std::ffi::c_void,
-            name: *const u16,
+            lpJobAttributes: *const std::ffi::c_void,
+            lpName: *const u16,
         ) -> HANDLE;
-        fn CloseHandle(handle: HANDLE) -> i32;
+        fn CloseHandle(hObject: HANDLE) -> i32;
         fn GetLastError() -> u32;
         fn SetInformationJobObject(
-            job: HANDLE,
-            info_type: i32,
-            info: *mut u8,
-            info_len: u32,
-        ) -> u32;
+            hJob: HANDLE,
+            JobObjectInformationClass: i32,
+            lpJobObjectInformation: *mut std::ffi::c_void,
+            cbJobObjectInformationLength: u32,
+        ) -> i32;
         fn AssignProcessToJobObject(
-            job: HANDLE,
-            process: HANDLE,
-        ) -> u32;
+            hJob: HANDLE,
+            hProcess: HANDLE,
+        ) -> i32;
     }
 }
+
+// ── ProcessManager ───────────────────────────────────────────────────
 
 pub struct ProcessManager {
     binary_path: PathBuf,
     pid: Arc<Mutex<Option<u32>>>,
+    #[cfg(windows)]
+    job: Arc<Mutex<Option<orphan_guard::JobObject>>>,
 }
 
 impl ProcessManager {
@@ -323,6 +261,8 @@ impl ProcessManager {
         Self {
             binary_path,
             pid: Arc::new(Mutex::new(None)),
+            #[cfg(windows)]
+            job: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -366,6 +306,15 @@ impl ProcessManager {
 
     pub async fn stop(&self) -> Result<(), ProxyError> {
         remove_pid_file();
+
+        // Windows: drop the JobObject first — this calls CloseHandle on the
+        // job handle, which triggers KILL_ON_JOB_CLOSE and the OS kernel
+        // immediately terminates sing-box. No need to wait.
+        #[cfg(windows)]
+        {
+            let _ = self.job.lock().unwrap_or_else(|e| e.into_inner()).take();
+        }
+
         let pid = {
             let mut guard = self.pid.lock().unwrap_or_else(|e| e.into_inner());
             guard.take()
@@ -377,20 +326,15 @@ impl ProcessManager {
 
         let p = pid.unwrap();
 
-        // Windows: fire-and-forget kill by PID only (no /im — avoids nuking batch test instances).
-        // Then poll for process exit with timeout so callers (e.g. reconnect) can safely
+        // Windows: fire-and-forget kill by PID as fallback (the JobObject
+        // drop above already killed it, but this covers the case where
+        // the job object wasn't created or assign failed).
+        // Then poll for process exit with timeout so callers can safely
         // start a new instance without port/config conflicts.
-        #[cfg(target_os = "windows")]
+        #[cfg(windows)]
         {
-            // Fire both non-elevated and elevated kill
             let _ = std::process::Command::new("taskkill")
                 .args(["/pid", &p.to_string(), "/f"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output();
-
-            let _ = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command",
-                    &format!("Start-Process 'taskkill' -Verb RunAs -WindowStyle Hidden -ArgumentList '/pid','{}','/f' | Out-Null", p)])
                 .creation_flags(CREATE_NO_WINDOW)
                 .output();
 
@@ -410,27 +354,26 @@ impl ProcessManager {
         }
 
         // Unix: SIGTERM → wait → SIGKILL
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(windows))]
         {
-            let pid = pid.unwrap();
             let _ = std::process::Command::new("kill")
-                .arg(pid.to_string())
+                .arg(p.to_string())
                 .output();
             tokio::time::sleep(Duration::from_secs(3)).await;
 
-            if !crate::is_process_alive(pid) {
+            if !crate::is_process_alive(p) {
                 return Ok(());
             }
 
             std::process::Command::new("kill")
-                .args(["-9", &pid.to_string()])
+                .args(["-9", &p.to_string()])
                 .output()
-                .map_err(|e| ProxyError::Process(format!("Failed to kill process {pid}: {e}")))?;
+                .map_err(|e| ProxyError::Process(format!("Failed to kill process {p}: {e}")))?;
 
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if crate::is_process_alive(pid) {
+            if crate::is_process_alive(p) {
                 return Err(ProxyError::Process(format!(
-                    "Could not kill sing-box (PID {pid}) even with SIGKILL"
+                    "Could not kill sing-box (PID {p}) even with SIGKILL"
                 )));
             }
 
@@ -444,63 +387,52 @@ impl ProcessManager {
             .to_str()
             .ok_or_else(|| ProxyError::Process("Invalid binary path".into()))?;
 
-        #[cfg(target_os = "windows")]
+        #[cfg(windows)]
         {
-            let child = std::process::Command::new(binary)
+            const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+
+            // First try: spawn with BREAKAWAY so the process leaves the
+            // parent job (if any — e.g. running under a terminal's job).
+            // This lets us assign our own job object with KILL_ON_JOB_CLOSE.
+            let mut cmd_breakaway = std::process::Command::new(binary);
+            cmd_breakaway
                 .args(["run", "-c", config_path])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
-                .creation_flags(CREATE_NO_WINDOW | 0x02000000) // + CREATE_BREAKAWAY_FROM_JOB so we can assign our own job
-                .spawn()
-                .map_err(|e| ProxyError::Process(format!("Failed to start sing-box: {e}")))?;
+                .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
 
-            // ── Orphan guard: assign to kill-on-close Job Object ──────────────
-            // When our process exits (even via IDE stop / Task Manager / crash),
-            // Windows closes all open handles including the job handle, which
-            // triggers KILL_ON_JOB_CLOSE and terminates sing-box automatically.
+            let child = match cmd_breakaway.spawn() {
+                Ok(c) => c,
+                Err(_) => {
+                    // Fallback: some systems/environments block breakaway.
+                    // Spawn without it — AssignProcessToJobObject may still
+                    // succeed, and if not, we fall back to taskkill on stop.
+                    std::process::Command::new(binary)
+                        .args(["run", "-c", config_path])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .spawn()
+                        .map_err(|e| ProxyError::Process(format!("Failed to start sing-box: {e}")))?
+                }
+            };
+
+            // Assign the child process to a kill-on-close job object.
             use std::os::windows::io::AsRawHandle;
+            let process_handle = child.as_raw_handle();
             if let Some(job) = orphan_guard::create(app) {
-                let process_handle = child.as_raw_handle();
-                if orphan_guard::assign(job, process_handle) {
-                    if let Some(logger) = app.try_state::<std::sync::Mutex<crate::logging::Logger>>() {
-                        crate::logging::log(
-                            app, &logger,
-                            crate::logging::LogLevel::Info,
-                            crate::logging::LogSource::Process,
-                            format!("[orphan_guard] Job created and sing-box assigned (PID {})", child.id()),
-                        );
-                    }
-                } else {
-                    if let Some(logger) = app.try_state::<std::sync::Mutex<crate::logging::Logger>>() {
-                        crate::logging::log(
-                            app, &logger,
-                            crate::logging::LogLevel::Warning,
-                            crate::logging::LogSource::Process,
-                            "[orphan_guard] AssignProcessToJobObject FAILED — process may be in a nested job".into(),
-                        );
-                    }
+                if orphan_guard::assign(&job, process_handle) {
+                    *self.job.lock().unwrap_or_else(|e| e.into_inner()) = Some(job);
                 }
-                // Handle is deliberately NOT closed — it stays alive in the
-                // kernel's handle table for our process. KILL_ON_JOB_CLOSE
-                // triggers when our process exits and the kernel closes all
-                // remaining handles, terminating sing-box automatically.
-                // RawHandle = *mut c_void (Copy, no Drop) — letting it go out
-                // of scope is fine; the kernel handle persists regardless.
-            } else {
-                if let Some(logger) = app.try_state::<std::sync::Mutex<crate::logging::Logger>>() {
-                    crate::logging::log(
-                        app, &logger,
-                        crate::logging::LogLevel::Warning,
-                        crate::logging::LogSource::Process,
-                        "[orphan_guard] job object created but KILL_ON_JOB_CLOSE failed — no orphan protection".into(),
-                    );
-                }
+                // If assign fails, the JobObject is dropped immediately,
+                // which calls CloseHandle but the job has no processes
+                // assigned, so nothing happens. We fall back to taskkill.
             }
 
             Ok(child.id())
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(not(windows))]
         {
             let mut cmd = std::process::Command::new(binary);
             cmd.args(["run", "-c", config_path])
@@ -560,7 +492,6 @@ mod tests {
     #[test]
     fn test_new_stores_binary_path() {
         let mgr = ProcessManager::new(PathBuf::from("/custom/path/sing-box"));
-        // binary_path is not pub, but we can verify pid starts None
         assert!(mgr.pid().is_none());
     }
 
@@ -580,33 +511,28 @@ mod tests {
     #[test]
     fn test_clear_pid_atomic_take() {
         let mgr = ProcessManager::new(PathBuf::from("sing-box"));
-        // Simulate setting a PID via the internal Arc<Mutex<Option<u32>>>
         {
             let mut guard = mgr.pid.lock().unwrap_or_else(|e| e.into_inner());
             *guard = Some(12345);
         }
         assert_eq!(mgr.pid(), Some(12345));
 
-        // clear_pid should take it
         let taken = mgr.clear_pid();
         assert_eq!(taken, Some(12345));
         assert!(mgr.pid().is_none(), "PID should be None after clear_pid");
 
-        // Second clear_pid returns None
         assert!(mgr.clear_pid().is_none());
     }
 
     #[tokio::test]
     async fn test_stop_clears_pid() {
         let mgr = ProcessManager::new(PathBuf::from("sing-box"));
-        // Set a fake PID (won't actually kill anything since it's 999999999)
         {
             let mut guard = mgr.pid.lock().unwrap_or_else(|e| e.into_inner());
             *guard = Some(999999999);
         }
         assert!(mgr.is_running());
 
-        // stop should take the PID and try to kill (won't find process, but shouldn't crash)
         let result = mgr.stop().await;
         assert!(result.is_ok());
         assert!(!mgr.is_running());
