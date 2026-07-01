@@ -234,21 +234,38 @@ async fn start_proxy(
                                                     .all(|c| c.is_ascii_digit() || c == '.')
                                             {
                                                 got_response = true;
-                                                log(
-                                                    &app,
-                                                    &logger,
-                                                    LogLevel::Info,
-                                                    LogSource::Proxy,
-                                                    format!("Proxy verified (exit IP: {ip})"),
-                                                );
-                                                // Emit event so the frontend can update its UI without polling
-                                                let _ = app.emit("exit-ip-changed", ExitIpInfo {
-                                                    server: ip.clone(),
-                                                    flag: String::new(),
-                                                    country_name: String::new(),
-                                                    city_name: String::new(),
-                                                    proxy_tag: String::new(),
-                                                });
+
+                                                if crate::proxy::geoip::is_cdn_entry_ip(&ip) {
+                                                    log(
+                                                        &app,
+                                                        &logger,
+                                                        LogLevel::Warning,
+                                                        LogSource::Proxy,
+                                                        format!("[BUG] start_proxy: Server {} was checked for outlet IP ({}), but it belongs to a CDN!", profile.id, ip)
+                                                    );
+                                                    let _ = app.emit("exit-ip-changed", ExitIpInfo {
+                                                        server: String::new(),
+                                                        flag: String::new(),
+                                                        country_name: String::new(),
+                                                        city_name: String::new(),
+                                                        proxy_tag: String::new(),
+                                                    });
+                                                } else {
+                                                    log(
+                                                        &app,
+                                                        &logger,
+                                                        LogLevel::Info,
+                                                        LogSource::Proxy,
+                                                        format!("Proxy verified (exit IP: {ip})"),
+                                                    );
+                                                    let _ = app.emit("exit-ip-changed", ExitIpInfo {
+                                                        server: ip.clone(),
+                                                        flag: String::new(),
+                                                        country_name: String::new(),
+                                                        city_name: String::new(),
+                                                        proxy_tag: String::new(),
+                                                    });
+                                                }
                                                 break;
                                             }
                                         }
@@ -291,9 +308,15 @@ async fn start_proxy(
                                                                 if !ip.is_empty()
                                                                     && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
                                                                 {
-                                                                    log(&app, &logger, LogLevel::Info, LogSource::Proxy,
-                                                                        format!("Proxy verified (exit IP: {ip}) via {tag}"),
-                                                                    );
+                                                                    if crate::proxy::geoip::is_cdn_entry_ip(&ip) {
+                                                                        log(&app, &logger, LogLevel::Warning, LogSource::Proxy,
+                                                                            format!("[BUG] start_proxy (fallback): Server {} was checked for outlet IP ({}), but it belongs to a CDN!", all_servers[idx].id, ip)
+                                                                        );
+                                                                    } else {
+                                                                        log(&app, &logger, LogLevel::Info, LogSource::Proxy,
+                                                                            format!("Proxy verified (exit IP: {ip}) via {tag}"),
+                                                                        );
+                                                                    }
                                                                     switched = true;
                                                                     break;
                                                                 }
@@ -1608,6 +1631,16 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
 
     if ip.is_empty() {
         return Err("Could not determine external IP".into());
+    }
+
+    if crate::proxy::geoip::is_cdn_entry_ip(&ip) {
+        log(
+            &app,
+            &logger,
+            LogLevel::Warning,
+            LogSource::System,
+            format!("[BUG] outlet_ip: Fetched outlet IP {} belongs to a CDN, but active server was not marked as CDN!", ip)
+        );
     }
 
     let mut proxy_tag = String::new();

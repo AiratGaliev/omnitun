@@ -66,6 +66,7 @@ pub struct ServerTestResult {
     pub exit_flag: Option<String>,
     pub exit_country: Option<String>,
     pub exit_city: Option<String>,
+    pub diagnostic_warning: Option<String>,
 }
 
 /// Background worker entry point. Spawned from `ServerCache::new()`.
@@ -451,6 +452,11 @@ async fn process_batch(
     while let Some(res) = set.join_next().await {
         match res {
             Ok((req, Ok(result))) => {
+                // Log any [BUG] diagnostics caught during the test
+                if let Some(warning) = &result.diagnostic_warning {
+                    batcher_log(app_handle, crate::logging::LogLevel::Warning, warning.clone());
+                }
+
                 let positive = PositiveResult {
                     server_id: result.server_id.clone(),
                     ping_ms: result.ping_ms,
@@ -590,14 +596,31 @@ async fn test_single_server(
         return Err(last_err);
     }
 
-    // 2. Outlet IP — multiple fallback services, concurrent fetch.
-    let outlet_ip = fetch_outlet_ip_through_port(&client).await;
+    // 2. Outlet IP + CDN bug detection.
+    let mut behind_cdn = server.behind_cdn;
+    let mut outlet_ip = None;
+    let mut diagnostic_warning = None;
 
-    // 3. CDN detection is ENTRY IP only (done in TCP ping phase).
-    //    Outlet IP CDN detection is incorrect — traffic CDN ≠ server behind CDN.
-    let behind_cdn = server.behind_cdn;
+    if !behind_cdn {
+        // Fetch outlet IP only if server is NOT marked as CDN
+        let fetched = fetch_outlet_ip_through_port(&client).await;
 
-    // 4. Exit GeoIP
+        if let Some(ref ip) = fetched {
+            if crate::proxy::geoip::is_cdn_entry_ip(ip) {
+                // BUG DETECTED: server wasn't marked CDN, but its outlet IP belongs to a CDN!
+                behind_cdn = true;
+                diagnostic_warning = Some(format!(
+                    "[BUG] Server {} was checked for outlet IP ({}), but it belongs to a CDN! Marked as CDN and cleared outlet IP.",
+                    server.id, ip
+                ));
+                // outlet_ip stays None — CDN servers have no meaningful exit IP
+            } else {
+                outlet_ip = Some(ip.clone());
+            }
+        }
+    }
+
+    // 3. Exit GeoIP
     let exit_geoip = if let Some(ref ip) = outlet_ip {
         crate::proxy::geoip::resolve_hostname(ip).await
     } else {
@@ -614,6 +637,7 @@ async fn test_single_server(
         exit_city: exit_geoip.as_ref().and_then(|g| {
             if g.city.is_empty() { None } else { Some(g.city.clone()) }
         }),
+        diagnostic_warning,
     })
 }
 
@@ -826,6 +850,7 @@ mod tests {
             exit_flag: Some("US".into()),
             exit_country: Some("United States".into()),
             exit_city: Some("New York".into()),
+            diagnostic_warning: None,
         };
 
         assert_eq!(result.server_id, "test-1");
@@ -843,6 +868,7 @@ mod tests {
             exit_flag: None,
             exit_country: None,
             exit_city: None,
+            diagnostic_warning: None,
         };
         assert!(cdn_result.behind_cdn);
         assert!(cdn_result.outlet_ip.is_none());
@@ -859,6 +885,7 @@ mod tests {
             exit_flag: None,
             exit_country: Some("Germany".into()),
             exit_city: None,
+            diagnostic_warning: None,
         };
         assert!(r.exit_city.is_none());
     }

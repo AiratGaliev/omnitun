@@ -970,25 +970,6 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             );
         }
     } else if main_proxy_running && !alive.is_empty() {
-        // CDN detection via active proxy (main proxy running, can't start batch test)
-        if let Some(settings) = app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>() {
-            let guard = settings.lock().await;
-            if guard.proxy_port > 0 {
-                if let Some(outlet) = fetch_outlet_ip(guard.proxy_port).await {
-                    let is_cdn = crate::proxy::geoip::is_cdn_entry_ip(&outlet);
-                    if is_cdn {
-                        log(
-                            app,
-                            &logger,
-                            LogLevel::Info,
-                            LogSource::Subscription,
-                            format!("[CDN] outlet IP {} is behind CDN (via active proxy)", outlet),
-                        );
-                    }
-                }
-            }
-        }
-    } else if !alive.is_empty() && main_proxy_running {
         log(
             app,
             &logger,
@@ -1006,66 +987,18 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
         );
     }
 
-    // Fallback: sort alive servers by TCP ping
     alive.sort_by(|a, b| {
         a.ping_ms
             .unwrap_or(u64::MAX)
             .cmp(&b.ping_ms.unwrap_or(u64::MAX))
     });
+
     alive
 }
 
 /// Test all servers that passed TCP ping using sing-box and Clash API.
 /// Generates a single config with ALL servers as outbounds, starts sing-box,
 /// tests each via GET /proxies/{tag}/delay, returns servers with real latency.
-///
-/// Fetch outlet IP through a given proxy port. Uses multiple IP echo services
-/// concurrently via `tokio::select!` — takes the first successful response
-/// within the total timeout, avoiding sequential 4s×N waits.
-///
-/// IMPORTANT: uses `Proxy::all` (not `Proxy::http`) so HTTPS URLs like
-/// `https://ifconfig.me/ip` are properly wrapped in HTTP CONNECT tunnels
-/// through the sing-box mixed inbound.
-async fn fetch_outlet_ip(proxy_port: u16) -> Option<String> {
-    let proxy = match reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}")) {
-        Ok(p) => p,
-        Err(_) => return None,
-    };
-    let client = match reqwest::Client::builder()
-        .proxy(proxy)
-        .timeout(std::time::Duration::from_secs(6))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return None,
-    };
-
-    let ip_urls = [
-        "https://ifconfig.me/ip",
-        "https://api.ipify.org",
-        "https://icanhazip.com",
-    ];
-
-    // Sequential with per-URL timeout — concurrent requests through the
-    // same proxy port create CONNECT tunnel contention in sing-box,
-    // causing spurious failures. Sequential is slower but more reliable.
-    for url in ip_urls {
-        if let Ok(resp) = client.get(url).send().await {
-            if resp.status().is_success() {
-                if let Ok(text) = resp.text().await {
-                    let ip = text.trim().to_string();
-                    if !ip.is_empty()
-                        && ip.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':')
-                    {
-                        return Some(ip);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
