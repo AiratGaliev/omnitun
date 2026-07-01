@@ -21,7 +21,7 @@ use thiserror::Error;
 
 /// Current Clash API port (0 = not running). Set by config.rs on each start.
 pub(crate) static CLASH_API_PORT: AtomicU16 = AtomicU16::new(0);
-pub(crate) static VPN_PID: AtomicU32 = AtomicU32::new(0);
+pub(crate) static PROXY_PID: AtomicU32 = AtomicU32::new(0);
 
 /// Last connected profile — stored for auto-reconnect on watchdog exit.
 pub(crate) static LAST_PROFILE: std::sync::Mutex<Option<LastConnection>> =
@@ -255,7 +255,7 @@ impl ProxyManager {
             app_handle,
             &logger,
             LogLevel::Info,
-            LogSource::Vpn,
+            LogSource::Proxy,
             format!(
                 "Starting in {routing_mode} mode with {} server(s)...",
                 profiles.len()
@@ -267,7 +267,7 @@ impl ProxyManager {
             app_handle,
             &logger,
             LogLevel::Info,
-            LogSource::Vpn,
+            LogSource::Proxy,
             "Generating sing-box config...".into(),
         );
         let (config_json, _stats_port) = config::generate_config(
@@ -282,7 +282,7 @@ impl ProxyManager {
             app_handle,
             &logger,
             LogLevel::Info,
-            LogSource::Vpn,
+            LogSource::Proxy,
             format!("Config written to {}", config_path.display()),
         );
 
@@ -295,39 +295,24 @@ impl ProxyManager {
         );
         self.process_mgr.start(&config_path).await?;
 
-        // Set system proxy for system-proxy mode.
-        // Local-proxy mode starts a mixed inbound on localhost without system proxy.
+        // In system-proxy mode, sing-box sets OS proxy automatically
+        // via mixed inbound `set_system_proxy: true`.
         if routing_mode == "system-proxy" {
             log(
                 app_handle,
                 &logger,
                 LogLevel::Info,
-                LogSource::Vpn,
-                "Setting system proxy...".into(),
+                LogSource::Proxy,
+                "System proxy will be managed by sing-box (set_system_proxy)".into(),
             );
-            let sysproxy_cfg = sysproxy::Sysproxy {
-                enable: true,
-                host: String::from("127.0.0.1"),
-                port: proxy_port,
-                bypass: String::from("localhost;127.*;10.*;172.16.*;192.168.*"),
-            };
-            if let Err(e) = sysproxy_cfg.set_system_proxy() {
-                log(
-                    app_handle,
-                    &logger,
-                    LogLevel::Warning,
-                    LogSource::Vpn,
-                    format!("Failed to set system proxy: {e}"),
-                );
-            }
         }
 
         log(
             app_handle,
             &logger,
             LogLevel::Info,
-            LogSource::Vpn,
-            "sing-box process started, traffic monitored from lib.rs".into(),
+            LogSource::Proxy,
+            "sing-box proxy process started".into(),
         );
 
         Ok(())
@@ -336,14 +321,6 @@ impl ProxyManager {
     pub async fn stop(&self, app_handle: &AppHandle) -> Result<(), ProxyError> {
         // Reset Clash API port so fetcher goes direct
         crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Relaxed);
-
-        // Disable system proxy — best effort, don't block on it
-        if let Ok(mut sysproxy) = sysproxy::Sysproxy::get_system_proxy() {
-            if sysproxy.enable {
-                sysproxy.enable = false;
-                let _ = sysproxy.set_system_proxy();
-            }
-        }
 
         let logger = app_handle.state::<Mutex<Logger>>();
         log(

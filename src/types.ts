@@ -4,7 +4,7 @@
 //   - These fields previously existed on the Rust `ServerProfile` struct but
 //     were never propagated through the frontend types, so selecting a
 //     WireGuard / SOCKS5-auth / HTTP-auth server from the dashboard caused
-//     `start_vpn` to be called with `null` for all of them — and sing-box
+//     `start_proxy` to be called with `null` for all of them — and sing-box
 //     then failed to authenticate or build a valid WireGuard outbound.
 
 export type Tab = 'home' | 'profiles' | 'settings' | 'logs' | 'about';
@@ -140,6 +140,8 @@ export interface ExitIpInfo {
   flag: string;
   country_name: string;
   city_name: string;
+  /** The sing-box outbound tag that handled the request (e.g. "proxy-5"). */
+  proxy_tag: string;
 }
 
 /** Batch refresh progress event payload. */

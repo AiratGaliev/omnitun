@@ -28,27 +28,27 @@ impl ProcessManager {
     }
 
     pub fn pid(&self) -> Option<u32> {
-        *self.pid.lock().unwrap()
+        *self.pid.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Take the PID from the guard and return it, leaving None.
     /// Used by stop_proxy to atomically get+clear the PID under the outer lock.
     pub fn clear_pid(&self) -> Option<u32> {
-        self.pid.lock().unwrap().take()
+        self.pid.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     /// Check if a PID is tracked (process may be stale — use status() for real liveness).
     #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
-        self.pid.lock().unwrap().is_some()
+        self.pid.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
     pub async fn start(&self, config_path: &Path) -> Result<(), ProxyError> {
-        let existing_pid = *self.pid.lock().unwrap();
+        let existing_pid = *self.pid.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pid) = existing_pid {
             // Process crash recovery: stale PID that no longer exists
             if !crate::is_process_alive(pid) {
-                *self.pid.lock().unwrap() = None; // clear stale PID
+                *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = None; // clear stale PID
             } else {
                 return Err(ProxyError::Process("Proxy is already running".into()));
             }
@@ -59,14 +59,14 @@ impl ProcessManager {
             .ok_or_else(|| ProxyError::Process("Invalid config path".into()))?;
 
         let new_pid = self.launch(config_str).await?;
-        *self.pid.lock().unwrap() = Some(new_pid);
-        crate::proxy::VPN_PID.store(new_pid, std::sync::atomic::Ordering::Relaxed);
+        *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(new_pid);
+        crate::proxy::PROXY_PID.store(new_pid, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
     pub async fn stop(&self) -> Result<(), ProxyError> {
         let pid = {
-            let mut guard = self.pid.lock().unwrap();
+            let mut guard = self.pid.lock().unwrap_or_else(|e| e.into_inner());
             guard.take()
         };
 
@@ -93,7 +93,7 @@ impl ProcessManager {
                 .creation_flags(CREATE_NO_WINDOW)
                 .output();
 
-            crate::proxy::VPN_PID.store(0, std::sync::atomic::Ordering::Relaxed);
+            crate::proxy::PROXY_PID.store(0, std::sync::atomic::Ordering::Relaxed);
 
             // Poll for process exit — cumulative ~3s max
             for delay_ms in [200u64, 300, 500, 1000, 1000] {
@@ -182,9 +182,10 @@ impl ProcessManager {
             let child = std::process::Command::new(binary)
                 .args(["run", "-c", config_path])
                 .stdout(std::fs::File::create(&log_path).ok())
-                .stderr(std::process::Stdio::from(
-                    std::fs::File::create(&log_path).ok().unwrap(),
-                ))
+                .stderr(match std::fs::File::create(&log_path) {
+                    Ok(f) => std::process::Stdio::from(f),
+                    Err(_) => std::process::Stdio::null(),
+                })
                 .spawn()
                 .map_err(|e| ProxyError::Process(format!("Failed to start sing-box: {e}")))?;
 
@@ -236,7 +237,7 @@ mod tests {
         let mgr = ProcessManager::new(PathBuf::from("sing-box"));
         // Simulate setting a PID via the internal Arc<Mutex<Option<u32>>>
         {
-            let mut guard = mgr.pid.lock().unwrap();
+            let mut guard = mgr.pid.lock().unwrap_or_else(|e| e.into_inner());
             *guard = Some(12345);
         }
         assert_eq!(mgr.pid(), Some(12345));
@@ -255,7 +256,7 @@ mod tests {
         let mgr = ProcessManager::new(PathBuf::from("sing-box"));
         // Set a fake PID (won't actually kill anything since it's 999999999)
         {
-            let mut guard = mgr.pid.lock().unwrap();
+            let mut guard = mgr.pid.lock().unwrap_or_else(|e| e.into_inner());
             *guard = Some(999999999);
         }
         assert!(mgr.is_running());

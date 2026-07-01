@@ -24,7 +24,7 @@ pub enum LogLevel {
 #[serde(rename_all = "snake_case")]
 pub enum LogSource {
     System,
-    Vpn,
+    Proxy,
     Installer,
     Process,
     Subscription,
@@ -106,10 +106,9 @@ pub fn log(
         source,
     };
 
-    if let Ok(mut l) = logger.lock() {
-        l.push(entry.clone());
-        l.append_to_file(&entry);
-    }
+    let mut l = logger.lock().unwrap_or_else(|e| e.into_inner());
+    l.push(entry.clone());
+    l.append_to_file(&entry);
 
     let _ = app_handle.emit("log-entry", &entry);
 }
@@ -129,10 +128,7 @@ pub fn log_message(
 /// Tauri command: return all current log entries from ring buffer.
 #[tauri::command]
 pub fn get_logs(logger: tauri::State<'_, Mutex<Logger>>) -> Vec<LogEntry> {
-    match logger.lock() {
-        Ok(l) => l.entries(),
-        Err(_) => Vec::new(),
-    }
+    logger.lock().unwrap_or_else(|e| e.into_inner()).entries()
 }
 
 #[cfg(test)]
@@ -185,12 +181,12 @@ mod tests {
     fn test_logger_entries_clones_correctly() {
         let mut l = make_logger(100);
         l.push(make_entry("a", LogLevel::Info, LogSource::System));
-        l.push(make_entry("b", LogLevel::Warning, LogSource::Vpn));
+        l.push(make_entry("b", LogLevel::Warning, LogSource::Proxy));
         let e = l.entries();
         assert_eq!(e.len(), 2);
         assert_eq!(e[0].message, "a");
         assert!(matches!(e[0].level, LogLevel::Info));
-        assert!(matches!(e[1].source, LogSource::Vpn));
+        assert!(matches!(e[1].source, LogSource::Proxy));
 
         // test entries returned are clones, not references
         l.push(make_entry("c", LogLevel::Error, LogSource::System));
@@ -256,7 +252,7 @@ mod tests {
     fn test_log_source_variants_serialize() {
         for src in &[
             LogSource::System,
-            LogSource::Vpn,
+            LogSource::Proxy,
             LogSource::Installer,
             LogSource::Process,
             LogSource::Subscription,

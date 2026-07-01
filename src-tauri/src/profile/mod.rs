@@ -10,8 +10,8 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 /// Get proxy port to route subscription fetch through the active proxy.
-/// Returns None in VPN mode — all traffic already goes through TUN, so direct
-/// fetch works and avoids the proxy not listening issue.
+/// Returns None — when connected, traffic goes through the proxy's port,
+/// so direct fetch works and avoids double-proxy issues.
 fn proxy_port(app: &AppHandle) -> Option<u16> {
     use crate::settings::AppSettings;
 
@@ -77,10 +77,35 @@ impl ProfileManager {
         }
         let mut changed = false;
         let mut enriched_count = 0u32;
+        let mut cdn_cleanup = 0u32;
         for profile in &mut self.profiles {
             for server in &mut profile.servers {
+                // CDN servers must never retain exit IP data.
+                if server.behind_cdn {
+                    if server.exit_server.is_some()
+                        || server.exit_flag.is_some()
+                        || server.exit_country_name.is_some()
+                        || server.exit_city_name.is_some()
+                    {
+                        log::error!(
+                            "[BUG] CDN server {} ({}:{}) has stale exit data — enriching_loaded is cleaning it up. \
+                             exit_server={:?} exit_flag={:?} exit_country={:?} exit_city={:?}. \
+                             This indicates a bug in the server update pipeline.",
+                            server.id, server.server, server.port,
+                            server.exit_server, server.exit_flag,
+                            server.exit_country_name, server.exit_city_name,
+                        );
+                        server.exit_server = None;
+                        server.exit_flag = None;
+                        server.exit_country_name = None;
+                        server.exit_city_name = None;
+                        changed = true;
+                        cdn_cleanup += 1;
+                    }
+                    continue; // skip GeoIP enrichment for CDN
+                }
                 if server.country_name.is_some() && server.city_name.is_some() {
-                    continue; // already enriched
+                    continue;
                 }
                 if let Some(info) = crate::proxy::geoip::resolve_hostname(&server.server).await {
                     server.flag = Some(info.country_code.clone());
@@ -96,13 +121,17 @@ impl ProfileManager {
         if changed {
             let _ = self.save();
         }
-        log::info!("GeoIP enrichment: {enriched_count} server(s) updated");
+        log::info!("GeoIP enrichment: {enriched_count} enriched, {cdn_cleanup} CDN exit cleaned up");
     }
 
     pub fn save(&self) -> Result<(), ProxyError> {
         let json = serde_json::to_string_pretty(&self.profiles)
             .map_err(|e| ProxyError::Subscription(format!("Failed to serialize profiles: {e}")))?;
-        std::fs::write(&self.file_path, json)?;
+        let tmp = self.file_path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json)
+            .map_err(|e| ProxyError::Subscription(format!("Failed to write temp profiles: {e}")))?;
+        std::fs::rename(&tmp, &self.file_path)
+            .map_err(|e| ProxyError::Subscription(format!("Failed to rename profiles: {e}")))?;
         Ok(())
     }
 
@@ -296,7 +325,7 @@ impl ProfileManager {
 
         // Preserve exit IP data from existing profiles before processing.
         // Batch test (the only source of exit IP enrichment) is skipped when
-        // VPN is running, so fresly parsed servers would lose exit data.
+        // Proxy is running, so freshly parsed servers would lose exit data.
         let old_servers = &self.profiles[idx].servers;
         let old_exit: std::collections::HashMap<String, (Option<String>, Option<String>, Option<String>, Option<String>)> = old_servers
             .iter()
@@ -590,11 +619,19 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
     let mut set = tokio::task::JoinSet::new();
 
     for mut server in unique {
-        let permit = semaphore
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("semaphore not closed");
+        let permit = match semaphore.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => {
+                log(
+                    app,
+                    &logger,
+                    LogLevel::Warning,
+                    LogSource::Subscription,
+                    "Semaphore closed — skipping remaining servers".into(),
+                );
+                break; // semaphore was closed, stop spawning
+            }
+        };
 
         // Try emoji flag from server name first (fast, no network)
         if server.flag.is_none() {
@@ -639,6 +676,14 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 if !info.city.is_empty() {
                     server.city_name = Some(info.city.clone());
                 }
+            } else if server.flag.is_none() {
+                log(
+                    app,
+                    &logger,
+                    LogLevel::Warning,
+                    LogSource::Subscription,
+                    format!("GeoIP: country not resolved for {} — IP not in GeoIP database", server.server),
+                );
             }
             // If GeoIP fails, keep flag from emoji extraction or leave unset
 
@@ -713,6 +758,26 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
         );
     }
 
+    // 3b. IP-based dedup: after DNS resolution, multiple hostnames may resolve
+    //     to the same IP. Keep the one with lowest ping.
+    let alive_before_ip_dedup = alive.len();
+    if alive_before_ip_dedup > 0 {
+        // Sort by ping ascending — lowest ping first
+        alive.sort_by_key(|s| s.ping_ms.unwrap_or(u64::MAX));
+        let mut seen_ips = std::collections::HashSet::new();
+        alive.retain(|s| seen_ips.insert(s.server.clone()));
+        let ip_dupes = alive_before_ip_dedup - alive.len();
+        if ip_dupes > 0 {
+            log(
+                app,
+                &logger,
+                LogLevel::Info,
+                LogSource::Subscription,
+                format!("Removed {ip_dupes} IP duplicate(s) — multiple domains resolve to the same IP"),
+            );
+        }
+    }
+
     let unreachable = unique_count - alive.len();
     if unreachable > 0 {
         log(
@@ -733,11 +798,11 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
     );
 
     // 4. Real latency test via ServerCache batch engine.
-    //    Skip if main VPN is running (separate sing-box instances crash on Windows).
-    let main_vpn_running =
+    //    Skip if main proxy is running (separate sing-box instances conflict on Windows).
+    let main_proxy_running =
         crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
 
-    if !alive.is_empty() && !main_vpn_running {
+    if !alive.is_empty() && !main_proxy_running {
         // Get the ServerCache from app state
         let batch_result = if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
             log(
@@ -749,7 +814,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             );
 
             let cancel_token = app.try_state::<Mutex<CancellationToken>>()
-                .map(|g| g.lock().unwrap().clone());
+                .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()).clone());
 
             let updated = cache.batch_test(app, &alive, cancel_token, profile_id).await;
 
@@ -828,8 +893,8 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 "Batch test failed — falling back to TCP ping results".into(),
             );
         }
-    } else if main_vpn_running && !alive.is_empty() {
-        // CDN detection via active proxy (main VPN running, can't start batch test)
+    } else if main_proxy_running && !alive.is_empty() {
+        // CDN detection via active proxy (main proxy running, can't start batch test)
         if let Some(settings) = app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>() {
             let guard = settings.lock().await;
             if guard.proxy_port > 0 {
@@ -847,13 +912,13 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 }
             }
         }
-    } else if !alive.is_empty() && main_vpn_running {
+    } else if !alive.is_empty() && main_proxy_running {
         log(
             app,
             &logger,
             LogLevel::Info,
             LogSource::Cache,
-            format!("Batch test skipped — main VPN running ({} alive)", alive.len()),
+            format!("Batch test skipped — main proxy running ({} alive)", alive.len()),
         );
     } else if alive.is_empty() {
         log(

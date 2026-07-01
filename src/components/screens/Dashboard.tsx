@@ -146,7 +146,8 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   const handleToggleConnection = async () => {
     try {
       await toggleConnection();
-      if (status === 'disconnected' || status === 'error') {
+      const freshStatus = useAppStore.getState().status;
+      if (freshStatus === 'disconnected' || freshStatus === 'error') {
         toast.success(`${t('connectedTo')}${activeServer?.name ?? ''}`, {
           description: t('trafficProtected'),
         });

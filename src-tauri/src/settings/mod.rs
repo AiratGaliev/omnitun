@@ -90,7 +90,10 @@ impl SettingsManager {
 
     pub fn save(&self, settings: &AppSettings) -> Result<(), String> {
         let json = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
-        fs::write(&self.file_path, json).map_err(|e| e.to_string())
+        let tmp = self.file_path.with_extension("json.tmp");
+        fs::write(&tmp, &json).map_err(|e| format!("Failed to write temp settings: {e}"))?;
+        fs::rename(&tmp, &self.file_path).map_err(|e| format!("Failed to rename settings: {e}"))?;
+        Ok(())
     }
 }
 

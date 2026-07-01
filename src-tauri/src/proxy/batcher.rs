@@ -247,28 +247,40 @@ async fn process_batch(
         Err(e) => {
             batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] config serialization failed: {e}"));
             for req in batch {
-                let _ = req.reply.send(Err(format!("Config serialization error: {e}")));
+                if let Err(e) = req.reply.send(Err(format!("Config serialization error: {e}"))) {
+                    batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] reply send failed: {:?}", e));
+                }
             }
-            let _ = std::fs::remove_dir_all(&test_dir);
+            if let Err(e) = std::fs::remove_dir_all(&test_dir) {
+                batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to remove test dir: {e}"));
+            }
             return;
         }
     };
     if let Err(e) = std::fs::write(&config_path, &config_str) {
         batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] config write failed: {e}"));
         for req in batch {
-            let _ = req.reply.send(Err(format!("Config write error: {e}")));
+            if let Err(e) = req.reply.send(Err(format!("Config write error: {e}"))) {
+                batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] reply send failed: {:?}", e));
+            }
         }
-        let _ = std::fs::remove_dir_all(&test_dir);
+        if let Err(e) = std::fs::remove_dir_all(&test_dir) {
+            batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to remove test dir: {e}"));
+        }
         return;
     }
 
     // 3. Check if sing-box binary exists, then start
     if !binary_path.exists() {
-        batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] sing-box binary not found at {:?} — installing may be needed (run main VPN first)", binary_path));
+        batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] sing-box binary not found at {:?} — installing may be needed (run main proxy first)", binary_path));
         for req in batch {
-            let _ = req.reply.send(Err("sing-box not installed — connect to VPN first to auto-install".into()));
+            if let Err(e) = req.reply.send(Err("sing-box not installed — connect to proxy first to auto-install".into())) {
+                batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] reply send failed: {:?}", e));
+            }
         }
-        let _ = std::fs::remove_dir_all(&test_dir);
+        if let Err(e) = std::fs::remove_dir_all(&test_dir) {
+            batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to remove test dir: {e}"));
+        }
         return;
     }
 
@@ -287,9 +299,13 @@ async fn process_batch(
         Err(e) => {
             batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] failed to start sing-box: {e}"));
             for req in batch {
-                let _ = req.reply.send(Err(format!("sing-box startup error: {e}")));
+                if let Err(e) = req.reply.send(Err(format!("sing-box startup error: {e}"))) {
+                    batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] reply send failed: {:?}", e));
+                }
             }
-            let _ = std::fs::remove_dir_all(&test_dir);
+            if let Err(e) = std::fs::remove_dir_all(&test_dir) {
+                batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to remove test dir: {e}"));
+            }
             return;
         }
     };
@@ -434,16 +450,24 @@ async fn process_batch(
     // 7. Clean up — preserve config+log on total failure for debugging
     if success_count == 0 && count > 0 {
         let debug_dir = data_dir.join("batch-debug");
-        let _ = std::fs::create_dir_all(&debug_dir);
-        let _ = std::fs::copy(config_path, debug_dir.join("config.json"));
+        if let Err(e) = std::fs::create_dir_all(&debug_dir) {
+            batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to create debug dir: {e}"));
+        }
+        if let Err(e) = std::fs::copy(&config_path, debug_dir.join("config.json")) {
+            batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to copy config for debug: {e}"));
+        }
         let sb_log = test_dir.join("sing-box.log");
         if sb_log.exists() {
-            let _ = std::fs::copy(&sb_log, debug_dir.join("sing-box.log"));
+            if let Err(e) = std::fs::copy(&sb_log, debug_dir.join("sing-box.log")) {
+                batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to copy log for debug: {e}"));
+            }
         }
         batcher_log(app_handle, crate::logging::LogLevel::Info, format!(
             "[Batcher] config+log preserved at {:?} for debugging", debug_dir));
     }
-    let _ = std::fs::remove_dir_all(&test_dir);
+    if let Err(e) = std::fs::remove_dir_all(&test_dir) {
+        batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to remove test dir: {e}"));
+    }
 
     // 8. Save cache
     cache.save_to_disk().await;

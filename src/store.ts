@@ -15,7 +15,7 @@
 // 3. `toggleConnection` was hardcoding `wg_local_address: null`,
 //    `wg_allowed_ips: null`, `wg_dns: null`, `wg_mtu: null`,
 //    `wg_keepalive: null`, `username: null` when sending the profile to
-//    the Rust `start_vpn` command. Combined with bugs #1 and #2, this
+//    the Rust `start_proxy` command. Combined with bugs #1 and #2, this
 //    guaranteed that those servers could never be connected to from the
 //    dashboard. Now those fields are sourced from `activeServer`.
 //
@@ -25,15 +25,12 @@
 //    we now pass the remaining known servers (excluding the selected one)
 //    as alternative servers so the backend can construct the urltest group
 //    and auto-pick the fastest outbound.
-//
-// Other than these targeted fixes, the file is unchanged from the original
-// codebase.
 
-import { create } from 'zustand';
-import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
-import { toast } from 'sonner';
-import { i18n } from './i18n';
+import {create} from 'zustand';
+import {invoke} from '@tauri-apps/api/core';
+import {listen} from '@tauri-apps/api/event';
+import {toast} from 'sonner';
+import {i18n} from './i18n';
 import type {
   ConnectionInfo,
   ConnectionStatus,
@@ -109,7 +106,7 @@ export interface RustSubscriptionProfile {
   traffic_expiry?: string;
 }
 
-interface VPNStore {
+interface ProxyStore {
   status: ConnectionStatus;
   activeServer: Server | null;
   servers: Server[];
@@ -153,6 +150,8 @@ interface VPNStore {
   refreshConnections: () => Promise<void>;
   _healthCheckTimer: ReturnType<typeof setInterval> | null;
   _isReconnecting: boolean;
+  /** Toggle guard — prevents concurrent connect/disconnect. */
+  _isConnecting: boolean;
   /** Set of profile IDs currently being refreshed (dedup guard). */
   _refreshingIds: string[];
 }
@@ -214,7 +213,7 @@ export function mapRustProfile(rust: RustSubscriptionProfile): Profile {
         exitServer: s.exit_server ?? undefined,
         // ── FIX: propagate WireGuard + username fields so the dashboard
         //    can show them and `toggleConnection` can forward them to
-        //    `start_vpn`. Without this, WireGuard / SOCKS5-auth /
+        //    `start_proxy`. Without this, WireGuard / SOCKS5-auth /
         //    HTTP-auth servers silently lose their connection data
         //    when the user picks them in the dropdown. ─────────────────
         wgLocalAddress: s.wg_local_address ?? undefined,
@@ -231,7 +230,7 @@ export function mapRustProfile(rust: RustSubscriptionProfile): Profile {
 
 /**
  * Convert a frontend `Server` object into the snake_case payload shape that
- * the Rust `start_vpn` command expects (matches `ServerProfile` in
+ * the Rust `start_proxy` command expects (matches `ServerProfile` in
  * src-tauri/src/proxy/mod.rs).
  *
  * IMPORTANT: every field present on the Rust struct is included here,
@@ -269,6 +268,7 @@ function toRustServerProfile(s: Server | null, fallbackName: string): Record<str
     wg_mtu: s?.wgMtu ?? null,
     wg_keepalive: s?.wgKeepalive ?? null,
     username: s?.username ?? null,
+    behind_cdn: s?.behindCdn ?? false,
   };
 }
 
@@ -285,12 +285,18 @@ export function pickReplacementServer(
 
   let candidates = [...servers];
 
-  // Apply user filters — match backend filter_servers_by_settings which uses exit_flag
+  // Apply user filters using exitFlag (resolved by batch test).
+  // Backend filter_servers_by_settings uses entry flag as a pre-filter
+  // before batch test runs — data is unavailable yet on that side.
   if (settings.allowedCountries.length > 0) {
-    candidates = candidates.filter((s) => s.exitFlag && settings.allowedCountries.includes(s.exitFlag));
+    candidates = candidates.filter(
+      (s) => s.exitFlag && settings.allowedCountries.includes(s.exitFlag),
+    );
   }
   if (settings.blockedCountries.length > 0) {
-    candidates = candidates.filter((s) => !s.exitFlag || !settings.blockedCountries.includes(s.exitFlag));
+    candidates = candidates.filter(
+      (s) => !s.exitFlag || !settings.blockedCountries.includes(s.exitFlag),
+    );
   }
   if (settings.allowedProtocols.length > 0) {
     candidates = candidates.filter(
@@ -323,7 +329,7 @@ export function pickReplacementServer(
     : null;
 }
 
-export const useAppStore = create<VPNStore>((set, get) => ({
+export const useAppStore = create<ProxyStore>((set, get) => ({
   status: 'disconnected',
   activeServer: null,
   servers: defaultServers,
@@ -341,6 +347,7 @@ export const useAppStore = create<VPNStore>((set, get) => ({
   connections: [],
   _healthCheckTimer: null,
   _isReconnecting: false,
+  _isConnecting: false,
   _refreshingIds: [],
   settings: {
     acceptTerms: false,
@@ -446,9 +453,12 @@ export const useAppStore = create<VPNStore>((set, get) => ({
           profiles: state.profiles.filter((p) => p.id !== id),
           servers: remaining,
           activeServer: wasActiveRemoved
-            ? (autoSelect
-                ? remaining.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best), remaining[0])
-                : (remaining[0] ?? null))
+            ? autoSelect
+              ? remaining.reduce(
+                  (best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best),
+                  remaining[0],
+                )
+              : (remaining[0] ?? null)
             : state.activeServer,
         };
       });
@@ -465,7 +475,11 @@ export const useAppStore = create<VPNStore>((set, get) => ({
     {
       const state = get();
       if (state._refreshingIds.includes(id)) {
-        state.addLog(`[refresh] profile "${id.slice(0, 8)}" already refreshing — skipping`, 'info', 'system');
+        state.addLog(
+          `[refresh] profile "${id.slice(0, 8)}" already refreshing — skipping`,
+          'info',
+          'system',
+        );
         return;
       }
     }
@@ -483,10 +497,14 @@ export const useAppStore = create<VPNStore>((set, get) => ({
         const oldActiveName = state.activeServer?.name ?? state.activeServer?.server ?? 'none';
         const newActiveServer = autoSelect
           ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
-          : (activeServerStillExists ? state.activeServer : (allServers[0] ?? null));
+          : activeServerStillExists
+            ? state.activeServer
+            : (allServers[0] ?? null);
         if (state.activeServer && state.activeServer.id !== newActiveServer?.id) {
           const reason = autoSelect
-            ? (!activeServerStillExists ? 'ID not found after refresh' : 'autoConnectFastest')
+            ? !activeServerStillExists
+              ? 'ID not found after refresh'
+              : 'autoConnectFastest'
             : 'current server was removed';
           const newName = newActiveServer?.name ?? newActiveServer?.server ?? 'none';
           get().addLog(
@@ -540,7 +558,7 @@ export const useAppStore = create<VPNStore>((set, get) => ({
         ? allServers.length > 0
           ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
           : null
-        : allServers.find((s) => s.id === oldActive?.id) ?? allServers[0] ?? null;
+        : (allServers.find((s) => s.id === oldActive?.id) ?? allServers[0] ?? null);
       set({
         profiles,
         servers: allServers,
@@ -598,9 +616,9 @@ export const useAppStore = create<VPNStore>((set, get) => ({
   loadSettings: async () => {
     try {
       const result = await invoke<Settings>('get_settings');
-      // Migration: old 'vpn' or 'proxy' mode → 'system-proxy'
+      // Migration: legacy 'proxy' mode → 'system-proxy'
       const rawMode = (result as { routingMode: string }).routingMode;
-      if (rawMode === 'vpn' || rawMode === 'proxy') {
+      if (rawMode === 'proxy') {
         (result as { routingMode: string }).routingMode = 'system-proxy';
       }
       set({ settings: result });
@@ -642,10 +660,23 @@ export const useAppStore = create<VPNStore>((set, get) => ({
   },
 
   fetchExitIp: async () => {
+    // Skip for CDN servers — they cannot route proxy traffic.
+    const s = get().activeServer;
+    if (s?.behindCdn) {
+      // This log helps detect if outlet IP is ever called for CDN servers
+      // (which would indicate a bug in the connection/ping-pong logic).
+      get().addLog(
+        `[BUG] fetchExitIp called for CDN server ${s.id.slice(0, 8)} — outlet IP is meaningless for CDN`,
+        'error',
+        'system',
+      );
+      return;
+    }
     try {
       const info = await invoke<ExitIpInfo>('outlet_ip');
       set({ exitIp: info });
-    } catch {
+    } catch (e) {
+      get().addLog(`Failed to fetch exit IP: ${String(e)}`, 'warning', 'system');
       set({ exitIp: null });
     }
   },
@@ -654,7 +685,8 @@ export const useAppStore = create<VPNStore>((set, get) => ({
     try {
       const ip = await invoke<string>('get_real_ip');
       set({ realIp: ip });
-    } catch {
+    } catch (e) {
+      get().addLog(`Failed to fetch real IP: ${String(e)}`, 'warning', 'system');
       set({ realIp: null });
     }
   },
@@ -668,7 +700,8 @@ export const useAppStore = create<VPNStore>((set, get) => ({
           : null;
       set({ speedTestResult: best });
       return best;
-    } catch {
+    } catch (e) {
+      get().addLog(`Speed test failed: ${String(e)}`, 'warning', 'system');
       set({ speedTestResult: null });
       return null;
     }
@@ -678,15 +711,16 @@ export const useAppStore = create<VPNStore>((set, get) => ({
     try {
       const conns = await invoke<ConnectionInfo[]>('get_connections');
       set({ connections: conns });
-    } catch {
-      // VPN not connected — not an error
+    } catch (e) {
+      // Not connected is expected — log debug level
+      get().addLog(`refreshConnections skipped: ${String(e)}`, 'info', 'system');
     }
   },
 
   toggleConnection: async () => {
-    const { status, activeServer, servers, addLog, settings, _isReconnecting } = get();
-    if (_isReconnecting) {
-      addLog('[toggle] reconnect in progress — ignoring toggle', 'warning', 'system');
+    const { status, activeServer, servers, addLog, settings, _isReconnecting, _isConnecting } = get();
+    if (_isReconnecting || _isConnecting) {
+      addLog('[toggle] already in progress — ignoring toggle', 'warning', 'system');
       return;
     }
     // Log the server we're connecting to
@@ -699,12 +733,13 @@ export const useAppStore = create<VPNStore>((set, get) => ({
     );
     try {
       if (status === 'disconnected' || status === 'error') {
+        set({ _isConnecting: true });
         addLog(`Connecting to ${activeServer?.name ?? 'Default'}...`, 'info', 'system');
         set({ status: 'connecting' });
         // Persist settings before connecting (routingMode, proxyPort from Dashboard)
         await get()
           .saveSettings()
-          .catch(() => undefined);
+          .catch((e) => get().addLog('saveSettings failed: ' + String(e), 'warning', 'system'));
 
         // FIX: build the rust-side profile from `activeServer` WITHOUT
         // dropping WireGuard / username fields. Previously all of these
@@ -724,54 +759,89 @@ export const useAppStore = create<VPNStore>((set, get) => ({
                 .map((s) => toRustServerProfile(s, 'Default'))
             : [];
 
-        await invoke('start_proxy', {
+        const actualPort = await invoke<number>('start_proxy', {
           profile,
           alternativeServers: altServers,
           routingMode: settings.routingMode,
           proxyPort: settings.proxyPort,
         });
 
+        // Save the actual port (may differ if port fallback was triggered)
+        if (actualPort !== settings.proxyPort) {
+          get().addLog(
+            `Proxy port updated to ${actualPort} (fallback from ${settings.proxyPort})`,
+            'info',
+            'system',
+          );
+          set((state) => ({
+            settings: { ...state.settings, proxyPort: actualPort },
+          }));
+          // Persist the new port
+          void get().saveSettings();
+        }
+
         // Force Selector to user's chosen server (sing-box Selector may
         // auto-pick the fastest if not explicitly set via Clash API).
         await new Promise((r) => setTimeout(r, 1000));
-        await invoke('switch_proxy', { proxyTag: 'proxy-0' }).catch(() => undefined);
+        await invoke('switch_proxy', { proxyTag: 'proxy-0' }).catch((e: unknown) => {
+          get().addLog(
+            `Failed to switch to proxy-0: ${e instanceof Error ? e.message : String(e)}`,
+            'warning',
+            'system',
+          );
+        });
 
-        // Verify IP changed through VPN — poll outlet IP until different from real IP.
+        // Verify IP changed through proxy — poll outlet IP until different from real IP.
         // Use increasing delay (2s, 3s, 4s...) to avoid hammering IP check services.
+        // Skip for CDN servers — they cannot route proxy traffic.
         const realIp = get().realIp ?? (await invoke<string>('get_real_ip').catch(() => null));
-        const maxAttempts = 12; // ~60 seconds with backoff
+        const isCdn = activeServer?.behindCdn;
+        if (isCdn) {
+          addLog(
+            `Skipping outlet IP check for CDN server ${activeServer?.id?.slice(0, 8) ?? '?'} — CDN servers have dynamic outlet IPs`,
+            'info',
+            'system',
+          );
+        }
+        const maxAttempts = isCdn ? 0 : 12; // ~60 seconds with backoff
         let ipChanged = false;
         for (let i = 0; i < maxAttempts; i++) {
+          // Guard: user may have disconnected during the loop
+          if (get().status !== 'connecting' && get().status !== 'connected') break;
           const delay = 2000 + i * 500; // 2s, 2.5s, 3s, ... (max 7.5s)
           await new Promise((r) => setTimeout(r, delay));
           try {
-            const vpnInfo = await invoke<ExitIpInfo>('outlet_ip');
-            if (realIp && vpnInfo.server && !vpnInfo.server.startsWith(realIp.split(' ')[0])) {
-              set({ exitIp: vpnInfo });
+            const exitIpInfo = await invoke<ExitIpInfo>('outlet_ip');
+            if (realIp && exitIpInfo.server && !exitIpInfo.server.startsWith(realIp.split(' ')[0])) {
+              set({ exitIp: exitIpInfo });
+
               ipChanged = true;
               break;
             }
-          } catch {
-            // VPN not ready yet, retry
+          } catch (e) {
+            // outlet IP not ready yet, retry
+            get().addLog(`Outlet IP not ready: ${String(e)}`, 'info', 'system');
           }
         }
         if (!ipChanged && realIp) {
           addLog(
-            'VPN connected but IP did not change — check your proxy server',
+            'Connected but IP did not change — check your proxy server',
             'warning',
             'system',
           );
         }
       } else {
         addLog('Disconnecting...', 'info', 'system');
-        set({ status: 'disconnecting' });
+        set({ status: 'disconnecting', _isConnecting: false });
         await invoke('stop_proxy');
       }
     } catch (e: unknown) {
-      set({ status: 'error' });
+      set({ status: 'error', _isConnecting: false });
       const msg = e instanceof Error ? e.message : String(e);
       addLog(`Connection failed: ${msg}`, 'error', 'system');
       throw e;
+    } finally {
+      set({ _isConnecting: false });
     }
   },
 
@@ -790,8 +860,9 @@ export const useAppStore = create<VPNStore>((set, get) => ({
           let alive = false;
           try {
             alive = await invoke<boolean>('check_proxy_health');
-          } catch {
-            // Treat invoke failure as dead (VPN probably stopped)
+          } catch (e) {
+            // Treat invoke failure as dead (proxy probably stopped)
+            get().addLog(`Health check failed: ${String(e)}`, 'info', 'system');
           }
           // Guard: user might have disconnected while check was in flight
           // (check_proxy_health has a 7s timeout). Don't reconnect if status changed.
@@ -814,8 +885,8 @@ export const useAppStore = create<VPNStore>((set, get) => ({
             set({ _isReconnecting: true });
             try {
               await invoke('stop_proxy');
-            } catch {
-              /* OK */
+            } catch (e) {
+              get().addLog('stop_proxy failed during reconnect: ' + String(e), 'warning', 'system');
             }
             set({ status: 'disconnected', _isReconnecting: false, connectedAt: null });
             return;
@@ -878,7 +949,7 @@ export const useAppStore = create<VPNStore>((set, get) => ({
       }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Unknown error';
-      get().addLog(`Failed to get initial VPN status: ${msg}`, 'warning', 'system');
+      get().addLog(`Failed to get initial proxy status: ${msg}`, 'warning', 'system');
       set({ status: 'disconnected' });
     }
 
@@ -888,8 +959,8 @@ export const useAppStore = create<VPNStore>((set, get) => ({
       if (history.length > 0) {
         set({ logs: history });
       }
-    } catch {
-      // Non-critical: log history unavailable on first run
+    } catch (e) {
+      get().addLog('get_logs failed: ' + String(e), 'warning', 'system');
     }
 
     const unlisten = await listen<StatusPayload>('connection-status-changed', (event) => {
@@ -924,7 +995,6 @@ export const useAppStore = create<VPNStore>((set, get) => ({
       const entry = event.payload;
       get().addLog(entry.message, entry.level, entry.source);
     });
-
     // Listen for real-time traffic stats from sing-box
     const unlistenTraffic = await listen<TrafficPayload>('traffic-update', (event) => {
       set({ speeds: { up: event.payload.up, down: event.payload.down } });
@@ -936,8 +1006,7 @@ export const useAppStore = create<VPNStore>((set, get) => ({
       set((state) => ({
         refreshProgress: {
           ...state.refreshProgress,
-          [progress.profile_id]:
-            progress.phase === 'done' ? null : progress,
+          [progress.profile_id]: progress.phase === 'done' ? null : progress,
         },
       }));
     });

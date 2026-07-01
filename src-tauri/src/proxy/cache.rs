@@ -1,7 +1,7 @@
 //! Dual-layer server cache with Stale-While-Revalidate (SWR).
 //!
 //! Architecture:
-//! ```
+//! ```text
 //! ┌──────────────────────────────┐
 //! │     store: HashMap           │  ← Source of truth. Serializable, iterable.
 //! │     (RwLock<HashMap>)        │     Written to disk by `persistence.rs`.
@@ -314,7 +314,11 @@ impl ServerCache {
                                 let srv = server.clone();
                                 tokio::spawn(async move {
                                     let rx = cache.queue_test(&srv, "");
-                                    let _ = rx.await;
+                                    match rx.await {
+                                        Ok(Ok(r)) => log::info!("SWR refresh ok for {}", r.server_id),
+                                        Ok(Err(e)) => log::warn!("SWR refresh failed: {e}"),
+                                        Err(_) => log::warn!("SWR refresh cancelled"),
+                                    }
                                 });
                                 return Ok(result);
                             }
@@ -359,6 +363,14 @@ impl ServerCache {
 
     /// Update the store and hot cache with a positive result.
     pub(crate) async fn update_positive(&self, server_id: &str, result: PositiveResult) {
+        // CDN servers must never store exit IP data in the cache.
+        let mut result = result;
+        if result.behind_cdn {
+            result.exit_ip = None;
+            result.exit_flag = None;
+            result.exit_country = None;
+            result.exit_city = None;
+        }
         let entry = CacheEntry {
             server_id: server_id.to_string(),
             last_updated: chrono::Utc::now().timestamp(),
@@ -395,11 +407,13 @@ impl ServerCache {
     /// Does NOT block — caller must await the receiver separately.
     fn queue_test(&self, server: &ServerProfile, profile_id: &str) -> tokio::sync::oneshot::Receiver<Result<PositiveResult, String>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = self.batch_tx.send(BatchRequest {
+        if let Err(e) = self.batch_tx.send(BatchRequest {
             server: server.clone(),
             profile_id: profile_id.to_string(),
             reply: tx,
-        });
+        }) {
+            log::warn!("[Cache] batch channel closed, request for {} lost: {e}", server.id);
+        }
         rx
     }
 
@@ -996,7 +1010,155 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── PositiveCount / NegativeCount ───────────────────────────────────────
+    // ── prune_old ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_prune_old_keeps_active_ids_regardless_of_age() {
+        let dir = std::env::temp_dir().join(format!(
+            "cache-test-prune-active-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cache = ServerCache::new(&dir);
+        let now = chrono::Utc::now().timestamp();
+        {
+            let mut store = cache.store.write().await;
+            // Very old entry (100 days ago) but in active_ids — must survive
+            store.insert(
+                "old-active".into(),
+                CacheEntry {
+                    server_id: "old-active".into(),
+                    last_updated: now - 86400 * 100,
+                    status: CacheStatus::Positive {
+                        ping_ms: 50,
+                        exit_ip: None,
+                        exit_flag: None,
+                        exit_country: None,
+                        exit_city: None,
+                        behind_cdn: false,
+                        consecutive_successes: 1,
+                    },
+                },
+            );
+            // Fresh entry in active_ids
+            store.insert(
+                "fresh-active".into(),
+                CacheEntry {
+                    server_id: "fresh-active".into(),
+                    last_updated: now,
+                    status: CacheStatus::Positive {
+                        ping_ms: 30,
+                        exit_ip: None,
+                        exit_flag: None,
+                        exit_country: None,
+                        exit_city: None,
+                        behind_cdn: false,
+                        consecutive_successes: 1,
+                    },
+                },
+            );
+        }
+
+        let active: std::collections::HashSet<String> =
+            ["old-active".into(), "fresh-active".into()].into_iter().collect();
+        let max_age = Duration::from_secs(86400 * 30); // 30 days
+        let removed = cache.prune_old(&active, max_age).await;
+
+        assert_eq!(removed, 0, "should not remove active IDs");
+        let store = cache.store.read().await;
+        assert_eq!(store.len(), 2);
+        assert!(store.contains_key("old-active"));
+        assert!(store.contains_key("fresh-active"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_prune_old_removes_orphans_older_than_max_age() {
+        let dir = std::env::temp_dir().join(format!(
+            "cache-test-prune-orphan-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cache = ServerCache::new(&dir);
+        let now = chrono::Utc::now().timestamp();
+        {
+            let mut store = cache.store.write().await;
+            // Orphan (not in active_ids), very old — should be removed
+            store.insert(
+                "orphan-old".into(),
+                CacheEntry {
+                    server_id: "orphan-old".into(),
+                    last_updated: now - 86400 * 35, // 35 days ago
+                    status: CacheStatus::Negative {
+                        first_failure_at: now - 86400 * 35,
+                        last_failure_at: now - 86400 * 35,
+                        consecutive_failures: 5,
+                        previously_worked: true,
+                        reason: "timeout".into(),
+                    },
+                },
+            );
+        }
+
+        let active: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let max_age = Duration::from_secs(86400 * 30); // 30 days
+        let removed = cache.prune_old(&active, max_age).await;
+
+        assert_eq!(removed, 1, "should remove orphan older than max_age");
+        let store = cache.store.read().await;
+        assert!(store.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_prune_old_keeps_orphans_within_grace_period() {
+        let dir = std::env::temp_dir().join(format!(
+            "cache-test-prune-grace-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cache = ServerCache::new(&dir);
+        let now = chrono::Utc::now().timestamp();
+        {
+            let mut store = cache.store.write().await;
+            // Orphan but recent (within 30 days) — grace period keeps it alive
+            store.insert(
+                "orphan-recent".into(),
+                CacheEntry {
+                    server_id: "orphan-recent".into(),
+                    last_updated: now - 86400 * 10, // 10 days ago
+                    status: CacheStatus::Positive {
+                        ping_ms: 100,
+                        exit_ip: None,
+                        exit_flag: None,
+                        exit_country: None,
+                        exit_city: None,
+                        behind_cdn: false,
+                        consecutive_successes: 1,
+                    },
+                },
+            );
+        }
+
+        let active: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let max_age = Duration::from_secs(86400 * 30); // 30 days
+        let removed = cache.prune_old(&active, max_age).await;
+
+        assert_eq!(removed, 0, "orphans within grace period should survive");
+        let store = cache.store.read().await;
+        assert_eq!(store.len(), 1);
+        assert!(store.contains_key("orphan-recent"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[tokio::test]
     async fn test_counts() {

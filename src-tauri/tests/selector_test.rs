@@ -57,18 +57,18 @@ fn free_port(skip: &[u16]) -> Option<u16> {
 
 /// Load a server from profiles.json. Prefer one with an IP address (not hostname)
 /// to avoid DNS-resolution loops through the proxy.
-fn load_best_server() -> Option<(serde_json::Value, omnitun_lib::vpn::ServerProfile)> {
+fn load_best_server() -> Option<(serde_json::Value, omnitun_lib::proxy::ServerProfile)> {
     let p = app_data_dir().join("profiles.json");
     let content = std::fs::read_to_string(p).ok()?;
     let data: serde_json::Value = serde_json::from_str(&content).ok()?;
     let servers = data[0]["servers"].as_array()?.clone();
 
-    let mut candidates: Vec<(serde_json::Value, omnitun_lib::vpn::ServerProfile)> = Vec::new();
+    let mut candidates: Vec<(serde_json::Value, omnitun_lib::proxy::ServerProfile)> = Vec::new();
 
     for sv in servers {
-        let sp: Result<omnitun_lib::vpn::ServerProfile, _> = serde_json::from_value(sv.clone());
+        let sp: Result<omnitun_lib::proxy::ServerProfile, _> = serde_json::from_value(sv.clone());
         if let Ok(srv) = sp {
-            if omnitun_lib::vpn::config::build_outbound(&srv).is_ok() {
+            if omnitun_lib::proxy::config::build_outbound(&srv).is_ok() {
                 candidates.push((sv, srv));
             }
         }
@@ -268,7 +268,7 @@ async fn selector_switch_and_outlet_ip() {
     let proxy_tag = format!("proxy-{server_id}");
 
     // ── 1. Build outbound + config ────────────────────────────────────────
-    let ob = match omnitun_lib::vpn::config::build_outbound(&sp) {
+    let ob = match omnitun_lib::proxy::config::build_outbound(&sp) {
         Ok(mut ob) => {
             ob["tag"] = serde_json::json!(&proxy_tag);
             ob

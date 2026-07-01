@@ -17,8 +17,6 @@ use crate::proxy::cache::ServerCache;
 use crate::proxy::{ServerProfile, ProxyManager, ConnectionStatus};
 use chrono::Local;
 use serde::Serialize;
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -27,9 +25,6 @@ use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
-
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const PROXY_TIMEOUT_SECS: u64 = 15;
 const PROXY_POLL_MS: u64 = 300;
@@ -49,7 +44,7 @@ struct ProfileState {
     manager: Arc<Mutex<ProfileManager>>,
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 async fn start_proxy(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProxyState>,
@@ -58,7 +53,7 @@ async fn start_proxy(
     routing_mode: String,
     proxy_port: u16,
     alternative_servers: Vec<ServerProfile>,
-) -> Result<(), String> {
+) -> Result<u16, String> {
     let logger = app.state::<StdMutex<Logger>>();
     let server_count = alternative_servers.len() + 1;
     log(
@@ -67,7 +62,7 @@ async fn start_proxy(
         LogLevel::Info,
         LogSource::System,
         format!(
-            "Starting VPN connection to {} ({}:{}, {} server(s) available)...",
+            "Starting proxy connection to {} ({}:{}, {} server(s) available)...",
             profile.display_name(),
             profile.server,
             profile.port,
@@ -78,7 +73,7 @@ async fn start_proxy(
 
     // Store active server ID for exit IP enrichment
     {
-        let mut active_id = crate::proxy::ACTIVE_SERVER_ID.lock().unwrap();
+        let mut active_id = crate::proxy::ACTIVE_SERVER_ID.lock().unwrap_or_else(|e| e.into_inner());
         *active_id = Some(profile.id.clone());
     }
 
@@ -87,13 +82,61 @@ async fn start_proxy(
     let settings = settings_state.lock().await.clone();
 
     // Collect all servers for smart selector group.
-    // Filter out CDN servers — they can't route VPN traffic.
+    // Filter out CDN servers from alternatives — they can't be tested via
+    // batch proxy and may have unstable outlet IPs, but the main server
+    // can still be connected (CDN-fronted proxies are legitimate).
     let mut all_servers = vec![profile.clone()];
     for s in alternative_servers {
         if !s.behind_cdn {
             all_servers.push(s);
         }
     }
+
+    // Check if the target port is free BEFORE starting sing-box.
+    // If busy, iterate port+1, port+2, ... up to 100 attempts
+    // and warn the user so they can reconfigure their apps.
+    let proxy_port = if crate::proxy::config::port_available(proxy_port) {
+        log(
+            &app,
+            &logger,
+            LogLevel::Info,
+            LogSource::Proxy,
+            format!("Port {proxy_port} is available"),
+        );
+        proxy_port
+    } else {
+        let mut found = None;
+        for offset in 1..=100 {
+            let candidate = proxy_port.saturating_add(offset);
+            if candidate == 0 { break; } // wraparound guard
+            if crate::proxy::config::port_available(candidate) {
+                found = Some(candidate);
+                break;
+            }
+        }
+        match found {
+            Some(new_port) => {
+                log(
+                    &app,
+                    &logger,
+                    LogLevel::Warning,
+                    LogSource::Proxy,
+                    format!("Port {proxy_port} is in use (by another app), using {new_port} instead — update your apps to use port {new_port}"),
+                );
+                new_port
+            }
+            None => {
+                log(
+                    &app,
+                    &logger,
+                    LogLevel::Error,
+                    LogSource::Proxy,
+                    format!("Port {proxy_port} is in use and no alternative port found in the next 100 ports — using it anyway"),
+                );
+                proxy_port
+            }
+        }
+    };
 
     match manager
         .start(&app, proxy_port, &routing_mode, &all_servers, &settings)
@@ -104,7 +147,7 @@ async fn start_proxy(
                 &app,
                 &logger,
                 LogLevel::Info,
-                LogSource::Vpn,
+                LogSource::Proxy,
                 "Verifying proxy connection...".into(),
             );
 
@@ -118,15 +161,15 @@ async fn start_proxy(
                         &app,
                         &logger,
                         LogLevel::Info,
-                        LogSource::Vpn,
+                        LogSource::Proxy,
                         format!("Proxy ready after {attempts} attempt(s)"),
                     );
                     log(
                         &app,
                         &logger,
                         LogLevel::Success,
-                        LogSource::Vpn,
-                        format!("VPN connected to {}", profile.display_name()),
+                        LogSource::Proxy,
+                        format!("Proxy connected to {}", profile.display_name()),
                     );
                     emit_status(&app, ConnectionStatus::Connected);
 
@@ -157,7 +200,7 @@ async fn start_proxy(
                                                     &app,
                                                     &logger,
                                                     LogLevel::Info,
-                                                    LogSource::Vpn,
+                                                    LogSource::Proxy,
                                                     format!("Proxy verified (exit IP: {ip})"),
                                                 );
                                                 break;
@@ -167,15 +210,69 @@ async fn start_proxy(
                                 }
                             }
                             if !got_response {
-                                log(&app, &logger, LogLevel::Error, LogSource::Vpn,
-                                    "Proxy connection verified but exit IP unavailable — traffic may not be routing through proxy".into());
+                                // exit IP verification failed — server may be CDN.
+                                // Try alternative servers via Clash API switch.
+                                let mut switched = false;
+                                let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                                if stats_port > 0 && all_servers.len() > 1 {
+                                    for idx in 1..all_servers.len() {
+                                        let tag = format!("proxy-{idx}");
+                                        log(
+                                            &app,
+                                            &logger,
+                                            LogLevel::Info,
+                                            LogSource::Proxy,
+                                            format!("Switching to {tag} ({})...", all_servers[idx].display_name()),
+                                        );
+                                        let switch_url = format!("http://127.0.0.1:{stats_port}/proxies/proxy");
+                                        let body = serde_json::json!({ "name": tag });
+                                        let client = reqwest::Client::new();
+                                        if client.put(&switch_url).json(&body).send().await.is_ok() {
+                                            tokio::time::sleep(Duration::from_secs(2)).await;
+                                            // Re-verify exit IP through the new server
+                                            let mut cb = reqwest::Client::builder().timeout(Duration::from_secs(5));
+                                            if let Ok(proxy) =
+                                                    reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}"))
+                                                {
+                                                    cb = cb.proxy(proxy);
+                                                }
+                                            if let Some(c) = cb.build().ok() {
+                                                for url in IP_URLS {
+                                                    if let Ok(resp) = c.get(*url).send().await {
+                                                        if resp.status().is_success() {
+                                                            if let Ok(text) = resp.text().await {
+                                                                let ip = text.trim().to_string();
+                                                                if !ip.is_empty()
+                                                                    && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
+                                                                {
+                                                                    log(&app, &logger, LogLevel::Info, LogSource::Proxy,
+                                                                        format!("Proxy verified (exit IP: {ip}) via {tag}"),
+                                                                    );
+                                                                    switched = true;
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if switched {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                if !switched {
+                                    log(&app, &logger, LogLevel::Error, LogSource::Proxy,
+                                        "Proxy connection verified but exit IP unavailable — traffic may not be routing through proxy".into());
+                                }
                             }
                         }
                     }
 
                     // Save for auto-reconnect on unexpected exit
                     {
-                        let mut last = crate::proxy::LAST_PROFILE.lock().unwrap();
+                        let mut last = crate::proxy::LAST_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
                         *last = Some(crate::proxy::LastConnection {
                             all_servers: all_servers.clone(),
                             routing_mode: routing_mode.clone(),
@@ -204,7 +301,7 @@ async fn start_proxy(
                                 if !is_process_alive(pid) {
                                     // Stop if the user disconnected (LAST_PROFILE cleared)
                                     {
-                                        let lock = crate::proxy::LAST_PROFILE.lock().unwrap();
+                                        let lock = crate::proxy::LAST_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
                                         if lock.is_none() {
                                             break; // intentional stop
                                         }
@@ -224,7 +321,7 @@ async fn start_proxy(
                                     // and mgr.stop() would clear the PID guard causing mgr.status()
                                     // to always return Disconnected.
                                     let last = {
-                                        let lock = crate::proxy::LAST_PROFILE.lock().unwrap();
+                                        let lock = crate::proxy::LAST_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
                                         lock.clone()
                                     };
                                     let mut reconnected = false;
@@ -235,7 +332,7 @@ async fn start_proxy(
 
                                             // User might have disconnected while we were sleeping
                                             {
-                                                let lock = crate::proxy::LAST_PROFILE.lock().unwrap();
+                                                let lock = crate::proxy::LAST_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
                                                 if lock.is_none() {
                                                     break;
                                                 }
@@ -316,7 +413,7 @@ async fn start_proxy(
                             let mut prev_down: Option<f64> = None;
                             let mut prev_time: Option<std::time::Instant> = None;
                             loop {
-                                // Stop polling if VPN disconnected
+                                // Stop polling if proxy disconnected
                                 {
                                     let mgr = mgr_arc.lock().await;
                                     if mgr.status() == crate::proxy::ConnectionStatus::Disconnected {
@@ -430,16 +527,18 @@ async fn start_proxy(
                                     profile.servers = re_pinged;
                                 }
                             }
-                            let _ = pm.save();
+                            if let Err(e) = pm.save() {
+                                log::warn!("save failed: {e}");
+                            }
                         }
                     });
 
-                    Ok(())
+                    Ok(proxy_port)
                 }
                 Err(e) => {
                     let _ = manager.stop(&app).await;
                     let msg = format!("Proxy not reachable: {e}");
-                    log(&app, &logger, LogLevel::Error, LogSource::Vpn, msg.clone());
+                    log(&app, &logger, LogLevel::Error, LogSource::Proxy, msg.clone());
                     emit_status(&app, ConnectionStatus::Error(msg.clone()));
                     Err(msg)
                 }
@@ -451,7 +550,7 @@ async fn start_proxy(
                 &app,
                 &logger,
                 LogLevel::Error,
-                LogSource::Vpn,
+                LogSource::Proxy,
                 format!("Connection failed: {msg}"),
             );
             emit_status(&app, ConnectionStatus::Error(msg.clone()));
@@ -468,41 +567,31 @@ async fn stop_proxy(app: tauri::AppHandle, state: tauri::State<'_, ProxyState>) 
         &logger,
         LogLevel::Info,
         LogSource::System,
-        "Disconnecting VPN...".into(),
+        "Disconnecting...".into(),
     );
 
-    // Step 1: Clear LAST_PROFILE so watchdog stops (must be before kill)
+    // Step 1: Clear LAST_PROFILE so watchdog stops.
     {
-        let mut last = crate::proxy::LAST_PROFILE.lock().unwrap();
+        let mut last = crate::proxy::LAST_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
         *last = None;
     }
 
-    // Step 2: Reset Clash API port so downstream checks (proxy_port, process_servers)
-    // know the VPN is no longer running.
+    // Step 2: Reset Clash API port immediately so health check stops.
     crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
 
-    // Step 3: Disable system proxy — best effort, don't block on it
-    if let Ok(mut sysproxy) = sysproxy::Sysproxy::get_system_proxy() {
-        if sysproxy.enable {
-            sysproxy.enable = false;
-            let _ = sysproxy.set_system_proxy();
-        }
-    }
-
-    // Step 4: Kill sing-box by PID from global atomic (no manager lock needed)
-    let pid = crate::proxy::VPN_PID.swap(0, std::sync::atomic::Ordering::AcqRel);
+    // Step 3: Kill sing-box by PID + fallback by process name.
+    let pid = crate::proxy::PROXY_PID.swap(0, std::sync::atomic::Ordering::AcqRel);
     if pid > 0 {
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new("taskkill")
+            use std::os::windows::process::CommandExt;
+            if let Err(e) = std::process::Command::new("taskkill")
                 .args(["/pid", &pid.to_string(), "/f"])
                 .creation_flags(0x08000000)
-                .output();
-            let _ = std::process::Command::new("powershell")
-                .args(["-NoProfile", "-Command",
-                    &format!("Start-Process 'taskkill' -Verb RunAs -WindowStyle Hidden -ArgumentList '/pid','{}','/f' | Out-Null", pid)])
-                .creation_flags(0x08000000)
-                .output();
+                .output()
+            {
+                log::warn!("taskkill (pid) failed: {e}");
+            }
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -512,29 +601,41 @@ async fn stop_proxy(app: tauri::AppHandle, state: tauri::State<'_, ProxyState>) 
         }
     }
 
-    // Step 3: Best-effort manager cleanup
+    // Fallback: kill ANY sing-box process that might still be running.
+    // This handles stale PIDs where taskkill by PID might have failed.
+    #[cfg(target_os = "windows")]
     {
-        if let Ok(mgr) = state.manager.try_lock() {
-            mgr.clear_pid();
-            let logger = app.state::<StdMutex<Logger>>();
-            log(
-                &app,
-                &logger,
-                LogLevel::Info,
-                LogSource::Process,
-                "sing-box state cleaned up".into(),
-            );
+        use std::os::windows::process::CommandExt;
+        if let Err(e) = std::process::Command::new("taskkill")
+            .args(["/im", "sing-box.exe", "/f"])
+            .creation_flags(0x08000000)
+            .output()
+        {
+            log::warn!("taskkill (/im) failed: {e}");
         }
     }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = std::process::Command::new("pkill")
+            .args(["-9", "sing-box"])
+            .output();
+    }
 
-    // Step 4: Log and emit status
     log(
         &app,
         &logger,
-        LogLevel::Success,
-        LogSource::Vpn,
-        "VPN disconnected".into(),
+        LogLevel::Info,
+        LogSource::Process,
+        "sing-box process terminated".into(),
     );
+
+    // Step 4: Best-effort manager cleanup.
+    if let Ok(mgr) = state.manager.try_lock() {
+        mgr.clear_pid();
+    }
+
+    // Step 6: Log and emit status.
+    log(&app, &logger, LogLevel::Success, LogSource::System, "Disconnected".into());
     emit_status(&app, ConnectionStatus::Disconnected);
 
     Ok(())
@@ -767,7 +868,7 @@ async fn get_settings(state: tauri::State<'_, Mutex<AppSettings>>) -> Result<App
     Ok(settings.clone())
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 async fn update_settings(
     app: tauri::AppHandle,
     new_settings: AppSettings,
@@ -810,7 +911,13 @@ fn set_start_on_boot(enabled: bool) {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-        let exe_path = std::env::current_exe().unwrap_or_default();
+        let exe_path = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("Cannot get exe path: {e}");
+                return;
+            }
+        };
         let exe_str = exe_path.to_string_lossy();
 
         if enabled {
@@ -884,16 +991,25 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .expect("Failed to get app data dir");
+            let data_dir = match app.path().app_data_dir() {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("[FATAL] Failed to get app data dir: {e}");
+                    std::process::exit(1);
+                }
+            };
 
-            std::fs::create_dir_all(&data_dir).expect("Failed to create app data dir");
+            if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                eprintln!("[FATAL] Failed to create app data dir: {e}");
+                std::process::exit(1);
+            }
 
             // Set up logging
             let log_dir = data_dir.join("logs");
-            std::fs::create_dir_all(&log_dir).expect("Failed to create logs dir");
+            if let Err(e) = std::fs::create_dir_all(&log_dir) {
+                eprintln!("[FATAL] Failed to create logs dir: {e}");
+                std::process::exit(1);
+            }
             let timestamp = Local::now().format("%Y%m%d-%H%M%S");
             let log_file = log_dir.join(format!("logs-{timestamp}.jsonl"));
 
@@ -918,11 +1034,11 @@ pub fn run() {
             let singbox_path = data_dir.join("binaries").join("sing-box.exe");
             crate::proxy::geoip::set_singbox_bin_path(singbox_path);
 
-            let vpn_manager = ProxyManager::new(data_dir.clone());
-            let vpn_state = ProxyState {
-                manager: Arc::new(Mutex::new(vpn_manager)),
+            let proxy_manager = ProxyManager::new(data_dir.clone());
+            let proxy_state = ProxyState {
+                manager: Arc::new(Mutex::new(proxy_manager)),
             };
-            app.manage(vpn_state);
+            app.manage(proxy_state);
 
             // ── Server cache (dual-layer with batcher) ──────────────────────
             let cache = Arc::new(ServerCache::new(&data_dir));
@@ -949,14 +1065,20 @@ pub fn run() {
             );
 
             let settings_mgr = SettingsManager::new(data_dir.clone());
-            let settings = settings_mgr.load().expect("Failed to load settings");
+            let settings = settings_mgr.load().unwrap_or_else(|e| {
+                eprintln!("[WARN] Failed to load settings: {e} — using defaults");
+                AppSettings::default()
+            });
             // Sync auto-start at boot (user may have manually removed the Run key)
             set_start_on_boot(settings.start_with_windows);
             app.manage(Mutex::new(settings_mgr));
             app.manage(Mutex::new(settings));
 
             let mut profile_manager = ProfileManager::new(data_dir);
-            profile_manager.load().expect("Failed to load profiles");
+            profile_manager.load().unwrap_or_else(|e| {
+                log::error!("Failed to load profiles: {e} — starting with empty profile list");
+                // logger not available yet, but we can continue with empty
+            });
             let profile_state = ProfileState {
                 manager: Arc::new(Mutex::new(profile_manager)),
             };
@@ -1096,8 +1218,8 @@ fn read_clipboard_text() -> Result<String, String> {
         .map_err(|e| format!("Clipboard read: {e}"))
 }
 
-/// Get the user's real IP (before VPN/proxy) with GeoIP location.
-/// Always fetches directly (no proxy) — works whether VPN is connected or not.
+/// Get the user's real IP (before proxy) with GeoIP location.
+/// Always fetches directly (no proxy) — works whether connected or not.
 #[tauri::command]
 async fn get_real_ip(app: tauri::AppHandle) -> Result<String, String> {
     let _logger = app.state::<StdMutex<Logger>>();
@@ -1145,10 +1267,11 @@ async fn get_real_ip(app: tauri::AppHandle) -> Result<String, String> {
     }
 }
 
-/// Find the active proxy's outlet (external) IP address via IP echo services
+/// Find the active proxy's outlet (external) IP address via IP echo services.
 /// Uses the active proxy port when connected in proxy mode so the request
-/// actually goes through the VPN / proxy tunnel.
-/// Track previous outlet IP so we log changes from Rust directly.
+/// actually goes through the proxy tunnel.
+/// If the active server is CDN-routed, returns immediately (CDN servers
+/// cannot route proxy traffic and have no meaningful exit IP).
 static PREV_OUTLET_IP: StdMutex<Option<String>> = StdMutex::new(None);
 
 #[derive(Debug, Clone, Serialize)]
@@ -1157,13 +1280,16 @@ pub struct ExitIpInfo {
     pub flag: String,
     pub country_name: String,
     pub city_name: String,
+    /// The sing-box outbound tag that handled the request (e.g. "proxy-5").
+    /// Empty if not available.
+    pub proxy_tag: String,
 }
 
 #[tauri::command]
 async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
     let stats_port = crate::proxy::CLASH_API_PORT.load(Ordering::Relaxed);
     if stats_port == 0 {
-        return Err("VPN not connected".into());
+        return Err("Proxy not connected".into());
     }
 
     // Always route through proxy in proxy modes
@@ -1222,23 +1348,39 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
         return Err("Could not determine external IP".into());
     }
 
+    let mut proxy_tag = String::new();
+
+    // Query the Clash API for the currently selected proxy outbound tag
+    if stats_port != 0 {
+        let api_url = format!("http://127.0.0.1:{stats_port}/proxies/proxy");
+        if let Ok(resp) = reqwest::get(&api_url).await {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                if let Some(current) = body.get("now").and_then(|v| v.as_str()) {
+                    proxy_tag = current.to_string();
+                }
+            }
+        }
+    }
+
     let info = match crate::proxy::geoip::resolve(&ip) {
         Some(geo) => ExitIpInfo {
             server: ip.clone(),
             flag: geo.country_code.clone(),
             country_name: geo.country_name.clone(),
             city_name: geo.city.clone(),
+            proxy_tag: proxy_tag.clone(),
         },
         None => ExitIpInfo {
             server: ip.clone(),
             flag: String::new(),
             country_name: String::new(),
             city_name: String::new(),
+            proxy_tag,
         },
     };
 
     // Persist exit IP geoip to the active server in profiles.json
-    let active_id = crate::proxy::ACTIVE_SERVER_ID.lock().unwrap().clone();
+    let active_id = crate::proxy::ACTIVE_SERVER_ID.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(ref server_id) = active_id {
         if let Some(profile_state) = app.try_state::<ProfileState>() {
             let mut pm = profile_state.manager.lock().await;
@@ -1280,13 +1422,15 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
                 }
             }
             if saved {
-                let _ = pm.save();
+                if let Err(e) = pm.save() {
+                    log::warn!("save failed: {e}");
+                }
             }
         }
     }
 
     {
-        let mut prev = PREV_OUTLET_IP.lock().unwrap();
+        let mut prev = PREV_OUTLET_IP.lock().unwrap_or_else(|e| e.into_inner());
         if prev.as_deref() != Some(&ip) {
             let logger = app.state::<StdMutex<Logger>>();
             log(
@@ -1333,11 +1477,11 @@ async fn check_proxy_health() -> Result<bool, String> {
 
 /// Switch the Selector proxy to the given outbound tag.
 /// Called by health check when the current server is dead.
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 async fn switch_proxy(proxy_tag: String) -> Result<(), String> {
     let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if stats_port == 0 {
-        return Err("VPN not connected".into());
+        return Err("Proxy not connected".into());
     }
 
     let client = reqwest::Client::builder()
@@ -1361,7 +1505,7 @@ async fn switch_proxy(proxy_tag: String) -> Result<(), String> {
 async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
     let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if stats_port == 0 {
-        return Err("VPN not connected".into());
+        return Err("Proxy not connected".into());
     }
 
     let client = reqwest::Client::builder()
@@ -1431,7 +1575,7 @@ async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
 async fn get_connections() -> Result<Vec<serde_json::Value>, String> {
     let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if stats_port == 0 {
-        return Err("VPN not connected".into());
+        return Err("Proxy not connected".into());
     }
 
     let client = reqwest::Client::builder()
@@ -1760,20 +1904,42 @@ async fn get_geoip_status(app: tauri::AppHandle) -> Result<crate::proxy::geoip::
 }
 
 /// Check if a process is alive by PID.
+///
+/// Windows: uses Win32 `OpenProcess` with `PROCESS_QUERY_LIMITED_INFORMATION`.
+/// This is an order of magnitude faster and lighter than spawning `tasklist`
+/// every 2 seconds in the watchdog loop — no process creation, pipe I/O, or
+/// CSV parsing.
+///
+/// Unix: sends `kill -0` signal to check existence.
 pub(crate) fn is_process_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
-        let output = std::process::Command::new("tasklist")
-            .args(["/fi", &format!("PID eq {pid}"), "/fo", "csv", "/nh"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        match output {
-            Ok(o) => {
-                let out = String::from_utf8_lossy(&o.stdout);
-                out.contains(&format!("\"{}\"", pid))
-            }
-            Err(_) => false,
+        // Win32: OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)
+        // Returns a non-null handle if the process exists and is accessible.
+        // PROCESS_QUERY_LIMITED_INFORMATION (0x1000) requires Vista+ and is
+        // available without extra privileges on Win 8+.
+        use std::ffi::c_void;
+
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+        extern "system" {
+            fn OpenProcess(
+                dwDesiredAccess: u32,
+                bInheritHandle: i32,
+                dwProcessId: u32,
+            ) -> *mut c_void;
+            fn CloseHandle(hObject: *mut c_void) -> i32;
         }
+
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return false;
+        }
+        // SAFETY: handle is valid (non-null) at this point.
+        unsafe {
+            CloseHandle(handle);
+        }
+        true
     }
     #[cfg(unix)]
     {

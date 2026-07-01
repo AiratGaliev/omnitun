@@ -13,6 +13,20 @@
         "detour": "proxy"
       },
       {
+        "type": "https",
+        "tag": "remote-backup",
+        "server": "8.8.8.8",
+        "server_port": 443,
+        "detour": "proxy"
+      },
+      {
+        "type": "https",
+        "tag": "remote-backup2",
+        "server": "9.9.9.9",
+        "server_port": 443,
+        "detour": "proxy"
+      },
+      {
         "type": "local",
         "tag": "local",
         "detour": "direct"

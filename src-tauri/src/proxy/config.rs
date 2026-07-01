@@ -14,10 +14,15 @@ pub(crate) fn find_available_port() -> Option<u16> {
     Some(port)
 }
 
+/// Check if a specific TCP port is available on 127.0.0.1.
+pub(crate) fn port_available(port: u16) -> bool {
+    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
 pub fn generate_config(
     cache_dir: &Path,
     proxy_port: u16,
-    _routing_mode: &str,
+    routing_mode: &str,
     server_profiles: &[ServerProfile],
     settings: &AppSettings,
 ) -> Result<(String, u16), ProxyError> {
@@ -83,8 +88,12 @@ pub fn generate_config(
     }
 
     // Set proxy listen port from user settings (HTTP/SOCKS proxy)
+    // Also enable system proxy for system-proxy mode.
     if let Some(inbound) = config["inbounds"].get_mut(0) {
         inbound["listen_port"] = json!(proxy_port);
+        if routing_mode == "system-proxy" {
+            inbound["set_system_proxy"] = json!(true);
+        }
     }
 
     // Set cache file to absolute path so it doesn't appear in the project root
@@ -155,7 +164,7 @@ pub fn generate_config(
         .and_then(|r| r.as_array_mut())
     {
         // Allow LAN: add/remove ip_is_private → direct rule based on setting.
-        // Base templates have inconsistent defaults (proxy mode has it, VPN mode doesn't),
+        // Base templates have inconsistent defaults (proxy mode has it, local mode doesn't),
         // so we manage it explicitly here.
         let private_rule = json!({"ip_is_private": true, "outbound": "direct"});
         let private_idx = rules.iter().position(|r| {
@@ -643,7 +652,13 @@ pub fn generate_batch_config(
 ) -> Result<Value, ProxyError> {
     use serde_json::json;
 
-    assert_eq!(servers.len(), ports.len(), "servers and ports must have same length");
+    if servers.len() != ports.len() {
+        return Err(ProxyError::Config(format!(
+            "servers.len()={} != ports.len()={}",
+            servers.len(),
+            ports.len()
+        )));
+    }
 
     let log_path = test_dir.join("sing-box.log");
     let log_str = log_path.to_string_lossy();
@@ -776,6 +791,43 @@ mod tests {
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
         assert_eq!(config["inbounds"][0]["listen_port"], 9999);
+    }
+
+    #[test]
+    fn test_system_proxy_mode_sets_set_system_proxy() {
+        let result = generate_config(
+            &cache_dir(),
+            1080,
+            "system-proxy",
+            &[vless_profile()],
+            &default_settings(),
+        );
+        assert!(result.is_ok());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        assert_eq!(
+            config["inbounds"][0]["set_system_proxy"],
+            true,
+            "system-proxy mode should enable set_system_proxy"
+        );
+    }
+
+    #[test]
+    fn test_local_proxy_mode_no_set_system_proxy() {
+        let result = generate_config(
+            &cache_dir(),
+            1080,
+            "local-proxy",
+            &[vless_profile()],
+            &default_settings(),
+        );
+        assert!(result.is_ok());
+
+        let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
+        assert!(
+            config["inbounds"][0].get("set_system_proxy").is_none(),
+            "local-proxy should NOT have set_system_proxy"
+        );
     }
 
     #[test]

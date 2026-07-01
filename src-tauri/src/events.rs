@@ -9,7 +9,9 @@ pub struct ConnectionStatusPayload {
 
 pub fn emit_status(app_handle: &AppHandle, status: ConnectionStatus) {
     let payload = ConnectionStatusPayload { status };
-    let _ = app_handle.emit("connection-status-changed", payload);
+    if let Err(e) = app_handle.emit("connection-status-changed", payload) {
+        log::debug!("emit connection-status-changed failed: {e}");
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -19,7 +21,9 @@ pub struct TrafficPayload {
 }
 
 pub fn emit_traffic(app_handle: &AppHandle, up: f64, down: f64) {
-    let _ = app_handle.emit("traffic-update", TrafficPayload { up, down });
+    if let Err(e) = app_handle.emit("traffic-update", TrafficPayload { up, down }) {
+        log::debug!("emit traffic-update failed: {e}");
+    }
 }
 
 // ── Batch testing progress ────────────────────────────────────────────────
@@ -46,7 +50,9 @@ pub struct RefreshProgress {
 
 /// Emit a batch testing progress event to the frontend.
 pub fn emit_refresh_progress(app_handle: &AppHandle, progress: RefreshProgress) {
-    let _ = app_handle.emit("refresh-progress", progress);
+    if let Err(e) = app_handle.emit("refresh-progress", progress) {
+        log::debug!("emit refresh-progress failed: {e}");
+    }
 }
 
 #[cfg(test)]
@@ -55,28 +61,28 @@ mod tests {
     use crate::proxy::ConnectionStatus;
 
     #[test]
-    fn test_vpn_status_serialization_disconnected() {
+    fn test_connection_status_serialization_disconnected() {
         let s = ConnectionStatus::Disconnected;
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(json, "\"disconnected\"");
     }
 
     #[test]
-    fn test_vpn_status_serialization_connecting() {
+    fn test_connection_status_serialization_connecting() {
         let s = ConnectionStatus::Connecting;
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(json, "\"connecting\"");
     }
 
     #[test]
-    fn test_vpn_status_serialization_connected() {
+    fn test_connection_status_serialization_connected() {
         let s = ConnectionStatus::Connected;
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(json, "\"connected\"");
     }
 
     #[test]
-    fn test_vpn_status_serialization_error() {
+    fn test_connection_status_serialization_error() {
         let s = ConnectionStatus::Error("test error".into());
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("error"));
@@ -84,14 +90,14 @@ mod tests {
     }
 
     #[test]
-    fn test_vpn_status_payload_deserialization() {
+    fn test_connection_status_payload_deserialization() {
         let raw = r#"{"status":"connected"}"#;
         let p: ConnectionStatusPayload = serde_json::from_str(raw).unwrap();
         assert!(matches!(p.status, ConnectionStatus::Connected));
     }
 
     #[test]
-    fn test_vpn_status_payload_deserialization_error() {
+    fn test_connection_status_payload_deserialization_error() {
         let raw = r#"{"status":{"error":"connection lost"}}"#;
         let p: ConnectionStatusPayload = serde_json::from_str(raw).unwrap();
         assert!(matches!(p.status, ConnectionStatus::Error(_)));

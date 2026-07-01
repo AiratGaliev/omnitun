@@ -57,7 +57,7 @@ async fn outlet_vs_entry_country() {
     let mut labels: Vec<(usize, String, String)> = Vec::new();
 
     for (i, sv) in servers.iter().enumerate() {
-        let sp: omnitun_lib::vpn::ServerProfile = match serde_json::from_value(sv.clone()) {
+        let sp: omnitun_lib::proxy::ServerProfile = match serde_json::from_value(sv.clone()) {
             Ok(s) => s,
             _ => continue,
         };
@@ -66,7 +66,7 @@ async fn outlet_vs_entry_country() {
             _ => continue,
         };
         let tag = format!("s{i}");
-        if let Ok(mut ob) = omnitun_lib::vpn::config::build_outbound(&sp) {
+        if let Ok(mut ob) = omnitun_lib::proxy::config::build_outbound(&sp) {
             ob["tag"] = serde_json::json!(&tag);
             inbs.push(serde_json::json!({"type": "mixed","tag":format!("in{i}"),
                 "listen":"127.0.0.1","listen_port":p}));
@@ -189,7 +189,7 @@ async fn outlet_vs_entry_country() {
         };
 
         let (exit_country, exit_ip, matched) = match outlet {
-            Some(ref ip) => match omnitun_lib::vpn::geoip::resolve_hostname(ip).await {
+            Some(ref ip) => match omnitun_lib::proxy::geoip::resolve_hostname(ip).await {
                 Some(g) => {
                     let m = g.country_code == *flag;
                     if m {

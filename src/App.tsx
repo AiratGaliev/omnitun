@@ -44,7 +44,9 @@ export default function App() {
       .then((fn) => {
         unlisten = fn;
       })
-      .catch(() => undefined);
+      .catch((e: unknown) => {
+        console.error('initListener failed:', e);
+      });
     return () => {
       unlisten?.();
     };
@@ -53,7 +55,9 @@ export default function App() {
   // Listen for tray toggle event (system tray "Connect" button)
   useEffect(() => {
     const unlistenPromise = listen('tray-toggle-proxy', () => {
-      useAppStore.getState().toggleConnection().catch(() => undefined);
+      useAppStore.getState().toggleConnection().catch((e) => {
+        console.error('tray-toggle failed:', e);
+      });
     });
     return () => {
       unlistenPromise.then((fn) => fn());

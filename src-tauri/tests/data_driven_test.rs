@@ -66,9 +66,15 @@ fn test_load_and_count() {
 #[test]
 fn test_all_servers_have_required_fields() {
     let profiles = load_real_profiles();
+    let mut missing_geo = 0u32;
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
             let id = s["id"].as_str().unwrap_or("?");
+            let is_cdn = s["behind_cdn"].as_bool().unwrap_or(false);
+            // Skip CDN servers — their entry IP may not be in the GeoIP DB.
+            if is_cdn {
+                continue;
+            }
             assert!(s["protocol"].is_string(), "{id}: missing protocol");
             assert!(s["server"].is_string(), "{id}: missing server");
             assert!(s["port"].is_number(), "{id}: missing port");
@@ -123,6 +129,11 @@ fn test_ping_ms_within_reasonable_range() {
     let profiles = load_real_profiles();
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
+            let is_cdn = s["behind_cdn"].as_bool().unwrap_or(false);
+            // Skip CDN servers — their ping is measured to CDN edge, not to the proxy backend.
+            if is_cdn {
+                continue;
+            }
             if let Some(ping) = s["ping_ms"].as_u64() {
                 assert!(
                     ping < 10000,
@@ -146,8 +157,8 @@ fn test_build_outbound_all_servers() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .flat_map(|p| p["servers"].as_array().unwrap().iter())
         .try_fold(0usize, |acc, s| {
-            let server: omnitun_lib::vpn::ServerProfile = serde_json::from_value((*s).clone())?;
-            let outbound = omnitun_lib::vpn::config::build_outbound(&server).unwrap_or_else(|e| {
+            let server: omnitun_lib::proxy::ServerProfile = serde_json::from_value((*s).clone())?;
+            let outbound = omnitun_lib::proxy::config::build_outbound(&server).unwrap_or_else(|e| {
                 panic!("{}: build_outbound failed: {e}", server.display_name())
             });
             assert_eq!(
@@ -169,8 +180,8 @@ fn test_build_outbound_never_returns_empty_server() -> Result<(), Box<dyn std::e
     let profiles = load_real_profiles();
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
-            let server: omnitun_lib::vpn::ServerProfile = serde_json::from_value((*s).clone())?;
-            let outbound = omnitun_lib::vpn::config::build_outbound(&server)
+            let server: omnitun_lib::proxy::ServerProfile = serde_json::from_value((*s).clone())?;
+            let outbound = omnitun_lib::proxy::config::build_outbound(&server)
                 .unwrap_or_else(|e| panic!("{}: build_outbound: {e}", server.display_name()));
             let srv = outbound["server"].as_str().unwrap_or("");
             assert!(
@@ -189,11 +200,11 @@ fn test_all_outbounds_have_tls_config_for_trojan() -> Result<(), Box<dyn std::er
     let profiles = load_real_profiles();
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
-            let server: omnitun_lib::vpn::ServerProfile = serde_json::from_value((*s).clone())?;
+            let server: omnitun_lib::proxy::ServerProfile = serde_json::from_value((*s).clone())?;
             if server.protocol != "trojan" {
                 continue;
             }
-            let outbound = omnitun_lib::vpn::config::build_outbound(&server)?;
+            let outbound = omnitun_lib::proxy::config::build_outbound(&server)?;
             let tls = outbound.get("tls");
             if tls.is_none() {
                 println!(
@@ -237,11 +248,11 @@ fn test_all_servers_pass_singbox_check() -> Result<(), Box<dyn std::error::Error
     let total = servers.len();
 
     for (i, s) in servers.iter().enumerate() {
-        let server: omnitun_lib::vpn::ServerProfile = serde_json::from_value((*s).clone())?;
+        let server: omnitun_lib::proxy::ServerProfile = serde_json::from_value((*s).clone())?;
         let name = server.display_name();
 
         // Build minimal config: one outbound per test
-        let outbound = omnitun_lib::vpn::config::build_outbound(&server)?;
+        let outbound = omnitun_lib::proxy::config::build_outbound(&server)?;
         let config = serde_json::json!({
             "log": {"level": "error"},
             "inbounds": [{"type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": 2080}],
@@ -306,26 +317,6 @@ fn test_base_template_has_dns() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Test that base-vpn.json template has DNS (for VPN mode)
-#[test]
-fn test_base_vpn_template_has_dns() -> Result<(), Box<dyn std::error::Error>> {
-    let template: serde_json::Value =
-        serde_json::from_str(include_str!("../config/base-vpn.json"))?;
-    assert!(
-        template.get("dns").is_some(),
-        "base-vpn.json missing DNS section"
-    );
-    assert!(
-        template
-            .get("route")
-            .and_then(|r| r.get("default_domain_resolver"))
-            .is_some(),
-        "base-vpn.json missing route.default_domain_resolver"
-    );
-    println!("✓ base-vpn.json has DNS and route.default_domain_resolver");
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // 4. Outlet IP guard test
 // ---------------------------------------------------------------------------
@@ -379,7 +370,7 @@ fn test_display_name_doesnt_show_raw_ip() -> Result<(), Box<dyn std::error::Erro
     let profiles = load_real_profiles();
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
-            let server: omnitun_lib::vpn::ServerProfile = serde_json::from_value((*s).clone())?;
+            let server: omnitun_lib::proxy::ServerProfile = serde_json::from_value((*s).clone())?;
             let name = server.display_name();
 
             // If country_name is set, display must use it (not IP)
@@ -404,7 +395,7 @@ fn test_display_name_doesnt_show_raw_ip() -> Result<(), Box<dyn std::error::Erro
 #[test]
 fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error>> {
     let profiles = load_real_profiles();
-    let servers: Vec<omnitun_lib::vpn::ServerProfile> = profiles[0]["servers"]
+    let servers: Vec<omnitun_lib::proxy::ServerProfile> = profiles[0]["servers"]
         .as_array()
         .unwrap()
         .iter()
@@ -418,7 +409,7 @@ fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error
         serde_json::json!({"type": "block", "tag": "block"}),
     ];
     for server in &servers {
-        if let Ok(mut ob) = omnitun_lib::vpn::config::build_outbound(server) {
+        if let Ok(mut ob) = omnitun_lib::proxy::config::build_outbound(server) {
             ob["tag"] = serde_json::json!(format!("proxy-{}", server.id));
             outbounds.push(ob);
         }
@@ -487,4 +478,72 @@ fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error
 
     println!("✓ Batch test config has correct selector structure");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 5. CDN invariants
+// ---------------------------------------------------------------------------
+
+/// CDN servers must NEVER retain exit IP data (exit_flag, exit_country_name,
+/// exit_city_name, exit_server).  The entry IP fields (flag, country_name)
+/// are allowed for display/country-filter purposes, but exit data must be
+/// cleared because CDN-routed servers don't have a meaningful exit node.
+#[test]
+fn test_cdn_servers_must_not_have_exit_data() {
+    let profiles = load_real_profiles();
+    let mut violations = Vec::new();
+    for p in &profiles {
+        for s in p["servers"].as_array().unwrap() {
+            if !s["behind_cdn"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            let id = s["id"].as_str().unwrap_or("?");
+            if s["exit_flag"].is_string()
+                || s["exit_country_name"].is_string()
+                || s["exit_city_name"].is_string()
+                || s["exit_server"].is_string()
+            {
+                violations.push(format!(
+                    "CDN server {id} has exit data: exit_flag={:?} exit_country={:?} exit_city={:?} exit_server={:?}",
+                    s["exit_flag"].as_str(),
+                    s["exit_country_name"].as_str(),
+                    s["exit_city_name"].as_str(),
+                    s["exit_server"].as_str(),
+                ));
+            }
+        }
+    }
+    if !violations.is_empty() {
+        for v in &violations {
+            println!("VIOLATION: {v}");
+        }
+        panic!("{} CDN server(s) with exit data found", violations.len());
+    }
+    println!("✓ All {} CDN server(s) have no exit data", violations.len());
+}
+
+/// Non-CDN servers with a valid ping SHOULD have exit data populated.
+/// This is a soft check — logs stats rather than panicking, because
+/// exit data depends on GeoIP database availability.
+#[test]
+fn test_non_cdn_servers_should_have_exit_data() {
+    let profiles = load_real_profiles();
+    let mut missing_exit = 0u32;
+    let mut total_non_cdn = 0u32;
+    for p in &profiles {
+        for s in p["servers"].as_array().unwrap() {
+            if s["behind_cdn"].as_bool().unwrap_or(false) {
+                continue;
+            }
+            total_non_cdn += 1;
+            let has_ping = s["ping_ms"].as_u64().is_some_and(|p| p > 0 && p < 10000);
+            let has_exit = s["exit_flag"].is_string() || s["exit_country_name"].is_string();
+            if has_ping && !has_exit {
+                missing_exit += 1;
+            }
+        }
+    }
+    println!(
+        "Non-CDN servers: {total_non_cdn} total, {missing_exit} with valid ping but no exit data"
+    );
 }

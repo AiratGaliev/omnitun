@@ -65,7 +65,7 @@ impl PortPool {
     /// The returned `PortGuard` shares the SAME pool reference via the internal
     /// `Arc`, so the port is returned correctly on Drop.
     pub fn acquire(&self) -> Option<PortGuard> {
-        let mut pool = self.available.lock().unwrap();
+        let mut pool = self.available.lock().unwrap_or_else(|e| e.into_inner());
         let port = pool.pop()?;
         Some(PortGuard {
             port,
@@ -82,7 +82,7 @@ impl PortPool {
 
     /// Number of ports currently available.
     pub fn available_count(&self) -> usize {
-        self.available.lock().unwrap().len()
+        self.available.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Total capacity (always the same unless ports were exhausted).
@@ -93,7 +93,7 @@ impl PortPool {
     /// Return a port directly (for use when not holding a guard).
     /// Checks for duplicates to prevent double-return.
     pub fn return_port(&self, port: u16) {
-        let mut pool = self.available.lock().unwrap();
+        let mut pool = self.available.lock().unwrap_or_else(|e| e.into_inner());
         if !pool.contains(&port) {
             pool.push(port);
         } else {
@@ -106,7 +106,7 @@ impl Drop for PortGuard {
     /// ⚠️ SYNCHRONOUS Drop — uses `std::sync::Mutex`, NOT `tokio::spawn`.
     /// This is safe even when the Tokio runtime is shutting down.
     fn drop(&mut self) {
-        let mut pool = self.pool.available.lock().unwrap();
+        let mut pool = self.pool.available.lock().unwrap_or_else(|e| e.into_inner());
         pool.push(self.port);
     }
 }

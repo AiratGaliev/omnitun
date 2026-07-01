@@ -110,7 +110,7 @@ function makeRustProfile(
         server: '127.0.0.1',
         port: 443,
         country_name: 'Switzerland',
-        flag: 'CH',
+        exitFlag: 'CH',
         ping_ms: 50,
       },
       {
@@ -119,7 +119,7 @@ function makeRustProfile(
         server: '192.168.1.1',
         port: 8443,
         country_name: 'Germany',
-        flag: 'DE',
+        exitFlag: 'DE',
         ping_ms: 100,
       },
     ],
@@ -599,18 +599,18 @@ describe('store — settings management', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. VPN connection toggling
+// 5. Proxy connection toggling
 // ─────────────────────────────────────────────────────────────────────────────
 describe('store — toggleConnection', () => {
-  it('disconnect path calls stop_vpn', async () => {
+  it('disconnect path calls stop_proxy', async () => {
     useAppStore.setState({ status: 'connected' });
     mockInvoke.mockResolvedValueOnce(undefined);
     await useAppStore.getState().toggleConnection();
-    expect(mockInvoke).toHaveBeenCalledWith('stop_vpn');
+    expect(mockInvoke).toHaveBeenCalledWith('stop_proxy');
     expect(useAppStore.getState().status).toBe('disconnecting');
   });
 
-  it('connect path calls saveSettings then start_vpn', async () => {
+  it('connect path calls saveSettings then start_proxy', async () => {
     useAppStore.setState({
       activeServer: { id: 'srv-1', name: 'Test', protocol: 'vless', server: '10.0.0.1', port: 443 },
       servers: [
@@ -621,7 +621,7 @@ describe('store — toggleConnection', () => {
     });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
-    mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
+    mockInvoke.mockResolvedValueOnce(1080); // start_proxy — returns actual port
     mockInvoke.mockResolvedValueOnce(undefined); // switch_proxy
     mockInvoke.mockResolvedValueOnce({
       server: '5.6.7.8',
@@ -633,7 +633,7 @@ describe('store — toggleConnection', () => {
     await useAppStore.getState().toggleConnection();
 
     expect(mockInvoke).toHaveBeenCalledWith(
-      'start_vpn',
+      'start_proxy',
       expect.objectContaining({
         routingMode: 'system-proxy',
         proxyPort: 1080,
@@ -661,7 +661,7 @@ describe('store — toggleConnection', () => {
     });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
-    mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
+    mockInvoke.mockResolvedValueOnce(1080); // start_proxy — returns actual port
     mockInvoke.mockResolvedValueOnce(undefined); // switch_proxy
     mockInvoke.mockResolvedValueOnce({
       server: '5.6.7.8',
@@ -672,7 +672,7 @@ describe('store — toggleConnection', () => {
 
     await useAppStore.getState().toggleConnection();
 
-    const startCall = mockInvoke.mock.calls.find((c) => c[0] === 'start_vpn');
+    const startCall = mockInvoke.mock.calls.find((c) => c[0] === 'start_proxy');
     expect(startCall).toBeDefined();
     // alternativeServers should have 2 entries (all except active)
     expect(startCall![1].alternativeServers).toHaveLength(2);
@@ -687,7 +687,7 @@ describe('store — toggleConnection', () => {
     useAppStore.getState().updateSettings({ autoConnectFastest: false });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
-    mockInvoke.mockResolvedValueOnce(undefined); // start_vpn
+    mockInvoke.mockResolvedValueOnce(1080); // start_proxy — returns actual port
     mockInvoke.mockResolvedValueOnce(undefined); // switch_proxy
     mockInvoke.mockResolvedValueOnce({
       server: '5.6.7.8',
@@ -697,7 +697,7 @@ describe('store — toggleConnection', () => {
     }); // outlet_ip
 
     await useAppStore.getState().toggleConnection();
-    const startCall = mockInvoke.mock.calls.find((c) => c[0] === 'start_vpn');
+    const startCall = mockInvoke.mock.calls.find((c) => c[0] === 'start_proxy');
     expect(startCall).toBeDefined();
     expect(startCall![1].alternativeServers).toHaveLength(0);
   });
@@ -706,10 +706,10 @@ describe('store — toggleConnection', () => {
     useAppStore.setState({ _isReconnecting: true });
     await useAppStore.getState().toggleConnection();
     // Should not call invoke at all
-    expect(mockInvoke).not.toHaveBeenCalledWith('start_vpn');
-    expect(mockInvoke).not.toHaveBeenCalledWith('stop_vpn');
+    expect(mockInvoke).not.toHaveBeenCalledWith('start_proxy');
+    expect(mockInvoke).not.toHaveBeenCalledWith('stop_proxy');
     expect(
-      useAppStore.getState().logs.some((l) => l.message.includes('reconnect in progress')),
+      useAppStore.getState().logs.some((l) => l.message.includes('already in progress')),
     ).toBe(true);
   });
 
@@ -720,7 +720,7 @@ describe('store — toggleConnection', () => {
     });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
-    mockInvoke.mockRejectedValueOnce(new Error('timeout')); // start_vpn fails
+    mockInvoke.mockRejectedValueOnce(new Error('timeout')); // start_proxy fails
 
     await expect(useAppStore.getState().toggleConnection()).rejects.toThrow('timeout');
     expect(useAppStore.getState().status).toBe('error');
@@ -892,6 +892,49 @@ describe('store — initListener health check', () => {
     cleanup();
     expect(useAppStore.getState()._healthCheckTimer).toBeNull();
   });
+
+  it('health check race guard: user disconnect during invoke does not reconnect', async () => {
+    // Simulate a slow check_proxy_health that takes time.
+    // If the user disconnects during that window, the race guard at
+    // line 819 must prevent reconnection.
+    let resolveDeferred: (value: boolean) => void;
+    const deferred = new Promise<boolean>((resolve) => {
+      resolveDeferred = resolve;
+    });
+
+    // Replace mockInvoke's check_proxy_health with a deferred promise
+    const origImpl = mockInvoke.getMockImplementation();
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_proxy_health') {
+        return deferred;
+      }
+      return undefined;
+    });
+
+    const cleanup = await useAppStore.getState().initListener();
+    triggerEvent('connection-status-changed', { status: 'connected' });
+    expect(useAppStore.getState().status).toBe('connected');
+
+    // Advance timer past health check interval — starts the invoke
+    await vi.advanceTimersByTimeAsync(30000);
+
+    // While invoke is pending, user disconnects
+    triggerEvent('connection-status-changed', { status: 'disconnected' });
+    expect(useAppStore.getState().status).toBe('disconnected');
+
+    // Now resolve the deferred — invoke returns but status is already disconnected
+    resolveDeferred!(false); // server appears dead
+    await vi.advanceTimersByTimeAsync(0); // flush microtasks
+
+    // Guard at line 819 should catch this: status !== 'connected' → return
+    // No reconnect attempt should happen — status stays disconnected
+    expect(useAppStore.getState().status).toBe('disconnected');
+    expect(useAppStore.getState().activeServer?.id).toBe('srv-1');
+
+    // Restore mock
+    mockInvoke.mockImplementation(origImpl as typeof mockInvoke);
+    cleanup();
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -909,11 +952,11 @@ describe('pickReplacementServer', () => {
 
   it('prefers same country with fastest ping', () => {
     const servers = [
-      { id: 'srv-ch-1', name: 'CH Fast', flag: 'CH', ping: 50 } as never,
-      { id: 'srv-ch-2', name: 'CH Slow', flag: 'CH', ping: 200 } as never,
-      { id: 'srv-de', name: 'DE', flag: 'DE', ping: 100 } as never,
+      { id: 'srv-ch-1', name: 'CH Fast', exitFlag: 'CH', ping: 50 } as never,
+      { id: 'srv-ch-2', name: 'CH Slow', exitFlag: 'CH', ping: 200 } as never,
+      { id: 'srv-de', name: 'DE', exitFlag: 'DE', ping: 100 } as never,
     ];
-    const current = { id: 'srv-ch-1', name: 'Old', flag: 'CH' } as never;
+    const current = { id: 'srv-ch-1', name: 'Old', exitFlag: 'CH' } as never;
     const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
     // Same country (CH) -> picks fastest CH server that's not current
     expect(result?.id).toBe('srv-ch-2');
@@ -921,20 +964,20 @@ describe('pickReplacementServer', () => {
 
   it('falls back to fastest any country when no same country available', () => {
     const servers = [
-      { id: 'srv-us', name: 'US', flag: 'US', ping: 300 } as never,
-      { id: 'srv-de', name: 'DE Fast', flag: 'DE', ping: 50 } as never,
+      { id: 'srv-us', name: 'US', exitFlag: 'US', ping: 300 } as never,
+      { id: 'srv-de', name: 'DE Fast', exitFlag: 'DE', ping: 50 } as never,
     ];
-    const current = { id: 'srv-ch', name: 'Old', flag: 'CH' } as never;
+    const current = { id: 'srv-ch', name: 'Old', exitFlag: 'CH' } as never;
     const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
     expect(result?.id).toBe('srv-de');
   });
 
   it('excludes the dead server itself', () => {
     const servers = [
-      { id: 'srv-dead', name: 'Dead', flag: 'CH', ping: 50 } as never,
-      { id: 'srv-other', name: 'Other', flag: 'DE', ping: 100 } as never,
+      { id: 'srv-dead', name: 'Dead', exitFlag: 'CH', ping: 50 } as never,
+      { id: 'srv-other', name: 'Other', exitFlag: 'DE', ping: 100 } as never,
     ];
-    const current = { id: 'srv-dead', name: 'Dead', flag: 'CH' } as never;
+    const current = { id: 'srv-dead', name: 'Dead', exitFlag: 'CH' } as never;
     const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
     expect(result?.id).toBe('srv-other');
   });
@@ -943,10 +986,10 @@ describe('pickReplacementServer', () => {
     const state = useAppStore.getState();
     state.updateSettings({ allowedCountries: ['DE'] });
     const servers = [
-      { id: 'srv-us', name: 'US', flag: 'US', ping: 10 } as never,
-      { id: 'srv-de', name: 'DE', flag: 'DE', ping: 100 } as never,
+      { id: 'srv-us', name: 'US', exitFlag: 'US', ping: 10 } as never,
+      { id: 'srv-de', name: 'DE', exitFlag: 'DE', ping: 100 } as never,
     ];
-    const current = { id: 'srv-dead', name: 'Dead', flag: 'CH' } as never;
+    const current = { id: 'srv-dead', name: 'Dead', exitFlag: 'CH' } as never;
     const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
     expect(result?.id).toBe('srv-de');
   });
@@ -955,10 +998,10 @@ describe('pickReplacementServer', () => {
     const state = useAppStore.getState();
     state.updateSettings({ blockedCountries: ['US'] });
     const servers = [
-      { id: 'srv-us', name: 'US', flag: 'US', ping: 10 } as never,
-      { id: 'srv-de', name: 'DE', flag: 'DE', ping: 100 } as never,
+      { id: 'srv-us', name: 'US', exitFlag: 'US', ping: 10 } as never,
+      { id: 'srv-de', name: 'DE', exitFlag: 'DE', ping: 100 } as never,
     ];
-    const current = { id: 'srv-dead', name: 'Dead', flag: 'CH' } as never;
+    const current = { id: 'srv-dead', name: 'Dead', exitFlag: 'CH' } as never;
     const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
     expect(result?.id).toBe('srv-de');
   });
@@ -967,10 +1010,10 @@ describe('pickReplacementServer', () => {
     const state = useAppStore.getState();
     state.updateSettings({ blockCdnNodes: true });
     const servers = [
-      { id: 'srv-cdn', name: 'CDN', flag: 'US', ping: 10, behindCdn: true } as never,
-      { id: 'srv-real', name: 'Real', flag: 'US', ping: 50, behindCdn: false } as never,
+      { id: 'srv-cdn', name: 'CDN', exitFlag: 'US', ping: 10, behindCdn: true } as never,
+      { id: 'srv-real', name: 'Real', exitFlag: 'US', ping: 50, behindCdn: false } as never,
     ];
-    const current = { id: 'srv-dead', name: 'Dead', flag: 'CH' } as never;
+    const current = { id: 'srv-dead', name: 'Dead', exitFlag: 'CH' } as never;
     const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
     expect(result?.id).toBe('srv-real');
   });
@@ -979,10 +1022,10 @@ describe('pickReplacementServer', () => {
     const state = useAppStore.getState();
     state.updateSettings({ allowedProtocols: ['vless'] });
     const servers = [
-      { id: 'srv-vless', name: 'VLESS', protocol: 'vless', flag: 'US', ping: 50 } as never,
-      { id: 'srv-trojan', name: 'Trojan', protocol: 'trojan', flag: 'US', ping: 30 } as never,
+      { id: 'srv-vless', name: 'VLESS', protocol: 'vless', exitFlag: 'US', ping: 50 } as never,
+      { id: 'srv-trojan', name: 'Trojan', protocol: 'trojan', exitFlag: 'US', ping: 30 } as never,
     ];
-    const current = { id: 'srv-dead', name: 'Dead', flag: 'CH' } as never;
+    const current = { id: 'srv-dead', name: 'Dead', exitFlag: 'CH' } as never;
     const result = pickReplacementServer(servers, current, useAppStore.getState().settings);
     expect(result?.id).toBe('srv-vless');
   });

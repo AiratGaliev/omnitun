@@ -44,14 +44,8 @@ impl Installer {
             LogSource::Installer,
             format!("Downloading sing-box {version}..."),
         );
-        let response = reqwest::get(&url)
-            .await
-            .map_err(|e| ProxyError::Install(format!("Failed to download sing-box: {e}")))?;
-
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| ProxyError::Install(format!("Failed to read response: {e}")))?;
+        // Try direct GitHub download, with ghproxy.net fallback for blocked regions
+        let bytes = Self::download_with_fallback(&url).await?;
 
         log(
             app_handle,
@@ -157,9 +151,11 @@ impl Installer {
             &logger,
             LogLevel::Warning,
             LogSource::Installer,
-            "GitHub API failed, using fallback version 1.10.1".into(),
+            "GitHub API failed, using fallback version 1.12.0".into(),
         );
-        Ok("1.10.1".to_string())
+        // ⚠️ 1.12.0 minimum — config uses type-based DNS format (introduced in 1.12)
+        // Older sing-box versions will fail to parse the generated config.
+        Ok("1.12.0".to_string())
     }
 
     // ── ZIP / tar.gz extraction ────────────────────────────────────────────
@@ -240,6 +236,46 @@ impl Installer {
     fn download_url(version: &str) -> String {
         let suffix = Self::platform_suffix();
         format!("https://github.com/SagerNet/sing-box/releases/download/v{version}/sing-box-{version}-{suffix}")
+    }
+
+    /// Download a file, with ghproxy.net fallback for blocked regions.
+    async fn download_with_fallback(url: &str) -> Result<Vec<u8>, ProxyError> {
+        // First attempt: direct GitHub download
+        match reqwest::get(url).await {
+            Ok(resp) if resp.status().is_success() => {
+                return resp.bytes().await
+                    .map(|b| b.to_vec())
+                    .map_err(|e| ProxyError::Install(format!("Failed to read response: {e}")));
+            }
+            Ok(resp) => {
+                log::warn!("Direct download returned HTTP {}, trying ghproxy...", resp.status());
+            }
+            Err(e) => {
+                log::warn!("Direct download failed ({e}), trying ghproxy...");
+            }
+        }
+
+        // Fallback: ghproxy.net mirror (accessible from China, Russia, Iran)
+        let ghproxy_url = format!("https://ghproxy.net/{}", url);
+        match reqwest::get(&ghproxy_url).await {
+            Ok(resp) if resp.status().is_success() => {
+                resp.bytes().await
+                    .map(|b| b.to_vec())
+                    .map_err(|e| ProxyError::Install(format!("Failed to read ghproxy response: {e}")))
+            }
+            Ok(resp) => {
+                Err(ProxyError::Install(format!(
+                    "ghproxy download failed (HTTP {}): {}",
+                    resp.status(),
+                    resp.text().await.unwrap_or_default().trim().to_string()
+                )))
+            }
+            Err(e) => {
+                Err(ProxyError::Install(format!(
+                    "All download methods failed. Last error (ghproxy): {e}"
+                )))
+            }
+        }
     }
 
     fn platform_suffix() -> &'static str {
