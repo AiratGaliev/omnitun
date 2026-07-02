@@ -413,7 +413,11 @@ async fn process_batch(
                 stderr.trim().lines().next().unwrap_or("no stderr")));
             batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] config preserved at {:?}", test_dir.join("config.json")));
             if let Ok(cfg) = std::fs::read_to_string(test_dir.join("config.json")) {
-                batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] generated config:\n{cfg}"));
+                if let Ok(cfg_json) = serde_json::from_str::<serde_json::Value>(&cfg) {
+                    let safe_cfg = crate::proxy::config::redact_sensitive_data(cfg_json);
+                    batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] generated config (redacted):\n{}",
+                        serde_json::to_string_pretty(&safe_cfg).unwrap_or_default()));
+                }
             }
             // Don't delete test_dir — save config for debugging
             for req in batch {
@@ -689,7 +693,7 @@ fn kill_singbox(pid: u32) {
     #[cfg(not(windows))]
     {
         let _ = std::process::Command::new("kill")
-            .arg(pid.to_string())
+            .args(["-9", &pid.to_string()])
             .output();
     }
 }

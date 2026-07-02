@@ -8,8 +8,8 @@ import { useAppStore, mapRustProfile } from './store';
 const mockInvoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn().mockImplementation((cmd: string, ...args: unknown[]) => {
-    // log_frontend never consumes mockInvoke's once-queue
-    if (cmd === 'log_frontend') return Promise.resolve(undefined);
+    // log_frontend rejects to trigger addLog's dev fallback → appendLog
+    if (cmd === 'log_frontend') return Promise.reject(new Error('mock'));
     return mockInvoke(cmd, ...args);
   }),
 }));
@@ -346,12 +346,11 @@ describe('store actions — basic state', () => {
     expect(useAppStore.getState().status).toBe('connecting');
   });
 
-  it('setActiveServer updates and logs change', () => {
+  it('setActiveServer updates active server', () => {
     const srv = { id: 'srv-1', name: 'Test', server: '10.0.0.1', port: 443 };
     useAppStore.getState().setActiveServer(srv);
     expect(useAppStore.getState().activeServer?.id).toBe('srv-1');
-    expect(useAppStore.getState().logs.length).toBeGreaterThan(0);
-    expect(useAppStore.getState().logs[0].message).toContain('activeServer');
+    // (addLog removed — system-level logging cleaned)
   });
 
   it('setConnectedAt stores timestamp', () => {
@@ -360,17 +359,19 @@ describe('store actions — basic state', () => {
     expect(useAppStore.getState().connectedAt).toBe(ts);
   });
 
-  it('clearLogs empties the array', () => {
+  it('clearLogs empties the array', async () => {
     useAppStore.getState().addLog('test log');
+    await new Promise((r) => setTimeout(r, 0)); // flush microtask from invoke fallback
     expect(useAppStore.getState().logs.length).toBe(1);
     useAppStore.getState().clearLogs();
     expect(useAppStore.getState().logs).toEqual([]);
   });
 
-  it('addLog prepends entry and caps at 1000', () => {
+  it('addLog prepends entry and caps at 1000', async () => {
     for (let i = 0; i < 1010; i++) {
       useAppStore.getState().addLog(`msg-${i}`);
     }
+    await new Promise((r) => setTimeout(r, 0));
     expect(useAppStore.getState().logs.length).toBe(1000);
     expect(useAppStore.getState().logs[0].message).toContain('msg-1009');
   });
@@ -416,12 +417,12 @@ describe('store — profile management', () => {
     expect(useAppStore.getState().activeServer?.id).toBe('srv-1');
   });
 
-  it('addProfile logs error on failure', async () => {
+  it('addProfile rethrows on failure', async () => {
     mockInvoke.mockRejectedValueOnce(new Error('network error'));
     await expect(
       useAppStore.getState().addProfile({ name: 'Test', url: 'https://example.com/sub' }),
     ).rejects.toThrow('network error');
-    expect(useAppStore.getState().logs.some((l) => l.message.includes('Failed to add'))).toBe(true);
+    // Backend handles error logging via tracing — frontend just rethrows
   });
 
   it('removeProfile removes profile and servers', async () => {
@@ -509,13 +510,11 @@ describe('store — profile management', () => {
     expect(state.activeServer?.id).toBe('srv-new-2');
   });
 
-  it('refreshProfile logs error on failure', async () => {
+  it('refreshProfile rethrows on failure', async () => {
     useAppStore.getState().updateSettings({ autoConnectFastest: false });
     mockInvoke.mockRejectedValueOnce(new Error('timeout'));
     await expect(useAppStore.getState().refreshProfile('prof-1')).rejects.toThrow('timeout');
-    expect(useAppStore.getState().logs.some((l) => l.message.includes('Failed to refresh'))).toBe(
-      true,
-    );
+    // Backend handles error logging via tracing — frontend just rethrows
   });
 
   it('loadProfiles loads and selects fastest on first run', async () => {
@@ -547,10 +546,7 @@ describe('store — profile management', () => {
   it('loadProfiles handles invoke failure gracefully', async () => {
     mockInvoke.mockRejectedValueOnce(new Error('connection error'));
     await useAppStore.getState().loadProfiles();
-    // Should not throw, should log warning
-    expect(useAppStore.getState().logs.some((l) => l.message.includes('Failed to load'))).toBe(
-      true,
-    );
+    // Backend handles error logging via tracing — frontend silently fails
   });
 
   it('updateProfile merges partial data', () => {
@@ -583,12 +579,10 @@ describe('store — settings management', () => {
     });
   });
 
-  it('saveSettings logs error on failure', async () => {
+  it('saveSettings handles failure gracefully', async () => {
     mockInvoke.mockRejectedValueOnce(new Error('save failed'));
     await useAppStore.getState().saveSettings();
-    expect(useAppStore.getState().logs.some((l) => l.message.includes('Failed to save'))).toBe(
-      true,
-    );
+    // Backend handles error logging via tracing — frontend silently fails
   });
 
   it('loadSettings migrates old proxy mode', async () => {
@@ -600,9 +594,7 @@ describe('store — settings management', () => {
   it('loadSettings handles failure gracefully', async () => {
     mockInvoke.mockRejectedValueOnce(new Error('fail'));
     await useAppStore.getState().loadSettings();
-    expect(
-      useAppStore.getState().logs.some((l) => l.message.includes('Failed to load settings')),
-    ).toBe(true);
+    // Backend handles error logging via tracing — frontend silently fails
   });
 });
 
@@ -710,12 +702,9 @@ describe('store — toggleConnection', () => {
   it('guards against reconnect during toggle', async () => {
     useAppStore.setState({ _isReconnecting: true });
     await useAppStore.getState().toggleConnection();
-    // Should not call invoke at all
+    // Should not call invoke at all (silent guard — no log)
     expect(mockInvoke).not.toHaveBeenCalledWith('start_proxy');
     expect(mockInvoke).not.toHaveBeenCalledWith('stop_proxy');
-    expect(
-      useAppStore.getState().logs.some((l) => l.message.includes('BLOCKED by guard')),
-    ).toBe(true);
   });
 
   it('sets error state on connection failure', async () => {
@@ -727,7 +716,8 @@ describe('store — toggleConnection', () => {
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockRejectedValueOnce(new Error('timeout')); // start_proxy fails
 
-    await expect(useAppStore.getState().toggleConnection()).rejects.toThrow('timeout');
+    // Frontend swallows errors & shows toast — does not re-throw
+    await useAppStore.getState().toggleConnection();
     expect(useAppStore.getState().status).toBe('error');
   });
 });

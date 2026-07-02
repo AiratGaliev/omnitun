@@ -134,6 +134,7 @@ interface ProxyStore {
   saveSettings: () => Promise<void>;
   loadSettings: () => Promise<void>;
   addLog: (message: string, level?: LogEntry['level'], source?: LogSource) => void;
+  appendLog: (entry: LogEntry) => void;
   clearLogs: () => void;
   completeOnboarding: () => void;
   acceptTerms: () => void;
@@ -327,18 +328,9 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     set({ status });
   },
   setActiveServer: (server) => {
-    const prev = get().activeServer;
     set({ activeServer: server });
-    if (server.id !== prev?.id) {
-      get().addLog(
-        `[store] activeServer: ${prev?.name ?? 'null'} → ${server.name} (${server.id.slice(0, 8)})`,
-        'info',
-        'system',
-      );
-    }
   },
   setServers: (servers) => {
-    const prev = get().servers;
     set((state) => {
       const currentActive = state.activeServer;
       const updatedActive = currentActive
@@ -346,13 +338,6 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         : null;
       return { servers, activeServer: updatedActive };
     });
-    if (prev.length !== servers.length) {
-      get().addLog(
-        `[store] servers: ${String(prev.length)} → ${String(servers.length)}`,
-        'info',
-        'system',
-      );
-    }
   },
   setConnectedAt: (timestamp) => {
     set({ connectedAt: timestamp });
@@ -383,9 +368,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         'subscription',
       );
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      get().addLog(`Failed to add profile: ${msg}`, 'error', 'subscription');
-      throw e;
+      throw e; // caller shows toast
     }
   },
 
@@ -419,9 +402,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       });
       get().addLog('Profile removed', 'success', 'subscription');
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      get().addLog(`Failed to remove profile: ${msg}`, 'error', 'subscription');
-      throw e;
+      throw e; // caller shows toast
     }
   },
 
@@ -430,11 +411,6 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     {
       const state = get();
       if (state._refreshingIds.includes(id)) {
-        state.addLog(
-          `[refresh] profile "${id.slice(0, 8)}" already refreshing — skipping`,
-          'info',
-          'system',
-        );
         return;
       }
     }
@@ -449,25 +425,11 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         // Auto-select fastest only when enabled. When disabled, never swap
         // even if the current server ID is gone — user picks manually.
         const autoSelect = state.settings.autoConnectFastest;
-        const oldActiveName = state.activeServer?.name ?? state.activeServer?.server ?? 'none';
         const newActiveServer = autoSelect
           ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
           : activeServerStillExists
             ? state.activeServer
             : (allServers[0] ?? null);
-        if (state.activeServer && state.activeServer.id !== newActiveServer?.id) {
-          const reason = autoSelect
-            ? !activeServerStillExists
-              ? 'ID not found after refresh'
-              : 'autoConnectFastest'
-            : 'current server was removed';
-          const newName = newActiveServer?.name ?? newActiveServer?.server ?? 'none';
-          get().addLog(
-            `Active server changed: ${oldActiveName} → ${newName} (reason: ${reason})`,
-            'warning',
-            'system',
-          );
-        }
         return {
           profiles: newProfiles,
           servers: allServers,
@@ -480,11 +442,8 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         'subscription',
       );
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      // Network may be blocking GitHub raw — log once on first failure, skip spam
-      get().addLog(`Failed to refresh profile: ${msg}`, 'error', 'subscription');
+      // Backend already logged the error via tracing
       // Reset lastUpdated so timer doesn't retry every ~55s.
-      // Wait full autoUpdateInterval before next attempt.
       set((state) => ({
         profiles: state.profiles.map((p) =>
           p.id === id ? { ...p, lastUpdated: Date.now() + Math.random() * 60000 } : p,
@@ -504,34 +463,20 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       const profiles = results.map(mapRustProfile);
       const allServers = profiles.flatMap((p) => p.servers);
       const state = get();
-      const oldActive = state.activeServer;
       const autoSelect = state.settings.autoConnectFastest;
-      // When autoConnectFastest is enabled, pick the fastest server so
-      // the initial connection uses the best node. When disabled, keep
-      // the existing selection (fall back to first available if removed).
       const newActive: Server | null = autoSelect
         ? allServers.length > 0
           ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
           : null
-        : (allServers.find((s) => s.id === oldActive?.id) ?? allServers[0] ?? null);
+        : (allServers.find((s) => s.id === state.activeServer?.id) ?? allServers[0] ?? null);
       set({
         profiles,
         servers: allServers,
         activeServer: newActive,
-        // If profiles exist, onboarding is complete (flag not persisted)
         hasOnboarded: profiles.length > 0 || get().hasOnboarded,
       });
-      if (newActive?.id !== oldActive?.id) {
-        const reason = autoSelect ? 'fastest' : 'previous was removed';
-        get().addLog(
-          `[loadProfiles] activeServer changed: ${oldActive?.name ?? 'null'} → ${newActive?.name ?? 'null'} (${reason})`,
-          'info',
-          'system',
-        );
-      }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Unknown error';
-      get().addLog(`Failed to load profiles: ${msg}`, 'warning', 'subscription');
+    } catch {
+      set({ servers: [], profiles: [] });
     }
   },
 
@@ -546,10 +491,8 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     try {
       const { settings } = get();
       await invoke('update_settings', { newSettings: settings });
-      // Re-load profiles so filters are applied server-side
       await get().loadProfiles();
 
-      // If ipinfo token is non-empty, trigger ipinfo database download
       if (settings.ipinfoToken) {
         const toastId = toast.loading(i18n.t('ipinfoDownloading'));
         try {
@@ -563,42 +506,48 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
           toast.error(`${i18n.t('ipinfoDownloadFailed')}: ${String(e)}`, { id: toastId });
         }
       }
-    } catch (e) {
-      get().addLog(`Failed to save settings: ${String(e)}`, 'error', 'settings');
+    } catch {
+      toast.error('Failed to save settings');
     }
   },
 
   loadSettings: async () => {
     try {
       const result = await invoke<Settings>('get_settings');
-      // Migration: legacy 'proxy' mode → 'system-proxy'
       const rawMode = (result as { routingMode: string }).routingMode;
       if (rawMode === 'proxy') {
         (result as { routingMode: string }).routingMode = 'system-proxy';
       }
       set({ settings: result });
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Unknown error';
-      get().addLog(`Failed to load settings: ${msg}`, 'warning', 'settings');
+    } catch {
+      // can't load settings from backend — defaults already set on init
+      set({ settingsVersion: get().settingsVersion });
     }
   },
 
   addLog: (message: string, level: LogEntry['level'] = 'info', source: LogSource = 'system') => {
-    set((state) => ({
-      logs: [
-        {
-          id: crypto.randomUUID(),
-          timestamp: Date.now(),
-          message,
-          level,
-          source,
-        },
-        ...state.logs,
-      ].slice(0, 1000),
-    }));
-    // Duplicate ALL messages to the Rust JSONL file so every log entry
-    // survives UI restart and can be correlated with Rust-side logs.
-    invoke('log_frontend', { message, level, source }).catch(() => {});
+    // Send to Rust backend — it owns id/timestamp and writes to JSONL.
+    // The entry comes back via log-entry event → appendLog for state update.
+    invoke('log_frontend', { message, level, source }).catch(() => {
+      // Dev fallback (browser without Tauri IPC): append locally
+      get().appendLog({
+        id: crypto.randomUUID(),
+        timestamp: Date.now(),
+        message,
+        level,
+        source,
+      });
+    });
+  },
+
+  appendLog: (entry) => {
+    set((state) => {
+      // Dedup: entry may already exist from a prior log-entry event
+      if (state.logs.some((l) => l.id === entry.id)) return state;
+      return {
+        logs: [entry, ...state.logs].slice(0, 1000),
+      };
+    });
   },
 
   clearLogs: () => {
@@ -622,7 +571,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       const info = await invoke<ExitIpInfo>('outlet_ip');
       set({ exitIp: info });
     } catch (e) {
-      get().addLog(`Failed to fetch exit IP: ${String(e)}`, 'warning', 'system');
+      // Backend already logged the error via tracing
       set({ exitIp: null });
     }
   },
@@ -632,7 +581,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       const ip = await invoke<string>('get_real_ip');
       set({ realIp: ip });
     } catch (e) {
-      get().addLog(`Failed to fetch real IP: ${String(e)}`, 'warning', 'system');
+      // Backend already logged the error via tracing
       set({ realIp: null });
     }
   },
@@ -647,7 +596,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       set({ speedTestResult: best });
       return best;
     } catch (e) {
-      get().addLog(`Speed test failed: ${String(e)}`, 'warning', 'system');
+      // Backend already logged the error via tracing
       set({ speedTestResult: null });
       return null;
     }
@@ -657,50 +606,28 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     try {
       const conns = await invoke<ConnectionInfo[]>('get_connections');
       set({ connections: conns });
-    } catch (e) {
-      // Not connected is expected — log debug level
-      get().addLog(`refreshConnections skipped: ${String(e)}`, 'info', 'system');
+    } catch {
+      // Clash API unavailable — reset connections list
+      set({ connections: [] });
     }
   },
 
   toggleConnection: async () => {
-    const { status, activeServer, servers, addLog, settings, _isReconnecting, _isConnecting } = get();
-    const logToggle = (msg: string, level: 'info' | 'warning' | 'error' | 'success' = 'info') => {
-      addLog(`[toggle] ${msg}`, level, 'system');
-    };
-    logToggle(`called — status=${status} _isReconnecting=${String(_isReconnecting)} _isConnecting=${String(_isConnecting)} server=${activeServer?.name ?? 'null'}`);
+    const { status, activeServer, servers, settings, _isReconnecting, _isConnecting } = get();
+
     if (_isReconnecting || _isConnecting) {
-      logToggle(`BLOCKED by guard (_isReconnecting=${String(_isReconnecting)} _isConnecting=${String(_isConnecting)})`, 'warning');
       return;
     }
-    // Log the server we're connecting to
-    const connectServerName = activeServer?.name ?? 'null';
-    const connectServerId = activeServer?.id.slice(0, 8) ?? 'null';
-    logToggle(
-      `request — server: ${connectServerName} (${connectServerId}) proto=${activeServer?.protocol ?? '?'} addr=${activeServer?.server ?? '?'}:${String(activeServer?.port ?? '?')}`,
-    );
+
     try {
       if (status === 'disconnected' || status === 'error') {
-        logToggle('CONNECT path');
         set({ _isConnecting: true });
-        addLog(`Connecting to ${activeServer?.name ?? 'Default'}...`, 'info', 'system');
         set({ status: 'connecting' });
-        logToggle('status set to connecting, _isConnecting=true');
+
         // Persist settings before connecting (routingMode, proxyPort from Dashboard)
-        await get()
-          .saveSettings()
-          .catch((e) => get().addLog('saveSettings failed: ' + String(e), 'warning', 'system'));
-        logToggle('saveSettings done');
+        await get().saveSettings().catch(() => {});
 
-        // FIX: build the rust-side profile from `activeServer` WITHOUT
-        // dropping WireGuard / username fields. Previously all of these
-        // were hardcoded to `null`, which is why WireGuard / SOCKS5-auth
-        // / HTTP-auth servers couldn't be connected to from the dashboard.
         const profile = toRustServerProfile(activeServer, 'Default');
-
-        // FIX: when `autoConnectFastest` is enabled, forward the other
-        // known servers as `alternativeServers` so the Rust backend can
-        // build a `urltest` group and auto-select the fastest outbound.
         const altServers: ReturnType<typeof toRustServerProfile>[] =
           settings.autoConnectFastest && activeServer
             ? servers
@@ -708,68 +635,37 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
                 .map((s) => toRustServerProfile(s, 'Default'))
             : [];
 
-        // Save the session servers: primary first, then alternatives.
-        // Used by startHealthCheck to map proxy-0, proxy-1 tags back to
-        // real server objects after Sing-Box seamlessly failsover.
         const sessionServers = activeServer
           ? [activeServer, ...servers.filter((s) => s.id !== activeServer.id).slice(0, 15)]
           : [];
         set({ _sessionServers: sessionServers });
-        logToggle(`_sessionServers set to ${String(sessionServers.length)} server(s)`);
 
-        logToggle(`calling invoke('start_proxy') with port=${String(settings.proxyPort)} mode=${settings.routingMode}`);
         const actualPort = await invoke<number>('start_proxy', {
           profile,
           alternativeServers: altServers,
           routingMode: settings.routingMode,
           proxyPort: settings.proxyPort,
         });
-        logToggle(`invoke('start_proxy') returned port=${String(actualPort)}`);
 
-        // Connection established — allow user to disconnect immediately
-        // even during the outlet IP verification that follows.
         set({ _isConnecting: false });
 
         // Save the actual port (may differ if port fallback was triggered)
         if (actualPort !== settings.proxyPort) {
-          get().addLog(
-            `Proxy port updated to ${actualPort} (fallback from ${settings.proxyPort})`,
-            'info',
-            'system',
-          );
           set((state) => ({
             settings: { ...state.settings, proxyPort: actualPort },
           }));
-          logToggle(`port persisted: ${String(actualPort)}`);
-          // Persist the new port
           void get().saveSettings();
         }
-
-        // With urltest/fallback groups, Sing-Box handles failover internally.
-        // No need to force-select proxy-0 — urltest picks the fastest automatically.
-        logToggle('urltest/fallback active — no manual selector switch needed');
-
-        // Outlet IP verification is handled by Rust backend during start_proxy.
-        // It checks CDN status from profile manager, skips verification for CDN
-        // servers, logs results to JSONL, and emits exit-ip-changed event.
-        logToggle('outlet IP verification handled by Rust backend — listening for exit-ip-changed event');
-
       } else {
-        logToggle('DISCONNECT path');
-        addLog('Disconnecting...', 'info', 'system');
         set({ status: 'disconnecting', _isConnecting: false });
-        logToggle('status set to disconnecting, calling stop_proxy');
         await invoke('stop_proxy');
-        logToggle('invoke(stop_proxy) returned — status event should follow');
       }
     } catch (e: unknown) {
-      logToggle(`EXCEPTION: ${e instanceof Error ? e.message : String(e)}`, 'error');
       set({ status: 'error', _isConnecting: false });
       const msg = e instanceof Error ? e.message : String(e);
-      addLog(`Connection failed: ${msg}`, 'error', 'system');
-      throw e;
+      // UI-only notification — Rust backend already logged the error via tracing
+      toast.error(msg);
     } finally {
-      logToggle(`finally — resetting _isConnecting (was=${String(get()._isConnecting)})`);
       set({ _isConnecting: false });
     }
   },
@@ -819,11 +715,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
                   const actualActiveServer = sessionServers[tagIndex];
 
                   if (actualActiveServer && state.activeServer?.id !== actualActiveServer.id) {
-                    state.addLog(
-                      `Seamless failover: Switched to ${actualActiveServer.name} (proxy-${String(tagIndex)})`,
-                      'success',
-                      'system',
-                    );
+                    // Backend logs failover via tracing in outlet_ip
                     set({ activeServer: actualActiveServer, exitIp: exitInfo });
                   }
                 }
@@ -855,8 +747,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         set({ status: rawStatus as ConnectionStatus });
       }
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Unknown error';
-      get().addLog(`Failed to get initial proxy status: ${msg}`, 'warning', 'system');
+      // Backend already logged the error via tracing
       set({ status: 'disconnected' });
     }
 
@@ -866,31 +757,24 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       if (history.length > 0) {
         set({ logs: history });
       }
-    } catch (e) {
-      get().addLog('get_logs failed: ' + String(e), 'warning', 'system');
+    } catch {
+      // first launch — no log file yet, logs stay empty
+      set({ logs: [] });
     }
 
     const unlisten = await listen<StatusPayload>('connection-status-changed', (event) => {
       const payload = event.payload;
       const errorMsg = extractError(payload);
-      const logToggle = (msg: string, level: 'info' | 'warning' | 'error' | 'success' = 'info') => {
-        useAppStore.getState().addLog(`[evt:connection-status] ${msg}`, level, 'system');
-      };
-      logToggle(`received — payload=${JSON.stringify(payload)} currentStatus=${get().status}`);
       if (errorMsg) {
-        logToggle(`error: ${errorMsg}`, 'error');
         set({ status: 'error', connectedAt: null });
         stopHealthCheck();
       } else {
         const newStatus = mapConnectionStatus(payload);
-        logToggle(`mapped to "${newStatus}" — was "${get().status}"`);
         set({
           status: newStatus,
           connectedAt: newStatus === 'connected' ? Date.now() : null,
         });
         if (newStatus === 'connected') {
-          const srv = get().activeServer;
-          logToggle(`Connected — activeServer: ${srv?.name ?? 'null'} (${srv?.id.slice(0, 8) ?? 'null'})`);
           startHealthCheck();
         } else {
           stopHealthCheck();
@@ -900,8 +784,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
 
     // Listen for real-time log entries from the Rust backend
     const unlistenLogs = await listen<LogEntry>('log-entry', (event) => {
-      const entry = event.payload;
-      get().addLog(entry.message, entry.level, entry.source);
+      get().appendLog(event.payload);
     });
     // Listen for real-time traffic stats from sing-box
     const unlistenTraffic = await listen<TrafficPayload>('traffic-update', (event) => {

@@ -40,14 +40,22 @@ export default function App() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let isMounted = true;
+
     initListener()
       .then((fn) => {
-        unlisten = fn;
+        if (isMounted) {
+          unlisten = fn;
+        } else {
+          fn(); // already unmounted — clean up immediately
+        }
       })
       .catch((e: unknown) => {
         console.error('initListener failed:', e);
       });
+
     return () => {
+      isMounted = false;
       unlisten?.();
     };
   }, [initListener]);

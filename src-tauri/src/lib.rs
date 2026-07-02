@@ -8,18 +8,18 @@ pub mod proxy;
 
 use crate::events::emit_status;
 use crate::events::emit_traffic;
-use crate::logging::{log, LogLevel, LogSource, Logger, MAX_LOG_FILES_COUNT};
+use crate::logging::{log, LogLevel, LogSource, Logger};
 use crate::profile::ProfileManager;
 use crate::settings::{AppSettings, SettingsManager};
 use crate::subscription::SubscriptionProfile;
 use crate::proxy::port_pool::PortPool;
 use crate::proxy::cache::ServerCache;
 use crate::proxy::{ServerProfile, ProxyManager, ConnectionStatus};
-use chrono::Local;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -47,6 +47,7 @@ struct ProfileState {
 use tokio_util::sync::CancellationToken;
 
 #[tauri::command(rename_all = "camelCase")]
+#[tracing::instrument(skip(app, state, profile_state, settings_state, profile, alternative_servers))]
 async fn start_proxy(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProxyState>,
@@ -113,7 +114,7 @@ async fn start_proxy(
         let mut found = None;
         for offset in 1..=100 {
             let candidate = proxy_port.saturating_add(offset);
-            if candidate == 0 { break; } // wraparound guard
+            if candidate <= proxy_port { break; } // wraparound guard
             if crate::proxy::config::port_available(candidate) {
                 found = Some(candidate);
                 break;
@@ -576,6 +577,7 @@ async fn start_proxy(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip(app, state))]
 async fn stop_proxy(app: tauri::AppHandle, state: tauri::State<'_, ProxyState>) -> Result<(), String> {
     let logger = app.state::<StdMutex<Logger>>();
     let log_stop = |level: LogLevel, msg: String| {
@@ -1107,40 +1109,33 @@ pub fn run() {
         .setup(|app| {
             let data_dir = match app.path().app_data_dir() {
                 Ok(d) => d,
-                Err(e) => {
-                    eprintln!("[FATAL] Failed to get app data dir: {e}");
+                Err(_) => {
                     std::process::exit(1);
                 }
             };
 
-            if let Err(e) = std::fs::create_dir_all(&data_dir) {
-                eprintln!("[FATAL] Failed to create app data dir: {e}");
+            if let Err(_) = std::fs::create_dir_all(&data_dir) {
                 std::process::exit(1);
             }
 
-            // Set up logging
+            // Set up logging: tracing (file) + UI broadcast bridge
             let log_dir = data_dir.join("logs");
-            if let Err(e) = std::fs::create_dir_all(&log_dir) {
-                eprintln!("[FATAL] Failed to create logs dir: {e}");
+            if let Err(_) = std::fs::create_dir_all(&log_dir) {
                 std::process::exit(1);
             }
-            let timestamp = Local::now().format("%Y%m%d-%H%M%S");
-            let log_file = log_dir.join(format!("logs-{timestamp}.jsonl"));
 
-            // Keep max MAX_LOG_FILES_COUNT log files, delete oldest excess
-            if let Ok(entries) = std::fs::read_dir(&log_dir) {
-                let mut log_files: Vec<_> = entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_name().to_string_lossy().starts_with("logs-"))
-                    .collect();
-                log_files.sort_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()));
-                if log_files.len() > MAX_LOG_FILES_COUNT {
-                    for file in log_files.drain(..log_files.len() - MAX_LOG_FILES_COUNT) {
-                        let _ = std::fs::remove_file(file.path());
-                    }
+            // Initialize tracing with file appender + UI broadcast layer
+            let (mut log_rx, log_file) = crate::logging::setup_logging(&log_dir);
+
+            // Spawn background task: forward tracing logs to Tauri UI events
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while let Ok(entry) = log_rx.recv().await {
+                    let _ = app_handle.emit("log-entry", &entry);
                 }
-            }
+            });
 
+            // Keep backward-compat Logger in app state for get_logs / log_frontend
             let logger = Logger::new(1000, Some(log_file));
             app.manage(StdMutex::new(logger));
 
@@ -1174,17 +1169,11 @@ pub fn run() {
             app.manage(port_pool.clone());
             app.manage(StdMutex::new(cancel_token));
 
-            log(
-                app.handle(),
-                &StdMutex::new(Logger::new(1, None)),
-                LogLevel::Info,
-                LogSource::System,
-                "Server cache and batch engine initialized".into(),
-            );
+            tracing::info!(target: "system", "Server cache and batch engine initialized");
 
             let settings_mgr = SettingsManager::new(data_dir.clone());
             let settings = settings_mgr.load().unwrap_or_else(|e| {
-                eprintln!("[WARN] Failed to load settings: {e} — using defaults");
+                tracing::warn!(target: "settings", "Failed to load settings: {e} — using defaults");
                 AppSettings::default()
             });
             // Sync auto-start at boot (user may have manually removed the Run key)
@@ -1377,8 +1366,7 @@ fn read_clipboard_text() -> Result<String, String> {
 /// Get the user's real IP (before proxy) with GeoIP location.
 /// Always fetches directly (no proxy) — works whether connected or not.
 #[tauri::command]
-async fn get_real_ip(app: tauri::AppHandle) -> Result<String, String> {
-    let _logger = app.state::<StdMutex<Logger>>();
+async fn get_real_ip(_app: tauri::AppHandle) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .build()
@@ -1572,10 +1560,26 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
     // Query the Clash API for the currently selected proxy outbound tag
     if stats_port != 0 {
         let api_url = format!("http://127.0.0.1:{stats_port}/proxies/proxy");
-        if let Ok(resp) = reqwest::get(&api_url).await {
+        let clash_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap_or_default();
+        if let Ok(resp) = clash_client.get(&api_url).send().await {
             if let Ok(body) = resp.json::<serde_json::Value>().await {
                 if let Some(current) = body.get("now").and_then(|v| v.as_str()) {
                     proxy_tag = current.to_string();
+                    // Detect failover — if proxy_tag changed, log it
+                    static LAST_PROXY_TAG: OnceLock<StdMutex<String>> = OnceLock::new();
+                    let last = LAST_PROXY_TAG.get_or_init(|| StdMutex::new(String::new()));
+                    if let Ok(mut last_tag) = last.lock() {
+                        if *last_tag != proxy_tag && !last_tag.is_empty() {
+                            tracing::info!(
+                                target: "proxy",
+                                "Failover detected: proxy tag changed from \"{last_tag}\" to \"{proxy_tag}\"",
+                            );
+                        }
+                        *last_tag = proxy_tag.clone();
+                    }
                 }
             }
         }

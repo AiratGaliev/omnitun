@@ -19,6 +19,30 @@ pub(crate) fn port_available(port: u16) -> bool {
     std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_ok()
 }
 
+/// Redact sensitive fields (uuid, password, private_key) from a JSON config
+/// value so the config can be safely logged without leaking secrets.
+pub fn redact_sensitive_data(mut config: serde_json::Value) -> serde_json::Value {
+    if let Some(outbounds) = config.get_mut("outbounds").and_then(|o| o.as_array_mut()) {
+        for outbound in outbounds {
+            if let Some(obj) = outbound.as_object_mut() {
+                if obj.contains_key("password") {
+                    obj.insert("password".into(), serde_json::json!("***REDACTED***"));
+                }
+                if obj.contains_key("uuid") {
+                    obj.insert("uuid".into(), serde_json::json!("***REDACTED***"));
+                }
+                if obj.contains_key("private_key") {
+                    obj.insert("private_key".into(), serde_json::json!("***REDACTED***"));
+                }
+                if obj.contains_key("username") {
+                    obj.insert("username".into(), serde_json::json!("***REDACTED***"));
+                }
+            }
+        }
+    }
+    config
+}
+
 pub fn generate_config(
     cache_dir: &Path,
     proxy_port: u16,

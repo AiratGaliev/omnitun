@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { useAppStore } from '@/store.ts';
 import {
@@ -31,8 +31,9 @@ export function Logs() {
   const [activeFilter, setActiveFilter] = useState<'all' | LogSource>('all');
   const [tab, setTab] = useState<'logs' | 'connections'>('logs');
 
-  const filteredLogs =
-    activeFilter === 'all' ? logs : logs.filter((l) => l.source === activeFilter);
+  const filteredLogs = useMemo(() => {
+    return activeFilter === 'all' ? logs : logs.filter((l) => l.source === activeFilter);
+  }, [logs, activeFilter]);
 
   // Poll connections every 2 seconds when connected
   const connInterval = useRef<ReturnType<typeof setInterval> | undefined>(undefined);

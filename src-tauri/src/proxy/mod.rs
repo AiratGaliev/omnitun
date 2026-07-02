@@ -40,6 +40,12 @@ pub struct LastConnection {
     pub proxy_port: u16,
 }
 
+/// Currently, ALL Tauri commands return `Result<_, String>`.
+/// When a ProxyError is returned via `Result<T, String>`,
+/// the error message is preserved but the typed context is lost.
+///
+/// FUTURE: Tauri commands should return `Result<_, ProxyError>` directly
+/// once all callers are updated. For now, `Display` provides the message.
 #[derive(Debug, Error)]
 pub enum ProxyError {
     #[error("Config generation failed: {0}")]
@@ -54,9 +60,13 @@ pub enum ProxyError {
     Io(#[from] std::io::Error),
 }
 
-impl From<ProxyError> for String {
-    fn from(e: ProxyError) -> Self {
-        e.to_string()
+// Serialize as a simple string for backward compat with frontend
+impl serde::Serialize for ProxyError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
     }
 }
 
@@ -144,7 +154,7 @@ fn keyword_cdn_check(host: &str) -> bool {
         || lower.ends_with(".workers.dev")
         || lower.ends_with(".pages.dev")
         || lower.ends_with(".cfargotunnel.com")
-        || lower.contains("worker")
+        || lower.contains(".worker.")
 }
 
 /// Lightweight initial CDN detection via keyword check on transport_host, sni.
