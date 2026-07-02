@@ -705,7 +705,7 @@ impl ServerCache {
                         log(
                             app,
                             &logger,
-                            LogLevel::Warning,
+                            LogLevel::Error,
                             LogSource::Cache,
                             format!("[Cache] server {} batch worker dropped", server.id),
                         );

@@ -1443,12 +1443,18 @@ pub struct ExitIpInfo {
 
 #[tauri::command]
 async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
+    let logger = app.state::<StdMutex<Logger>>();
     let stats_port = crate::proxy::CLASH_API_PORT.load(Ordering::Relaxed);
     if stats_port == 0 {
+        log(
+            &app,
+            &logger,
+            LogLevel::Warning,
+            LogSource::System,
+            "outlet_ip: Clash API port is 0 — proxy not connected".into(),
+        );
         return Err("Proxy not connected".into());
     }
-
-    let logger = app.state::<StdMutex<Logger>>();
 
     // ── Early CDN check ────────────────────────────────────────────────
     // If the active server is behind CDN, exit IP is meaningless (dynamic
@@ -1541,6 +1547,13 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
     }
 
     if ip.is_empty() {
+        log(
+            &app,
+            &logger,
+            LogLevel::Warning,
+            LogSource::System,
+            "outlet_ip: All IP check services failed — could not determine external IP".into(),
+        );
         return Err("Could not determine external IP".into());
     }
 
@@ -1548,7 +1561,7 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
         log(
             &app,
             &logger,
-            LogLevel::Warning,
+            LogLevel::Error,
             LogSource::System,
             format!("[BUG] outlet_ip: Fetched outlet IP {} belongs to a CDN, but active server was not marked as CDN!", ip)
         );
@@ -1659,9 +1672,17 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
 /// Quick health check for the active proxy via Clash API delay endpoint.
 /// Returns true if the "proxy" outbound/group responds to a delay probe.
 #[tauri::command]
-async fn check_proxy_health() -> Result<bool, String> {
+async fn check_proxy_health(app: tauri::AppHandle) -> Result<bool, String> {
     let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if stats_port == 0 {
+        let logger = app.state::<StdMutex<Logger>>();
+        log(
+            &app,
+            &logger,
+            LogLevel::Warning,
+            LogSource::Proxy,
+            "Health check: Clash API port is 0 — proxy not connected".into(),
+        );
         return Ok(false);
     }
 
@@ -1669,7 +1690,17 @@ async fn check_proxy_health() -> Result<bool, String> {
         .no_proxy()
         .timeout(std::time::Duration::from_secs(7))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            let logger = app.state::<StdMutex<Logger>>();
+            log(
+                &app,
+                &logger,
+                LogLevel::Error,
+                LogSource::Proxy,
+                format!("Health check: failed to build HTTP client: {e}"),
+            );
+            e.to_string()
+        })?;
 
     let delay_url = format!(
         "http://127.0.0.1:{stats_port}/proxies/proxy/delay?url=http://cp.cloudflare.com/generate_204&timeout=5000"
@@ -1677,7 +1708,28 @@ async fn check_proxy_health() -> Result<bool, String> {
 
     match client.get(&delay_url).send().await {
         Ok(resp) if resp.status().is_success() => Ok(true),
-        _ => Ok(false),
+        Ok(resp) => {
+            let logger = app.state::<StdMutex<Logger>>();
+            log(
+                &app,
+                &logger,
+                LogLevel::Warning,
+                LogSource::Proxy,
+                format!("Health check: Clash API returned status {} — proxy may be unresponsive", resp.status()),
+            );
+            Ok(false)
+        }
+        Err(e) => {
+            let logger = app.state::<StdMutex<Logger>>();
+            log(
+                &app,
+                &logger,
+                LogLevel::Error,
+                LogSource::Proxy,
+                format!("Health check: Clash API request failed: {e}"),
+            );
+            Ok(false)
+        }
     }
 }
 

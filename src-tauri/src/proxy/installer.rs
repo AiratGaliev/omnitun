@@ -118,7 +118,7 @@ impl Installer {
                         log(
                             app_handle,
                             &logger,
-                            LogLevel::Warning,
+                            LogLevel::Error,
                             LogSource::Installer,
                             format!("Failed to parse GitHub response: {e}"),
                         );
@@ -138,7 +138,7 @@ impl Installer {
                 log(
                     app_handle,
                     &logger,
-                    LogLevel::Warning,
+                    LogLevel::Error,
                     LogSource::Installer,
                     format!("GitHub API unreachable (blocked?): {e}"),
                 );

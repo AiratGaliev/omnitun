@@ -168,7 +168,7 @@ impl ProfileManager {
                         log(
                             app,
                             &logger,
-                            LogLevel::Warning,
+                            LogLevel::Error,
                             LogSource::Subscription,
                             format!("Proxy fetch failed, retrying direct: {e}"),
                         );
@@ -244,7 +244,7 @@ impl ProfileManager {
                             log(
                                 app,
                                 &logger,
-                                LogLevel::Warning,
+                                LogLevel::Error,
                                 LogSource::Subscription,
                                 format!("Proxy fetch failed, retrying direct: {e}"),
                             );
@@ -267,7 +267,7 @@ impl ProfileManager {
                 log(
                     app,
                     &app.state::<Mutex<Logger>>(),
-                    LogLevel::Warning,
+                    LogLevel::Error,
                     LogSource::Subscription,
                     format!("Refresh failed, bumping updated_at: {e}"),
                 );
@@ -436,7 +436,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                     Err(e) => log(
                         app,
                         &logger,
-                        LogLevel::Warning,
+                        LogLevel::Error,
                         LogSource::System,
                         format!("GeoIP download failed (will retry): {e}"),
                     ),
@@ -486,7 +486,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                         log(
                             app,
                             &logger,
-                            LogLevel::Warning,
+                            LogLevel::Error,
                             LogSource::System,
                             format!("CDN .srs {name} parse failed: {e}"),
                         );
@@ -675,7 +675,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 log(
                     app,
                     &logger,
-                    LogLevel::Warning,
+                    LogLevel::Error,
                     LogSource::Subscription,
                     "Semaphore closed — skipping remaining servers".into(),
                 );
@@ -812,7 +812,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 log(
                     app,
                     &logger,
-                    LogLevel::Warning,
+                    LogLevel::Error,
                     LogSource::Subscription,
                     "TCP ping task panicked".into(),
                 );

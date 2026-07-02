@@ -793,10 +793,11 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
           }
 
           try {
-            // 1. Check if the process is still alive
+            // 1. Check if the process is still alive.
+            //    Rust logs the failure reason via check_proxy_health.
+            //    That message propagates to UI via the log-entry event.
             const alive = await invoke<boolean>('check_proxy_health');
             if (!alive) {
-              state.addLog('Core process unresponsive. Disconnecting.', 'error', 'system');
               set({ status: 'disconnected', connectedAt: null });
               await invoke('stop_proxy').catch(() => {});
               return;
