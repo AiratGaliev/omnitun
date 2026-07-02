@@ -143,6 +143,20 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     }
   };
 
+  /** Бесшовный реконнект: отключаем → ждём 500ms → включаем. */
+  const seamlessReconnect = async (label: string) => {
+    toast.info(label);
+    // Clear stale exit IP before changing connection
+    useAppStore.setState({ exitIp: null });
+    try {
+      await toggleConnection();
+      await new Promise((r) => setTimeout(r, 500));
+      await toggleConnection();
+    } catch (e) {
+      console.error('Reconnect failed', e);
+    }
+  };
+
   const handleToggleConnection = async () => {
     try {
       await toggleConnection();
@@ -305,17 +319,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
 
                                   // Auto-reconnect if already connected
                                   if (status === 'connected') {
-                                    toast.info(`Reconnecting to ${server.name}...`);
-                                    void (async () => {
-                                      try {
-                                        await toggleConnection();
-                                        setTimeout(() => {
-                                          void toggleConnection();
-                                        }, 500);
-                                      } catch (e) {
-                                        console.error('Auto-reconnect failed', e);
-                                      }
-                                    })();
+                                    void seamlessReconnect(`Reconnecting to ${server.name}...`);
                                   } else {
                                     toast.success(
                                       `${t('serverStr')}${server.name}${t('selectedStr')}`,
@@ -402,17 +406,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
 
                       // Auto-reconnect with new mode when connected
                       if (status === 'connected') {
-                        toast.info(val === 'system-proxy' ? t('systemProxyMode') : t('proxyMode'));
-                        void (async () => {
-                          try {
-                            await toggleConnection();
-                            setTimeout(() => {
-                              void toggleConnection();
-                            }, 500);
-                          } catch (e) {
-                            console.error('Mode switch reconnect failed', e);
-                          }
-                        })();
+                        void seamlessReconnect(
+                          val === 'system-proxy' ? t('systemProxyMode') : t('proxyMode'),
+                        );
                       }
                     }}
                     disabled={isConnecting}
