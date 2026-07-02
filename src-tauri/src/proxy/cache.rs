@@ -470,6 +470,39 @@ impl ServerCache {
         }
     }
 
+    /// Fast cache lookup for a positive result without triggering batch testing.
+    /// Returns `Some(PositiveResult)` if the server has a fresh positive entry
+    /// in either the hot cache or the persistent store. Returns `None` if the
+    /// entry is stale, negative, or missing — caller should fall through to
+    /// batch testing.
+    pub async fn get_positive_if_fresh(&self, server_id: &str) -> Option<PositiveResult> {
+        let now = chrono::Utc::now().timestamp();
+
+        // Check hot cache first (fastest path)
+        if let Some(hot) = self.hot.get(server_id).await {
+            if !is_positive_stale(hot.tested_at, now) {
+                let store = self.store.read().await;
+                if let Some(entry) = store.get(server_id) {
+                    if let Some(result) = entry.to_positive() {
+                        return Some(result);
+                    }
+                }
+            }
+        }
+
+        // Check persistent store
+        let store = self.store.read().await;
+        if let Some(entry) = store.get(server_id) {
+            if let CacheStatus::Positive { .. } = &entry.status {
+                if !is_positive_stale(entry.last_updated, now) {
+                    return entry.to_positive();
+                }
+            }
+        }
+
+        None
+    }
+
     /// Batch-test all servers that passed TCP ping. Fills the cache
     /// and returns results.
     ///

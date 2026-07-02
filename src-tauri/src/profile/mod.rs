@@ -865,135 +865,123 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
         );
     }
 
-    log(
-        app,
-        &logger,
-        LogLevel::Success,
-        LogSource::Subscription,
-        format!("{} server(s) passed and saved", alive.len()),
-    );
+    // === DIFF-TESTING OPTIMIZATION ===
+    // After TCP ping, check cache for each alive server. Servers with a fresh
+    // positive cache entry skip the expensive batch test. Only unknown/stale
+    // servers get batch-tested.
+    let mut ready_servers = Vec::new();
+    let mut needs_batch_test = Vec::new();
 
-    // 4. Real latency test via ServerCache batch engine.
-    //    Skip if main proxy is running (separate sing-box instances conflict on Windows).
+    if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+        for mut server in alive {
+            if let Some(pos) = cache.get_positive_if_fresh(&server.id).await {
+                // Server is alive (TCP ping passed) and cache is fresh.
+                // Skip batch test — use cached data directly.
+                server.behind_cdn = pos.behind_cdn;
+                if !server.behind_cdn {
+                    server.exit_server = pos.exit_ip;
+                    server.exit_flag = pos.exit_flag;
+                    server.exit_country_name = pos.exit_country;
+                    server.exit_city_name = pos.exit_city;
+                }
+                ready_servers.push(server);
+            } else {
+                // Server is new, stale, or negative — needs batch test
+                needs_batch_test.push(server);
+            }
+        }
+
+        log(
+            app,
+            &logger,
+            LogLevel::Info,
+            LogSource::Cache,
+            format!("{}/{} server(s) had fresh cache — skipping batch test", ready_servers.len(), ready_servers.len() + needs_batch_test.len()),
+        );
+    } else {
+        // No cache available — batch test everything
+        needs_batch_test = alive;
+    }
+
     let main_proxy_running =
         crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
 
-    if !alive.is_empty() && !main_proxy_running {
-        // Get the ServerCache from app state
-        let batch_result = if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+    if !needs_batch_test.is_empty() && !main_proxy_running {
+        if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
             log(
                 app,
                 &logger,
                 LogLevel::Info,
                 LogSource::Cache,
-                format!("Starting batch test for {} server(s)...", alive.len()),
+                format!("Starting batch test for {} NEW/UNKNOWN server(s)...", needs_batch_test.len()),
             );
 
             let cancel_token = app.try_state::<Mutex<CancellationToken>>()
                 .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()).clone());
 
-            let updated = cache.batch_test(app, &alive, cancel_token, profile_id).await;
+            let mut updated = cache.batch_test(app, &needs_batch_test, cancel_token, profile_id).await;
+            ready_servers.append(&mut updated);
+        }
+    } else if main_proxy_running && !needs_batch_test.is_empty() {
+        log(
+            app,
+            &logger,
+            LogLevel::Info,
+            LogSource::Cache,
+            format!("Batch test skipped for {} new servers — main proxy is running", needs_batch_test.len()),
+        );
+        ready_servers.append(&mut needs_batch_test);
+    }
 
-            let before_filter = updated.len();
-            let updated: Vec<ServerProfile> = updated.into_iter().filter(|s| s.ping_ms.is_some()).collect();
-            let latency_filtered = before_filter - updated.len();
-            if latency_filtered > 0 {
-                log(
-                    app,
-                    &logger,
-                    LogLevel::Warning,
-                    LogSource::Subscription,
-                    format!("Removed {latency_filtered} server(s) that failed real latency test"),
-                );
-            }
-            Ok(updated)
-        } else {
-            log(
-                app,
-                &logger,
-                LogLevel::Warning,
-                LogSource::Subscription,
-                "ServerCache not initialized — skipping batch test".into(),
-            );
-            Err(())
-        };
-
-        if let Ok(mut updated) = batch_result {
-            // Apply CDN node filter if user enabled it
-            if let Some(settings) =
-                app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
-            {
-                let settings_guard = settings.lock().await;
-                if settings_guard.block_cdn_nodes {
-                    let before_cdn_filter = updated.len();
-                    updated.retain(|s| !s.behind_cdn);
-                    let cdn_filtered = before_cdn_filter - updated.len();
-                    if cdn_filtered > 0 {
-                        log(
-                            app,
-                            &logger,
-                            LogLevel::Info,
-                            LogSource::Subscription,
-                            format!("Removed {cdn_filtered} CDN/Worker/WARP server(s) (blockCdnNodes enabled)"),
-                        );
-                    }
-                }
-            }
-
-            // Sort by ping (fastest first)
-            updated.sort_by(|a, b| {
-                a.ping_ms
-                    .unwrap_or(u64::MAX)
-                    .cmp(&b.ping_ms.unwrap_or(u64::MAX))
-            });
-            if let Some(fastest) = updated.first() {
+    // Apply CDN node filter if user enabled it
+    if let Some(settings) = app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>() {
+        let settings_guard = settings.lock().await;
+        if settings_guard.block_cdn_nodes {
+            let before_cdn = ready_servers.len();
+            ready_servers.retain(|s| !s.behind_cdn);
+            let cdn_filtered = before_cdn - ready_servers.len();
+            if cdn_filtered > 0 {
                 log(
                     app,
                     &logger,
                     LogLevel::Info,
                     LogSource::Subscription,
-                    format!(
-                        "Fastest server: {} ({} ms)",
-                        fastest.display_name(),
-                        fastest.ping_ms.unwrap_or(0)
-                    ),
+                    format!("Removed {cdn_filtered} CDN/Worker/WARP server(s) (blockCdnNodes enabled)"),
                 );
             }
-            return updated;
-        } else {
-            log(
-                app,
-                &logger,
-                LogLevel::Warning,
-                LogSource::Subscription,
-                "Batch test failed — falling back to TCP ping results".into(),
-            );
         }
-    } else if main_proxy_running && !alive.is_empty() {
-        log(
-            app,
-            &logger,
-            LogLevel::Info,
-            LogSource::Cache,
-            format!("Batch test skipped — main proxy running ({} alive)", alive.len()),
-        );
-    } else if alive.is_empty() {
-        log(
-            app,
-            &logger,
-            LogLevel::Info,
-            LogSource::Cache,
-            "Batch test skipped — no alive servers".into(),
-        );
     }
 
-    alive.sort_by(|a, b| {
+    // Sort by ping (fastest first)
+    ready_servers.sort_by(|a, b| {
         a.ping_ms
             .unwrap_or(u64::MAX)
             .cmp(&b.ping_ms.unwrap_or(u64::MAX))
     });
 
-    alive
+    log(
+        app,
+        &logger,
+        LogLevel::Success,
+        LogSource::Subscription,
+        format!("{} server(s) passed and saved", ready_servers.len()),
+    );
+
+    if let Some(fastest) = ready_servers.first() {
+        log(
+            app,
+            &logger,
+            LogLevel::Info,
+            LogSource::Subscription,
+            format!(
+                "Fastest server: {} ({} ms)",
+                fastest.display_name(),
+                fastest.ping_ms.unwrap_or(0)
+            ),
+        );
+    }
+
+    ready_servers
 }
 
 /// Test all servers that passed TCP ping using sing-box and Clash API.
@@ -1382,11 +1370,11 @@ mod extra_tests {
         let cfg: serde_json::Value = serde_json::from_str(&cfg_str).unwrap();
         let obs = cfg["outbounds"].as_array().unwrap();
 
-        // Find selector group
-        let has_selector = obs.iter().any(|o| o["type"] == "selector");
+        // Find urltest group (replaced selector)
+        let has_urltest = obs.iter().any(|o| o["type"] == "urltest");
         assert!(
-            has_selector,
-            "With autoConnectFastest=true, expected selector outbound group"
+            has_urltest,
+            "With autoConnectFastest=true, expected urltest outbound group"
         );
 
         let _ = std::fs::remove_dir_all(&cache);

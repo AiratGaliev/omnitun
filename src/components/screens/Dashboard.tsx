@@ -211,12 +211,16 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 {/* Server Picker */}
                 <div className="relative w-full z-30">
                   <motion.button
-                    whileHover={{ scale: 1.02 }}
-                    whileTap={{ scale: 0.98 }}
+                    whileHover={{ scale: settings.autoConnectFastest ? 1 : 1.02 }}
+                    whileTap={{ scale: settings.autoConnectFastest ? 1 : 0.98 }}
                     onClick={() => {
+                      if (settings.autoConnectFastest) {
+                        toast.info(t('smartNodeDesc') || 'Manual selection is disabled while Smart Node is active');
+                        return;
+                      }
                       setIsServerDropdownOpen(!isServerDropdownOpen);
                     }}
-                    className="w-full px-5 py-3 bg-zinc-900/60 hover:bg-zinc-800/80 backdrop-blur-xl transition-all rounded-2xl border border-white/10 flex items-center justify-between gap-3 shadow-lg"
+                    className={`w-full px-5 py-3 bg-zinc-900/60 hover:bg-zinc-800/80 backdrop-blur-xl transition-all rounded-2xl border border-white/10 flex items-center justify-between gap-3 shadow-lg ${settings.autoConnectFastest ? 'opacity-80 cursor-default' : ''}`}
                   >
                     <div className="flex items-center gap-3 overflow-hidden w-full min-w-0">
                       <div className="flex items-center gap-1 shrink-0">

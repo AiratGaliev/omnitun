@@ -60,19 +60,32 @@ pub fn generate_config(
 
     if let Some(outbounds) = config["outbounds"].as_array_mut() {
         if proxy_outbounds.len() > 1 {
-            // Create Selector — keeps user's chosen server active, but allows
-            // Clash API to switch to alternatives if the current one dies.
-            // The final outbound in the config provides a `urltest`-style
-            // health check via sing-box's built-in URLTest, but the selector
-            // ensures the user's choice is respected until failure.
+            // Native Sing-Box failover: urltest (auto fastest) or fallback.
+            // Unlike the old `selector`, Sing-Box handles the switching
+            // internally — no Clash API calls needed, no connection drops.
             let tags: Vec<String> = (0..proxy_outbounds.len())
                 .map(|i| format!("proxy-{i}"))
                 .collect();
-            let group = json!({
-                "type": "selector",
+
+            let group_type = if settings.auto_connect_fastest {
+                "urltest"
+            } else {
+                "fallback"
+            };
+
+            let mut group = json!({
+                "type": group_type,
                 "tag": "proxy",
-                "outbounds": tags.clone()
+                "outbounds": tags.clone(),
+                "url": "http://cp.cloudflare.com/generate_204",
+                "interval": "3m",
             });
+
+            // Tolerance only for urltest — prevents ping-jitter flapping
+            if settings.auto_connect_fastest {
+                group["tolerance"] = json!(50);
+            }
+
             for ob in proxy_outbounds {
                 outbounds.push(ob);
             }
@@ -89,8 +102,10 @@ pub fn generate_config(
 
     // Set proxy listen port from user settings (HTTP/SOCKS proxy)
     // Also enable system proxy for system-proxy mode.
+    // TCP fast open accelerates local connection establishment.
     if let Some(inbound) = config["inbounds"].get_mut(0) {
         inbound["listen_port"] = json!(proxy_port);
+        inbound["tcp_fast_open"] = json!(true);
         if routing_mode == "system-proxy" {
             inbound["set_system_proxy"] = json!(true);
         }

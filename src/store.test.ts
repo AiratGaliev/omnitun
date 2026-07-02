@@ -630,7 +630,6 @@ describe('store — toggleConnection', () => {
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(1080); // start_proxy — returns actual port
-    mockInvoke.mockResolvedValueOnce(undefined); // switch_proxy
     mockInvoke.mockResolvedValueOnce({
       server: '5.6.7.8',
       flag: 'PL',
@@ -670,7 +669,6 @@ describe('store — toggleConnection', () => {
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(1080); // start_proxy — returns actual port
-    mockInvoke.mockResolvedValueOnce(undefined); // switch_proxy
     mockInvoke.mockResolvedValueOnce({
       server: '5.6.7.8',
       flag: 'PL',
@@ -696,7 +694,6 @@ describe('store — toggleConnection', () => {
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(1080); // start_proxy — returns actual port
-    mockInvoke.mockResolvedValueOnce(undefined); // switch_proxy
     mockInvoke.mockResolvedValueOnce({
       server: '5.6.7.8',
       flag: 'PL',

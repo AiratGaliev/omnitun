@@ -154,6 +154,8 @@ interface ProxyStore {
   _isConnecting: boolean;
   /** Set of profile IDs currently being refreshed (dedup guard). */
   _refreshingIds: string[];
+  /** Servers active in the current proxy session (ordered: primary then alternatives). */
+  _sessionServers: Server[];
 }
 
 const defaultServers: Server[] = [];
@@ -295,6 +297,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   _isReconnecting: false,
   _isConnecting: false,
   _refreshingIds: [],
+  _sessionServers: [],
   settings: {
     acceptTerms: false,
     routingMode: 'system-proxy',
@@ -593,6 +596,9 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         ...state.logs,
       ].slice(0, 1000),
     }));
+    // Duplicate ALL messages to the Rust JSONL file so every log entry
+    // survives UI restart and can be correlated with Rust-side logs.
+    invoke('log_frontend', { message, level, source }).catch(() => {});
   },
 
   clearLogs: () => {
@@ -661,8 +667,6 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     const { status, activeServer, servers, addLog, settings, _isReconnecting, _isConnecting } = get();
     const logToggle = (msg: string, level: 'info' | 'warning' | 'error' | 'success' = 'info') => {
       addLog(`[toggle] ${msg}`, level, 'system');
-      // Also send to Rust JSONL logger — these events are important for debugging
-      invoke('log_frontend', { message: `[toggle] ${msg}`, level, source: 'system' }).catch(() => {});
     };
     logToggle(`called — status=${status} _isReconnecting=${String(_isReconnecting)} _isConnecting=${String(_isConnecting)} server=${activeServer?.name ?? 'null'}`);
     if (_isReconnecting || _isConnecting) {
@@ -697,14 +701,21 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         // FIX: when `autoConnectFastest` is enabled, forward the other
         // known servers as `alternativeServers` so the Rust backend can
         // build a `urltest` group and auto-select the fastest outbound.
-        // Previously this was always an empty array, which silently
-        // disabled the autoConnectFastest feature.
         const altServers: ReturnType<typeof toRustServerProfile>[] =
           settings.autoConnectFastest && activeServer
             ? servers
                 .filter((s) => s.id !== activeServer.id)
                 .map((s) => toRustServerProfile(s, 'Default'))
             : [];
+
+        // Save the session servers: primary first, then alternatives.
+        // Used by startHealthCheck to map proxy-0, proxy-1 tags back to
+        // real server objects after Sing-Box seamlessly failsover.
+        const sessionServers = activeServer
+          ? [activeServer, ...servers.filter((s) => s.id !== activeServer.id).slice(0, 15)]
+          : [];
+        set({ _sessionServers: sessionServers });
+        logToggle(`_sessionServers set to ${String(sessionServers.length)} server(s)`);
 
         logToggle(`calling invoke('start_proxy') with port=${String(settings.proxyPort)} mode=${settings.routingMode}`);
         const actualPort = await invoke<number>('start_proxy', {
@@ -734,18 +745,9 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
           void get().saveSettings();
         }
 
-        // Force Selector to user's chosen server (sing-box Selector may
-        // auto-pick the fastest if not explicitly set via Clash API).
-        await new Promise((r) => setTimeout(r, 1000));
-        logToggle('calling switch_proxy');
-        await invoke('switch_proxy', { proxyTag: 'proxy-0' }).catch((e: unknown) => {
-          get().addLog(
-            `Failed to switch to proxy-0: ${e instanceof Error ? e.message : String(e)}`,
-            'warning',
-            'system',
-          );
-        });
-        logToggle('switch_proxy done');
+        // With urltest/fallback groups, Sing-Box handles failover internally.
+        // No need to force-select proxy-0 — urltest picks the fastest automatically.
+        logToggle('urltest/fallback active — no manual selector switch needed');
 
         // Outlet IP verification is handled by Rust backend during start_proxy.
         // It checks CDN status from profile manager, skips verification for CDN
@@ -773,114 +775,66 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   },
 
   initListener: async () => {
-    // ── Internal health check helpers ─────────────────────────────────────
+    // ── UI Sync Check — monitors Sing-Box failover and process health ──────
+    // Now that Sing-Box handles failover internally (urltest/fallback),
+    // this check no longer calls stop_proxy + start_proxy to switch servers.
+    // Instead it:
+    //   1. Checks if the sing-box process is still alive
+    //   2. Queries outlet_ip for the current proxy_tag to detect seamless
+    //      failover (proxy-1, proxy-2) and updates the UI accordingly
     const startHealthCheck = () => {
       if (get()._healthCheckTimer) return; // already running
 
       const timer = setInterval(() => {
         void (async () => {
           const state = useAppStore.getState();
-          if (state.status !== 'connected' || state._isReconnecting || !state.activeServer) {
+          if (state.status !== 'connected' || state._isReconnecting) {
             return;
           }
 
-          let alive = false;
           try {
-            alive = await invoke<boolean>('check_proxy_health');
-          } catch (e) {
-            // Treat invoke failure as dead (proxy probably stopped)
-            get().addLog(`Health check failed: ${String(e)}`, 'info', 'system');
-          }
-          // Guard: user might have disconnected while check was in flight
-          // (check_proxy_health has a 7s timeout). Don't reconnect if status changed.
-          if (useAppStore.getState().status !== 'connected') return;
-          if (alive) return;
-
-          // Server appears dead — find replacement from backend.
-          // The backend applies user filters (country, protocol, CDN) and
-          // picks the best candidate using authoritative exit_flag/ping data.
-          const currentState = useAppStore.getState();
-          const activeId = currentState.activeServer?.id;
-          let replacement: Server | null = null;
-          if (activeId) {
-            try {
-              const result = await invoke<RustServerProfile | null>('pick_replacement_server', {
-                currentServerId: activeId,
-              });
-              if (result) {
-                replacement = currentState.servers.find((s) => s.id === result.id) ?? null;
-              }
-            } catch (e) {
-              get().addLog('Failed to find replacement server: ' + String(e), 'warning', 'system');
-            }
-          }
-
-          if (!replacement) {
-            state.addLog(
-              'Current server died and no replacement available — disconnecting',
-              'error',
-              'system',
-            );
-            set({ _isReconnecting: true });
-            try {
-              await invoke('stop_proxy');
-            } catch (e) {
-              get().addLog('stop_proxy failed during reconnect: ' + String(e), 'warning', 'system');
-            }
-            set({ status: 'disconnected', _isReconnecting: false, connectedAt: null });
-            return;
-          }
-
-          state.addLog(
-            `Server ${currentState.activeServer?.name ?? '?'} died → reconnecting to ${replacement.name} (${replacement.flag ?? '?'})`,
-            'warning',
-            'system',
-          );
-
-          set({ _isReconnecting: true });
-          try {
-            // Check if user disconnected BEFORE stopping the proxy.
-            // The connection-status-changed event is asynchronous and might
-            // not have arrived yet — read the real status from Rust directly.
-            const actualStatus = await invoke<string>('get_status');
-            if (actualStatus !== 'connected') {
-              state.addLog(
-                `Health check abort — status is "${actualStatus}" (not connected)`,
-                'info',
-                'system',
-              );
-              set({ status: 'disconnected', _isReconnecting: false, connectedAt: null });
+            // 1. Check if the process is still alive
+            const alive = await invoke<boolean>('check_proxy_health');
+            if (!alive) {
+              state.addLog('Core process unresponsive. Disconnecting.', 'error', 'system');
+              set({ status: 'disconnected', connectedAt: null });
+              await invoke('stop_proxy').catch(() => {});
               return;
             }
-            await invoke('stop_proxy');
-            set({ activeServer: replacement, status: 'connecting' });
 
-            const profile = toRustServerProfile(replacement, 'Default');
-            const altServers: ReturnType<typeof toRustServerProfile>[] = currentState.settings
-              .autoConnectFastest
-              ? currentState.servers
-                  .filter((s) => s.id !== replacement.id)
-                  .map((s) => toRustServerProfile(s, 'Default'))
-              : [];
-            await invoke('start_proxy', {
-              profile,
-              alternativeServers: altServers,
-              routingMode: currentState.settings.routingMode,
-              proxyPort: currentState.settings.proxyPort,
-            });
+            // 2. Query current exit IP + proxy tag from Clash API.
+            //    Sing-Box's urltest/fallback group reports the active
+            //    outbound tag (proxy-0, proxy-1, etc.) in its response.
+            const exitInfo = await invoke<ExitIpInfo>('outlet_ip').catch(() => null);
 
-            useAppStore
-              .getState()
-              .addLog(`Reconnected to ${replacement.name}`, 'success', 'system');
-          } catch (e: unknown) {
-            const msg = e instanceof Error ? e.message : String(e);
-            useAppStore.getState().addLog(`Reconnect failed: ${msg}`, 'error', 'system');
-            set({ status: 'error' });
-          } finally {
-            set({ _isReconnecting: false });
+            if (exitInfo && exitInfo.proxy_tag) {
+              const tagMatch = exitInfo.proxy_tag.match(/proxy-(\d+)/);
+              if (tagMatch && tagMatch[1]) {
+                const tagIndex = parseInt(tagMatch[1], 10);
+
+                // If tagIndex > 0, Sing-Box autonomously failed over.
+                if (tagIndex > 0) {
+                  const sessionServers = get()._sessionServers;
+                  const actualActiveServer = sessionServers[tagIndex];
+
+                  if (actualActiveServer && state.activeServer?.id !== actualActiveServer.id) {
+                    state.addLog(
+                      `Seamless failover: Switched to ${actualActiveServer.name} (proxy-${String(tagIndex)})`,
+                      'success',
+                      'system',
+                    );
+                    set({ activeServer: actualActiveServer, exitIp: exitInfo });
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            // Log at info level — transient errors (e.g. Clash API flip)
+            // are expected and shouldn't trigger reconnection logic.
+            console.warn('UI Sync check failed', e);
           }
         })();
-      }, 30000);
+      }, 15000); // Every 15 seconds
 
       set({ _healthCheckTimer: timer });
     };
@@ -920,8 +874,6 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       const errorMsg = extractError(payload);
       const logToggle = (msg: string, level: 'info' | 'warning' | 'error' | 'success' = 'info') => {
         useAppStore.getState().addLog(`[evt:connection-status] ${msg}`, level, 'system');
-        // Also send to Rust JSONL logger for debugging consistency
-        invoke('log_frontend', { message: `[evt:connection-status] ${msg}`, level, source: 'system' }).catch(() => {});
       };
       logToggle(`received — payload=${JSON.stringify(payload)} currentStatus=${get().status}`);
       if (errorMsg) {
