@@ -45,15 +45,6 @@ const SINGBOX_STARTUP_MS: u64 = 600;
 /// Number of parallel testing tasks per batch.
 const MAX_CONCURRENT_TESTS: usize = 50;
 
-// ── Helper: emit structured log to JSONL + UI ──────────────────────────────
-
-/// Log a batcher message to the app's structured log (visible in JSONL and UI).
-fn batcher_log(app_handle: &AppHandle, level: crate::logging::LogLevel, message: String) {
-    use crate::logging::LogSource;
-    let logger = app_handle.state::<std::sync::Mutex<crate::logging::Logger>>();
-    crate::logging::log(app_handle, &logger, level, LogSource::Cache, message);
-}
-
 // ── BatchingEngine ──────────────────────────────────────────────────────────
 
 /// Results from testing a single server through its proxy port.
@@ -80,19 +71,19 @@ pub async fn run(
     app_handle: AppHandle,
     cancel: CancellationToken,
 ) {
-    batcher_log(&app_handle, crate::logging::LogLevel::Info, "[Batcher] engine started".into());
+    tracing::info!(target: "cache", "[Batcher] engine started");
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
-                batcher_log(&app_handle, crate::logging::LogLevel::Info, "[Batcher] cancelled — shutting down".into());
+                tracing::info!(target: "cache", "[Batcher] cancelled — shutting down");
                 return;
             }
             result = collect_batch(&mut rx) => {
                 let batch = match result {
                     Some(b) => b,
                     None => {
-                        batcher_log(&app_handle, crate::logging::LogLevel::Info, "[Batcher] channel closed — shutting down".into());
+                        tracing::info!(target: "cache", "[Batcher] channel closed — shutting down");
                         return;
                     }
                 };
@@ -102,7 +93,7 @@ pub async fn run(
                 }
 
                 let count = batch.len();
-                batcher_log(&app_handle, crate::logging::LogLevel::Info, format!("[Batcher] processing batch of {count} server(s)"));
+                tracing::info!(target: "cache", "[Batcher] processing batch of {count} server(s)");
 
                 process_batch(batch, &cache, &port_pool, &app_handle, &cancel).await;
             }
@@ -147,16 +138,16 @@ async fn process_batch(
     cancel: &CancellationToken,
 ) {
     let count = batch.len();
-    batcher_log(app_handle, crate::logging::LogLevel::Info, format!("[Batcher] processing {count} server(s)"));
+    tracing::info!(target: "cache", "[Batcher] processing {count} server(s)");
 
     // 1. Acquire ports
-    batcher_log(app_handle, crate::logging::LogLevel::Info, format!("[Batcher] acquiring {count} port(s)"));
+    tracing::info!(target: "cache", "[Batcher] acquiring {count} port(s)");
 
     // Get binary path
     let data_dir = match app_handle.path().app_data_dir() {
         Ok(d) => d,
         Err(e) => {
-            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] cannot get app data dir: {e}"));
+            tracing::error!(target: "cache", "[Batcher] cannot get app data dir: {e}");
             for req in batch {
                 let _ = req.reply.send(Err(format!("App data dir error: {e}")));
             }
@@ -176,14 +167,14 @@ async fn process_batch(
                 break;
             }
             if attempt == 10 {
-                batcher_log(app_handle, crate::logging::LogLevel::Warning, "[Batcher] port pool exhausted after 10 retries".into());
+                tracing::warn!(target: "cache", "[Batcher] port pool exhausted after 10 retries");
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         match guard {
             Some(g) => guards.push(g),
             None => {
-                batcher_log(app_handle, crate::logging::LogLevel::Error, "[Batcher] port pool exhausted — cannot process batch".into());
+                tracing::error!(target: "cache", "[Batcher] port pool exhausted — cannot process batch");
                 for req in batch {
                     let _ = req.reply.send(Err("Port pool exhausted".into()));
                 }
@@ -204,14 +195,14 @@ async fn process_batch(
     }
 
     // 2. Generate config
-    batcher_log(app_handle, crate::logging::LogLevel::Info, format!("[Batcher] generating N-inbound config ({count} servers)"));
+    tracing::info!(target: "cache", "[Batcher] generating N-inbound config ({count} servers)");
 
     let test_dir = std::env::temp_dir().join(format!(
         "omnitun-batch-{}",
         uuid::Uuid::new_v4()
     ));
     if let Err(e) = std::fs::create_dir_all(&test_dir) {
-        batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] failed to create test dir: {e}"));
+        tracing::error!(target: "cache", "[Batcher] failed to create test dir: {e}");
         for req in batch {
             let _ = req.reply.send(Err(format!("Temp dir error: {e}")));
         }
@@ -226,16 +217,16 @@ async fn process_batch(
 
     // Also log first few server protocols for debugging
     for (idx, (sid, profile)) in tagged_servers.iter().enumerate().take(3) {
-        batcher_log(app_handle, crate::logging::LogLevel::Info, format!(
+        tracing::info!(target: "cache",
             "[Batcher] server {}: protocol={}, server={}:{}, port_inbound={}",
             sid, profile.protocol, profile.server, profile.port, port_list[idx],
-        ));
+        );
     }
 
     let config = match generate_batch_config(&tagged_servers, &port_list, &test_dir) {
         Ok(c) => c,
         Err(e) => {
-            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] config generation failed: {e}"));
+            tracing::error!(target: "cache", "[Batcher] config generation failed: {e}");
             for req in batch {
                 let _ = req.reply.send(Err(format!("Config error: {e}")));
             }
@@ -248,46 +239,46 @@ async fn process_batch(
     let config_str = match serde_json::to_string_pretty(&config) {
         Ok(s) => s,
         Err(e) => {
-            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] config serialization failed: {e}"));
+            tracing::error!(target: "cache", "[Batcher] config serialization failed: {e}");
             for req in batch {
                 if let Err(e) = req.reply.send(Err(format!("Config serialization error: {e}"))) {
-                    batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] reply send failed: {:?}", e));
+                    tracing::warn!(target: "cache", "[Batcher] reply send failed: {:?}", e);
                 }
             }
             if let Err(e) = std::fs::remove_dir_all(&test_dir) {
-                batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to remove test dir: {e}"));
+                tracing::warn!(target: "cache", "[Batcher] failed to remove test dir: {e}");
             }
             return;
         }
     };
     if let Err(e) = std::fs::write(&config_path, &config_str) {
-        batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] config write failed: {e}"));
+        tracing::error!(target: "cache", "[Batcher] config write failed: {e}");
         for req in batch {
             if let Err(e) = req.reply.send(Err(format!("Config write error: {e}"))) {
-                batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] reply send failed: {:?}", e));
+                tracing::warn!(target: "cache", "[Batcher] reply send failed: {:?}", e);
             }
         }
         if let Err(e) = std::fs::remove_dir_all(&test_dir) {
-            batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to remove test dir: {e}"));
+            tracing::warn!(target: "cache", "[Batcher] failed to remove test dir: {e}");
         }
         return;
     }
 
     // 3. Check if sing-box binary exists, then start
     if !binary_path.exists() {
-        batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] sing-box binary not found at {:?} — installing may be needed (run main proxy first)", binary_path));
+        tracing::error!(target: "cache", "[Batcher] sing-box binary not found at {:?} — installing may be needed (run main proxy first)", binary_path);
         for req in batch {
             if let Err(e) = req.reply.send(Err("sing-box not installed — connect to proxy first to auto-install".into())) {
-                batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] reply send failed: {:?}", e));
+                tracing::warn!(target: "cache", "[Batcher] reply send failed: {:?}", e);
             }
         }
         if let Err(e) = std::fs::remove_dir_all(&test_dir) {
-            batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to remove test dir: {e}"));
+            tracing::warn!(target: "cache", "[Batcher] failed to remove test dir: {e}");
         }
         return;
     }
 
-    batcher_log(app_handle, crate::logging::LogLevel::Info, "[Batcher] starting sing-box...".into());
+    tracing::info!(target: "cache", "[Batcher] starting sing-box...");
 
     #[cfg(windows)]
     let (mut child, _job_guard) = {
@@ -312,14 +303,14 @@ async fn process_batch(
                 {
                     Ok(c) => c,
                     Err(e) => {
-                        batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] failed to start sing-box: {e}"));
+                        tracing::error!(target: "cache", "[Batcher] failed to start sing-box: {e}");
                         for req in batch {
                             if let Err(e) = req.reply.send(Err(format!("sing-box startup error: {e}"))) {
-                                batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] reply send failed: {:?}", e));
+                                tracing::warn!(target: "cache", "[Batcher] reply send failed: {:?}", e);
                             }
                         }
                         if let Err(e) = std::fs::remove_dir_all(&test_dir) {
-                            batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to remove test dir: {e}"));
+                            tracing::warn!(target: "cache", "[Batcher] failed to remove test dir: {e}");
                         }
                         return;
                     }
@@ -361,7 +352,7 @@ async fn process_batch(
         match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] failed to start sing-box: {e}"));
+                tracing::error!(target: "cache", "[Batcher] failed to start sing-box: {e}");
                 for req in batch {
                     let _ = req.reply.send(Err(format!("sing-box startup error: {e}")));
                 }
@@ -372,7 +363,7 @@ async fn process_batch(
     };
 
     let pid = child.id();
-    batcher_log(app_handle, crate::logging::LogLevel::Info, format!("[Batcher] sing-box started (PID {pid})"));
+    tracing::info!(target: "cache", "[Batcher] sing-box started (PID {pid})");
 
     // Wait for sing-box to initialize
     tokio::time::sleep(Duration::from_millis(SINGBOX_STARTUP_MS)).await;
@@ -389,9 +380,9 @@ async fn process_batch(
         }
     }
     if ports_ready {
-        batcher_log(app_handle, crate::logging::LogLevel::Info, "[Batcher] all proxy ports ready".into());
+        tracing::info!(target: "cache", "[Batcher] all proxy ports ready");
     } else {
-        batcher_log(app_handle, crate::logging::LogLevel::Warning, "[Batcher] proxy ports not ready after 2s, proceeding anyway...".into());
+        tracing::warn!(target: "cache", "[Batcher] proxy ports not ready after 2s, proceeding anyway...");
     }
 
     // Check if sing-box is still alive after startup
@@ -404,19 +395,19 @@ async fn process_batch(
                     s.read_to_string(&mut buf).ok().map(|_| buf)
                 })
                 .unwrap_or_default();
-            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] sing-box exited prematurely with status {status} — config error likely"));
+            tracing::error!(target: "cache", "[Batcher] sing-box exited prematurely with status {status} — config error likely");
             if !stderr.is_empty() {
-                batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] sing-box stderr:\n{}", stderr.trim()));
+                tracing::error!(target: "cache", "[Batcher] sing-box stderr:\n{}", stderr.trim());
             }
             // Log to frontend logs
-            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] sing-box exited with status {status}: {}",
-                stderr.trim().lines().next().unwrap_or("no stderr")));
-            batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] config preserved at {:?}", test_dir.join("config.json")));
+            tracing::error!(target: "cache", "[Batcher] sing-box exited with status {status}: {}",
+                stderr.trim().lines().next().unwrap_or("no stderr"));
+            tracing::error!(target: "cache", "[Batcher] config preserved at {:?}", test_dir.join("config.json"));
             if let Ok(cfg) = std::fs::read_to_string(test_dir.join("config.json")) {
                 if let Ok(cfg_json) = serde_json::from_str::<serde_json::Value>(&cfg) {
                     let safe_cfg = crate::proxy::config::redact_sensitive_data(cfg_json);
-                    batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] generated config (redacted):\n{}",
-                        serde_json::to_string_pretty(&safe_cfg).unwrap_or_default()));
+                    tracing::error!(target: "cache", "[Batcher] generated config (redacted):\n{}",
+                        serde_json::to_string_pretty(&safe_cfg).unwrap_or_default());
                 }
             }
             // Don't delete test_dir — save config for debugging
@@ -426,10 +417,10 @@ async fn process_batch(
             return;
         }
         Ok(None) => {
-            batcher_log(app_handle, crate::logging::LogLevel::Info, "[Batcher] sing-box is still running — proceeding with tests".into());
+            tracing::info!(target: "cache", "[Batcher] sing-box is still running — proceeding with tests");
         }
         Err(e) => {
-            batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] sing-box wait check error (will proceed): {e}"));
+            tracing::warn!(target: "cache", "[Batcher] sing-box wait check error (will proceed): {e}");
         }
     }
 
@@ -458,7 +449,7 @@ async fn process_batch(
             Ok((req, Ok(result))) => {
                 // Log any [BUG] diagnostics caught during the test
                 if let Some(warning) = &result.diagnostic_warning {
-                    batcher_log(app_handle, crate::logging::LogLevel::Warning, warning.clone());
+                    tracing::warn!(target: "cache", "{warning}");
                 }
 
                 let positive = PositiveResult {
@@ -476,10 +467,10 @@ async fn process_batch(
                 let _ = req.reply.send(Ok(positive));
                 success_count += 1;
                 match result.outlet_ip {
-                    Some(ref ip) => batcher_log(app_handle, crate::logging::LogLevel::Info,
-                        format!("[Batcher] server {} passed — ping {}ms, outlet {}", result.server_id, result.ping_ms, ip)),
-                    None => batcher_log(app_handle, crate::logging::LogLevel::Warning,
-                        format!("[Batcher] server {} passed — ping {}ms, NO outlet IP", result.server_id, result.ping_ms)),
+                    Some(ref ip) => tracing::info!(target: "cache",
+                        "[Batcher] server {} passed — ping {}ms, outlet {}", result.server_id, result.ping_ms, ip),
+                    None => tracing::warn!(target: "cache",
+                        "[Batcher] server {} passed — ping {}ms, NO outlet IP", result.server_id, result.ping_ms),
                 }
             }
             Ok((req, Err(e))) => {
@@ -488,14 +479,14 @@ async fn process_batch(
                 fail_count += 1;
             }
             Err(e) => {
-                batcher_log(app_handle, crate::logging::LogLevel::Error, format!("[Batcher] Task panicked: {e}"));
+                tracing::error!(target: "cache", "[Batcher] Task panicked: {e}");
                 fail_count += 1;
             }
         }
     }
 
     // 6. Stop sing-box
-    batcher_log(app_handle, crate::logging::LogLevel::Info, format!("[Batcher] stopping sing-box (PID {pid})"));
+    tracing::info!(target: "cache", "[Batcher] stopping sing-box (PID {pid})");
     // Drop JobObject first — triggers KILL_ON_JOB_CLOSE (OS kills process immediately)
     #[cfg(windows)]
     drop(_job_guard);
@@ -505,31 +496,30 @@ async fn process_batch(
     if success_count == 0 && count > 0 {
         let debug_dir = data_dir.join("batch-debug");
         if let Err(e) = std::fs::create_dir_all(&debug_dir) {
-            batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to create debug dir: {e}"));
+            tracing::warn!(target: "cache", "[Batcher] failed to create debug dir: {e}");
         }
         if let Err(e) = std::fs::copy(&config_path, debug_dir.join("config.json")) {
-            batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to copy config for debug: {e}"));
+            tracing::warn!(target: "cache", "[Batcher] failed to copy config for debug: {e}");
         }
         let sb_log = test_dir.join("sing-box.log");
         if sb_log.exists() {
             if let Err(e) = std::fs::copy(&sb_log, debug_dir.join("sing-box.log")) {
-                batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to copy log for debug: {e}"));
+                tracing::warn!(target: "cache", "[Batcher] failed to copy log for debug: {e}");
             }
         }
-        batcher_log(app_handle, crate::logging::LogLevel::Info, format!(
-            "[Batcher] config+log preserved at {:?} for debugging", debug_dir));
+        tracing::info!(target: "cache",
+            "[Batcher] config+log preserved at {:?} for debugging", debug_dir);
     }
     if let Err(e) = std::fs::remove_dir_all(&test_dir) {
-        batcher_log(app_handle, crate::logging::LogLevel::Warning, format!("[Batcher] failed to remove test dir: {e}"));
+        tracing::warn!(target: "cache", "[Batcher] failed to remove test dir: {e}");
     }
 
     // 8. Save cache
     cache.save_to_disk().await;
 
-    batcher_log(
-        app_handle,
-        crate::logging::LogLevel::Info,
-        format!("[Batcher] batch complete: {success_count}/{count} passed, {fail_count} failed"),
+    tracing::info!(
+        target: "cache",
+        "[Batcher] batch complete: {success_count}/{count} passed, {fail_count} failed",
     );
 }
 
@@ -894,16 +884,7 @@ mod tests {
         assert!(r.exit_city.is_none());
     }
 
-    // ── BatcherLog helper signature ───────────────────────────────────────
-    // batcher_log() calls AppHandle::state() which requires a running Tauri app,
-    // so we can't unit-test it in isolation. Test that the function signature
-    // resolves at compile time by verifying we can call it with the right types.
-    #[test]
-    fn test_batcher_log_fn_compiles() {
-        // Compile-time check: function exists with expected signature.
-        // No runtime test needed — it requires Tauri runtime.
-        fn _check_type(a: &tauri::AppHandle, l: crate::logging::LogLevel, m: String) {
-            batcher_log(a, l, m);
-        }
-    }
+    // ── BatcherLog helper removed ──────────────────────────────────────────
+    // batcher_log() has been replaced with direct tracing::*!() macros.
+    // The function no longer exists, so this compile-time check is removed.
 }

@@ -1,4 +1,3 @@
-use crate::logging::{log, LogLevel, LogSource, Logger};
 use crate::subscription::SubscriptionProfile;
 use crate::proxy::{ServerProfile, ProxyError};
 use std::collections::HashSet;
@@ -159,18 +158,14 @@ impl ProfileManager {
         }
 
         let mut servers = if clean_url.starts_with("http://") || clean_url.starts_with("https://") {
-            let logger = app.state::<Mutex<Logger>>();
             // Try through existing proxy first, fall back to direct
             match crate::subscription::fetch_subscription(&clean_url, proxy_port(app)).await {
                 Ok(s) => s,
                 Err(e) => {
                     if proxy_port(app).is_some() {
-                        log(
-                            app,
-                            &logger,
-                            LogLevel::Error,
-                            LogSource::Subscription,
-                            format!("Proxy fetch failed, retrying direct: {e}"),
+                        tracing::error!(
+                            target: "subscription",
+                            "Proxy fetch failed, retrying direct: {e}",
                         );
                         crate::subscription::fetch_subscription(&clean_url, None).await?
                     } else {
@@ -234,19 +229,15 @@ impl ProfileManager {
             .ok_or_else(|| ProxyError::Subscription("Profile not found".into()))?;
 
         let url = &self.profiles[idx].url;
-        let logger = app.state::<Mutex<Logger>>();
         let fetch_result = match url {
             u if u.starts_with("http://") || u.starts_with("https://") => {
                 match crate::subscription::fetch_subscription(u, proxy_port(app)).await {
                     Ok(s) => Ok(s),
                     Err(e) => {
                         if proxy_port(app).is_some() {
-                            log(
-                                app,
-                                &logger,
-                                LogLevel::Error,
-                                LogSource::Subscription,
-                                format!("Proxy fetch failed, retrying direct: {e}"),
+                            tracing::error!(
+                                target: "subscription",
+                                "Proxy fetch failed, retrying direct: {e}",
                             );
                             crate::subscription::fetch_subscription(u, None).await
                         } else {
@@ -264,12 +255,9 @@ impl ProfileManager {
         let mut servers = match fetch_result {
             Ok(s) => s,
             Err(e) => {
-                log(
-                    app,
-                    &app.state::<Mutex<Logger>>(),
-                    LogLevel::Error,
-                    LogSource::Subscription,
-                    format!("Refresh failed, bumping updated_at: {e}"),
+                tracing::error!(
+                    target: "subscription",
+                    "Refresh failed, bumping updated_at: {e}",
                 );
                 self.profiles[idx].updated_at = chrono::Utc::now().to_rfc3339();
                 // If we have existing servers, enrich them with GeoIP while we wait
@@ -396,7 +384,6 @@ impl ProfileManager {
 /// Logs each step (dedup count, testing, unreachable count, final count).
 pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profile_id: &str) -> Vec<ServerProfile> {
     let initial_count = servers.len();
-    let logger = app.state::<Mutex<Logger>>();
 
     // Lazy-init GeoIP: load from disk or download synchronously (one-time cost)
     let data_dir = app.path().app_data_dir().ok();
@@ -409,12 +396,9 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             if city_path.exists() {
                 let _ = crate::proxy::geoip::init_city(&city_path);
             } else {
-                log(
-                    app,
-                    &logger,
-                    LogLevel::Info,
-                    LogSource::System,
-                    "Downloading GeoIP databases (one-time)...".into(),
+                tracing::info!(
+                    target: "system",
+                    "Downloading GeoIP databases (one-time)...",
                 );
                 match crate::proxy::geoip::ensure_downloaded(
                     &geo_dir,
@@ -426,19 +410,13 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 )
                 .await
                 {
-                    Ok(_) => log(
-                        app,
-                        &logger,
-                        LogLevel::Success,
-                        LogSource::System,
-                        "GeoIP databases ready".into(),
+                    Ok(_) => tracing::info!(
+                        target: "system",
+                        "GeoIP databases ready",
                     ),
-                    Err(e) => log(
-                        app,
-                        &logger,
-                        LogLevel::Error,
-                        LogSource::System,
-                        format!("GeoIP download failed (will retry): {e}"),
+                    Err(e) => tracing::error!(
+                        target: "system",
+                        "GeoIP download failed (will retry): {e}",
                     ),
                 }
             }
@@ -462,53 +440,41 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             for name in &["cdn-only_singbox.srs", "merged.srs"] {
                 let path = geo_dir.join(name);
                 if !path.exists() {
-                    log(
-                        app,
-                        &logger,
-                        LogLevel::Warning,
-                        LogSource::System,
-                        format!("CDN .srs {name} not found at {:?}", path),
+                    tracing::warn!(
+                        target: "system",
+                        "CDN .srs {name} not found at {:?}",
+                        path,
                     );
                     continue;
                 }
                 match crate::proxy::geoip::parse_srs_file(&path) {
                     Ok(r) => {
-                        log(
-                            app,
-                            &logger,
-                            LogLevel::Info,
-                            LogSource::System,
-                            format!("CDN .srs {name}: {} CIDR entries (lazy)", r.len()),
+                        tracing::info!(
+                            target: "system",
+                            "CDN .srs {name}: {} CIDR entries (lazy)",
+                            r.len(),
                         );
                         merged.extend(r);
                     }
                     Err(e) => {
-                        log(
-                            app,
-                            &logger,
-                            LogLevel::Error,
-                            LogSource::System,
-                            format!("CDN .srs {name} parse failed: {e}"),
+                        tracing::error!(
+                            target: "system",
+                            "CDN .srs {name} parse failed: {e}",
                         );
                     }
                 }
             }
             if !merged.is_empty() {
-                log(
-                    app,
-                    &logger,
-                    LogLevel::Info,
-                    LogSource::System,
-                    format!("CDN ranges merged: {} total entries (lazy)", merged.len()),
+                tracing::info!(
+                    target: "system",
+                    "CDN ranges merged: {} total entries (lazy)",
+                    merged.len(),
                 );
                 crate::proxy::geoip::set_cdn_ranges(merged);
             } else {
-                log(
-                    app,
-                    &logger,
-                    LogLevel::Warning,
-                    LogSource::System,
-                    "CDN ranges empty — no .srs files loaded".into(),
+                tracing::warn!(
+                    target: "system",
+                    "CDN ranges empty — no .srs files loaded",
                 );
             }
         }
@@ -533,20 +499,15 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
         }
     }
     let duplicates = initial_count - unique.len();
-    log(
-        app,
-        &logger,
-        LogLevel::Info,
-        LogSource::Subscription,
-        format!("Parsed {initial_count} servers from subscription, {duplicates} duplicates removed, {} unique", unique.len()),
+    tracing::info!(
+        target: "subscription",
+        "Parsed {initial_count} servers from subscription, {duplicates} duplicates removed, {} unique",
+        unique.len(),
     );
     if duplicates > 0 {
-        log(
-            app,
-            &logger,
-            LogLevel::Info,
-            LogSource::Subscription,
-            format!("Removed {duplicates} duplicate(s)"),
+        tracing::info!(
+            target: "subscription",
+            "Removed {duplicates} duplicate(s)",
         );
     }
 
@@ -562,23 +523,17 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             s.exit_flag = None;
             s.exit_country_name = None;
             s.exit_city_name = None;
-            log(
-                app,
-                &logger,
-                LogLevel::Info,
-                LogSource::Subscription,
-                format!("[CDN] keyword match: {} ({})", s.display_name(), s.server),
+            tracing::info!(
+                target: "subscription",
+                "[CDN] keyword match: {} ({})",
+                s.display_name(),
+                s.server,
             );
             if had_exit {
-                log(
-                    app,
-                    &logger,
-                    LogLevel::Warning,
-                    LogSource::Subscription,
-                    format!(
-                        "[BUG] CDN server {} had stale exit IP data (cleared) — previous batch test stored exit data for a CDN server",
-                        s.id,
-                    ),
+                tracing::warn!(
+                    target: "subscription",
+                    "[BUG] CDN server {} had stale exit IP data (cleared) — previous batch test stored exit data for a CDN server",
+                    s.id,
                 );
             }
         }
@@ -619,24 +574,18 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
         });
         let filtered = total_before - unique.len();
         if filtered > 0 {
-            log(
-                app,
-                &logger,
-                LogLevel::Info,
-                LogSource::Subscription,
-                format!("Filtered {filtered} server(s) by country/protocol settings"),
+            tracing::info!(
+                target: "subscription",
+                "Filtered {filtered} server(s) by country/protocol settings",
             );
         }
     }
 
     // 3. TCP ping — up to 50 concurrent connections, 3-second timeout each
     let mut unique_count = unique.len();
-    log(
-        app,
-        &logger,
-        LogLevel::Info,
-        LogSource::Subscription,
-        format!("Testing {unique_count} server(s) for availability..."),
+    tracing::info!(
+        target: "subscription",
+        "Testing {unique_count} server(s) for availability...",
     );
 
     // Check negative cache before TCP ping — skip servers known to be dead
@@ -655,12 +604,9 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             // Recalculate the total count so progress and unreachable stats
             // don't miscount skipped servers as failed.
             unique_count = unique.len();
-            log(
-                app,
-                &logger,
-                LogLevel::Info,
-                LogSource::Subscription,
-                format!("Skipped {skipped} server(s) in negative cache (backoff active)"),
+            tracing::info!(
+                target: "subscription",
+                "Skipped {skipped} server(s) in negative cache (backoff active)",
             );
         }
     }
@@ -672,12 +618,9 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
         let permit = match semaphore.clone().acquire_owned().await {
             Ok(p) => p,
             Err(_) => {
-                log(
-                    app,
-                    &logger,
-                    LogLevel::Error,
-                    LogSource::Subscription,
-                    "Semaphore closed — skipping remaining servers".into(),
+                tracing::error!(
+                    target: "subscription",
+                    "Semaphore closed — skipping remaining servers",
                 );
                 break; // semaphore was closed, stop spawning
             }
@@ -728,12 +671,10 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                         server.city_name = Some(info.city.clone());
                     }
                 } else if server.flag.is_none() {
-                    log(
-                        app,
-                        &logger,
-                        LogLevel::Warning,
-                        LogSource::Subscription,
-                        format!("GeoIP: country not resolved for {} — IP not in GeoIP database", server.server),
+                    tracing::warn!(
+                        target: "subscription",
+                        "GeoIP: country not resolved for {} — IP not in GeoIP database",
+                        server.server,
                     );
                 }
                 // If GeoIP fails, keep flag from emoji extraction or leave unset
@@ -754,29 +695,25 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                             server.exit_flag = None;
                             server.exit_country_name = None;
                             server.exit_city_name = None;
-                            log(
-                                app,
-                                &logger,
-                                LogLevel::Info,
-                                LogSource::Subscription,
-                                format!("[CDN] entry IP {} is behind CDN ({} CIDRs)", rip, cdn_ranges_count),
+                            tracing::info!(
+                                target: "subscription",
+                                "[CDN] entry IP {} is behind CDN ({} CIDRs)",
+                                rip,
+                                cdn_ranges_count,
                             );
                         } else if tcp_tested <= 5 {
-                            log(
-                                app,
-                                &logger,
-                                LogLevel::Info,
-                                LogSource::Subscription,
-                                format!("[CDN debug] IP {} not in CDN ranges ({} CIDRs)", rip, cdn_ranges_count),
+                            tracing::info!(
+                                target: "subscription",
+                                "[CDN debug] IP {} not in CDN ranges ({} CIDRs)",
+                                rip,
+                                cdn_ranges_count,
                             );
                         }
                     } else {
-                        log(
-                            app,
-                            &logger,
-                            LogLevel::Warning,
-                            LogSource::Subscription,
-                            format!("[CDN debug] no IP to check for server {}", server.server),
+                        tracing::warn!(
+                            target: "subscription",
+                            "[CDN debug] no IP to check for server {}",
+                            server.server,
                         );
                     }
                 }
@@ -785,12 +722,11 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 // so profiles store IPs, not hostnames. SNI stays intact.
                 if let Some(ref rip) = entry_ip {
                     if rip != &server.server {
-                        log(
-                            app,
-                            &logger,
-                            LogLevel::Info,
-                            LogSource::Subscription,
-                            format!("[DNS] {} → {}", server.server, rip),
+                        tracing::info!(
+                            target: "subscription",
+                            "[DNS] {} → {}",
+                            server.server,
+                            rip,
                         );
                         server.server = rip.clone();
                     }
@@ -809,12 +745,9 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 }
             }
             Err(_) => {
-                log(
-                    app,
-                    &logger,
-                    LogLevel::Error,
-                    LogSource::Subscription,
-                    "TCP ping task panicked".into(),
+                tracing::error!(
+                    target: "subscription",
+                    "TCP ping task panicked",
                 );
             }
         }
@@ -844,24 +777,18 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
         alive.retain(|s| seen_ips.insert(s.server.clone()));
         let ip_dupes = alive_before_ip_dedup - alive.len();
         if ip_dupes > 0 {
-            log(
-                app,
-                &logger,
-                LogLevel::Info,
-                LogSource::Subscription,
-                format!("Removed {ip_dupes} IP duplicate(s) — multiple domains resolve to the same IP"),
+            tracing::info!(
+                target: "subscription",
+                "Removed {ip_dupes} IP duplicate(s) — multiple domains resolve to the same IP",
             );
         }
     }
 
     let unreachable = unique_count - alive.len();
     if unreachable > 0 {
-        log(
-            app,
-            &logger,
-            LogLevel::Warning,
-            LogSource::Subscription,
-            format!("Removed {unreachable} unreachable server(s)"),
+        tracing::warn!(
+            target: "subscription",
+            "Removed {unreachable} unreachable server(s)",
         );
     }
 
@@ -891,12 +818,11 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             }
         }
 
-        log(
-            app,
-            &logger,
-            LogLevel::Info,
-            LogSource::Cache,
-            format!("{}/{} server(s) had fresh cache — skipping batch test", ready_servers.len(), ready_servers.len() + needs_batch_test.len()),
+        tracing::info!(
+            target: "cache",
+            "{}/{} server(s) had fresh cache — skipping batch test",
+            ready_servers.len(),
+            ready_servers.len() + needs_batch_test.len(),
         );
     } else {
         // No cache available — batch test everything
@@ -908,12 +834,10 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
 
     if !needs_batch_test.is_empty() && !main_proxy_running {
         if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
-            log(
-                app,
-                &logger,
-                LogLevel::Info,
-                LogSource::Cache,
-                format!("Starting batch test for {} NEW/UNKNOWN server(s)...", needs_batch_test.len()),
+            tracing::info!(
+                target: "cache",
+                "Starting batch test for {} NEW/UNKNOWN server(s)...",
+                needs_batch_test.len(),
             );
 
             let cancel_token = app.try_state::<Mutex<CancellationToken>>()
@@ -923,12 +847,10 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             ready_servers.append(&mut updated);
         }
     } else if main_proxy_running && !needs_batch_test.is_empty() {
-        log(
-            app,
-            &logger,
-            LogLevel::Info,
-            LogSource::Cache,
-            format!("Batch test skipped for {} new servers — main proxy is running", needs_batch_test.len()),
+        tracing::info!(
+            target: "cache",
+            "Batch test skipped for {} new servers — main proxy is running",
+            needs_batch_test.len(),
         );
         ready_servers.append(&mut needs_batch_test);
     }
@@ -941,12 +863,9 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             ready_servers.retain(|s| !s.behind_cdn);
             let cdn_filtered = before_cdn - ready_servers.len();
             if cdn_filtered > 0 {
-                log(
-                    app,
-                    &logger,
-                    LogLevel::Info,
-                    LogSource::Subscription,
-                    format!("Removed {cdn_filtered} CDN/Worker/WARP server(s) (blockCdnNodes enabled)"),
+                tracing::info!(
+                    target: "subscription",
+                    "Removed {cdn_filtered} CDN/Worker/WARP server(s) (blockCdnNodes enabled)",
                 );
             }
         }
@@ -959,25 +878,18 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             .cmp(&b.ping_ms.unwrap_or(u64::MAX))
     });
 
-    log(
-        app,
-        &logger,
-        LogLevel::Success,
-        LogSource::Subscription,
-        format!("{} server(s) passed and saved", ready_servers.len()),
+    tracing::info!(
+        target: "subscription",
+        "{} server(s) passed and saved",
+        ready_servers.len(),
     );
 
     if let Some(fastest) = ready_servers.first() {
-        log(
-            app,
-            &logger,
-            LogLevel::Info,
-            LogSource::Subscription,
-            format!(
-                "Fastest server: {} ({} ms)",
-                fastest.display_name(),
-                fastest.ping_ms.unwrap_or(0)
-            ),
+        tracing::info!(
+            target: "subscription",
+            "Fastest server: {} ({} ms)",
+            fastest.display_name(),
+            fastest.ping_ms.unwrap_or(0),
         );
     }
 

@@ -155,7 +155,6 @@ beforeEach(() => {
     realIp: null,
     speedTestResult: null,
     connections: [],
-    _healthCheckTimer: null,
     _isReconnecting: false,
     settings: {
       acceptTerms: false,
@@ -821,39 +820,27 @@ describe('store — initListener health check', () => {
     cleanup();
   });
 
-  it('connection-status-changed connected starts health check interval', async () => {
+  it('connection-status-changed connected sets status and timestamp', async () => {
     const cleanup = await useAppStore.getState().initListener();
-    expect(useAppStore.getState()._healthCheckTimer).toBeNull();
-
-    // Simulate connected event
-    mockInvoke.mockResolvedValue(true); // check_proxy_health returns alive
     triggerEvent('connection-status-changed', { status: 'connected' });
-
     expect(useAppStore.getState().status).toBe('connected');
     expect(useAppStore.getState().connectedAt).not.toBeNull();
-    expect(useAppStore.getState()._healthCheckTimer).not.toBeNull();
     cleanup();
   });
 
-  it('connection-status-changed disconnected stops health check', async () => {
+  it('connection-status-changed disconnected clears timestamp', async () => {
     const cleanup = await useAppStore.getState().initListener();
     triggerEvent('connection-status-changed', { status: 'connected' });
-    expect(useAppStore.getState()._healthCheckTimer).not.toBeNull();
-
     triggerEvent('connection-status-changed', { status: 'disconnected' });
-    expect(useAppStore.getState()._healthCheckTimer).toBeNull();
+    expect(useAppStore.getState().status).toBe('disconnected');
     expect(useAppStore.getState().connectedAt).toBeNull();
     cleanup();
   });
 
-  it('connection-status-changed error stops health check', async () => {
+  it('connection-status-changed error sets error status', async () => {
     const cleanup = await useAppStore.getState().initListener();
-    triggerEvent('connection-status-changed', { status: 'connected' });
-    expect(useAppStore.getState()._healthCheckTimer).not.toBeNull();
-
     triggerEvent('connection-status-changed', { status: { error: 'lost' } });
     expect(useAppStore.getState().status).toBe('error');
-    expect(useAppStore.getState()._healthCheckTimer).toBeNull();
     cleanup();
   });
 
@@ -882,58 +869,31 @@ describe('store — initListener health check', () => {
     cleanup();
   });
 
-  it('cleanup function stops health check and unlistens', async () => {
+  it('cleanup function unlistens all events', async () => {
     mockInvoke.mockResolvedValueOnce('disconnected'); // get_status
     mockInvoke.mockResolvedValueOnce([]); // get_logs
     const cleanup = await useAppStore.getState().initListener();
-    triggerEvent('connection-status-changed', { status: 'connected' });
-    const timer = useAppStore.getState()._healthCheckTimer;
-    expect(timer).not.toBeNull();
 
+    // After cleanup, events should not be processed
     cleanup();
-    expect(useAppStore.getState()._healthCheckTimer).toBeNull();
+    triggerEvent('connection-status-changed', { status: 'connected' });
+    expect(useAppStore.getState().status).toBe('disconnected');
   });
 
-  it('health check race guard: user disconnect during invoke does not reconnect', async () => {
-    // Simulate a slow check_proxy_health that takes time.
-    // If the user disconnects during that window, the race guard at
-    // line 819 must prevent reconnection.
-    let resolveDeferred: (value: boolean) => void;
-    const deferred = new Promise<boolean>((resolve) => {
-      resolveDeferred = resolve;
-    });
-
-    // Replace mockInvoke's check_proxy_health with a deferred promise
-    const origImpl = mockInvoke.getMockImplementation();
-    mockInvoke.mockImplementation(async (cmd: string) => {
-      if (cmd === 'check_proxy_health') {
-        return deferred;
-      }
-      return undefined;
-    });
-
+  it('failover-occurred event switches active server', async () => {
+    mockInvoke.mockResolvedValueOnce('disconnected');
+    mockInvoke.mockResolvedValueOnce([]);
     const cleanup = await useAppStore.getState().initListener();
-    triggerEvent('connection-status-changed', { status: 'connected' });
-    expect(useAppStore.getState().status).toBe('connected');
+    useAppStore.setState({
+      servers: [
+        { id: 'srv-1', name: 'Primary', server: '10.0.0.1', port: 443 },
+        { id: 'srv-2', name: 'Backup', server: '10.0.0.2', port: 443 },
+      ],
+      activeServer: { id: 'srv-1', name: 'Primary', server: '10.0.0.1', port: 443 },
+    });
 
-    // Advance timer past health check interval — starts the invoke
-    await vi.advanceTimersByTimeAsync(30000);
-
-    // While invoke is pending, user disconnects
-    triggerEvent('connection-status-changed', { status: 'disconnected' });
-    expect(useAppStore.getState().status).toBe('disconnected');
-
-    // Now resolve the deferred — invoke returns but status is already disconnected
-    resolveDeferred!(false); // server appears dead
-    await vi.advanceTimersByTimeAsync(0); // flush microtasks
-
-    // Guard at line 819 should catch this: status !== 'connected' → return
-    // No reconnect attempt should happen — status stays disconnected
-    expect(useAppStore.getState().status).toBe('disconnected');
-    expect(useAppStore.getState().activeServer?.id).toBe('srv-1');
-
-    // Restore mock
-    mockInvoke.mockImplementation(origImpl as typeof mockInvoke);
+    triggerEvent('failover-occurred', 'srv-2');
+    expect(useAppStore.getState().activeServer?.id).toBe('srv-2');
     cleanup();
   });
 });

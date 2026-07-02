@@ -302,9 +302,25 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                   setActiveServer(server);
                                   setIsServerDropdownOpen(false);
                                   addLog(`Server changed to ${server.name}`, 'info', 'system');
-                                  toast.success(
-                                    `${t('serverStr')}${server.name}${t('selectedStr')}`,
-                                  );
+
+                                  // Auto-reconnect if already connected
+                                  if (status === 'connected') {
+                                    toast.info(`Reconnecting to ${server.name}...`);
+                                    void (async () => {
+                                      try {
+                                        await toggleConnection();
+                                        setTimeout(() => {
+                                          void toggleConnection();
+                                        }, 500);
+                                      } catch (e) {
+                                        console.error('Auto-reconnect failed', e);
+                                      }
+                                    })();
+                                  } else {
+                                    toast.success(
+                                      `${t('serverStr')}${server.name}${t('selectedStr')}`,
+                                    );
+                                  }
                                 }}
                                 disabled={status === 'connecting'}
                                 className={`flex items-center justify-between p-2.5 rounded-xl transition-all w-full text-left ${
@@ -379,10 +395,27 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     ]}
                     value={settings.routingMode}
                     onChange={(val) => {
+                      if (val === settings.routingMode) return;
+
                       updateSettings({ routingMode: val });
                       addLog(`Routing mode changed to ${val}`, 'info', 'settings');
+
+                      // Auto-reconnect with new mode when connected
+                      if (status === 'connected') {
+                        toast.info(val === 'system-proxy' ? t('systemProxyMode') : t('proxyMode'));
+                        void (async () => {
+                          try {
+                            await toggleConnection();
+                            setTimeout(() => {
+                              void toggleConnection();
+                            }, 500);
+                          } catch (e) {
+                            console.error('Mode switch reconnect failed', e);
+                          }
+                        })();
+                      }
                     }}
-                    disabled={isConnected || isConnecting}
+                    disabled={isConnecting}
                     layoutId="modeIndicatorDashboard"
                   />
 

@@ -1,8 +1,6 @@
-use crate::logging::{log, LogLevel, LogSource, Logger};
 use crate::proxy::ConnectionStatus;
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex as StdMutex;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionStatusPayload {
@@ -12,9 +10,7 @@ pub struct ConnectionStatusPayload {
 pub fn emit_status(app_handle: &AppHandle, status: ConnectionStatus) {
     let payload = ConnectionStatusPayload { status };
     if let Err(e) = app_handle.emit("connection-status-changed", payload) {
-        if let Some(logger) = app_handle.try_state::<StdMutex<Logger>>() {
-            log(app_handle, &logger, LogLevel::Warning, LogSource::System, format!("emit connection-status-changed failed: {e}"));
-        }
+        tracing::warn!(target: "system", "emit connection-status-changed failed: {e}");
     }
 }
 
@@ -26,9 +22,7 @@ pub struct TrafficPayload {
 
 pub fn emit_traffic(app_handle: &AppHandle, up: f64, down: f64) {
     if let Err(e) = app_handle.emit("traffic-update", TrafficPayload { up, down }) {
-        if let Some(logger) = app_handle.try_state::<StdMutex<Logger>>() {
-            log(app_handle, &logger, LogLevel::Warning, LogSource::System, format!("emit traffic-update failed: {e}"));
-        }
+        tracing::warn!(target: "system", "emit traffic-update failed: {e}");
     }
 }
 
@@ -57,9 +51,7 @@ pub struct RefreshProgress {
 /// Emit a batch testing progress event to the frontend.
 pub fn emit_refresh_progress(app_handle: &AppHandle, progress: RefreshProgress) {
     if let Err(e) = app_handle.emit("refresh-progress", progress) {
-        if let Some(logger) = app_handle.try_state::<StdMutex<Logger>>() {
-            log(app_handle, &logger, LogLevel::Warning, LogSource::System, format!("emit refresh-progress failed: {e}"));
-        }
+        tracing::warn!(target: "system", "emit refresh-progress failed: {e}");
     }
 }
 

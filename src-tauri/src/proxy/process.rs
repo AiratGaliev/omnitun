@@ -25,7 +25,6 @@ use std::os::windows::process::CommandExt;
 #[cfg(not(windows))]
 use std::os::unix::process::CommandExt;
 
-use tauri::Manager;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -43,20 +42,13 @@ pub fn set_pid_file_path(data_dir: &Path) {
 }
 
 /// Write the current PID to the PID file.
-pub fn write_pid_file(pid: u32, app: &tauri::AppHandle) {
+pub fn write_pid_file(pid: u32, _app: &tauri::AppHandle) {
     let path = match PID_FILE.lock().ok().and_then(|g| g.clone()) {
         Some(p) => p,
         None => return,
     };
     if let Err(e) = std::fs::write(&path, pid.to_string()) {
-        if let Some(logger) = app.try_state::<std::sync::Mutex<crate::logging::Logger>>() {
-            crate::logging::log(
-                app, &logger,
-                crate::logging::LogLevel::Warning,
-                crate::logging::LogSource::Process,
-                format!("[pidfile] failed to write sing-box PID {pid}: {e}"),
-            );
-        }
+        tracing::warn!(target: "process", "[pidfile] failed to write sing-box PID {pid}: {e}");
     }
 }
 
@@ -70,7 +62,7 @@ pub fn remove_pid_file() {
 }
 
 /// Kill a previously orphaned sing-box by PID, then clear the file.
-pub fn cleanup_stale_pid(app: &tauri::AppHandle) {
+pub fn cleanup_stale_pid(_app: &tauri::AppHandle) {
     let path = match PID_FILE.lock().ok().and_then(|g| g.clone()) {
         Some(p) => p,
         None => return,
@@ -87,14 +79,7 @@ pub fn cleanup_stale_pid(app: &tauri::AppHandle) {
         }
     };
     if crate::is_process_alive(pid) {
-        if let Some(logger) = app.try_state::<std::sync::Mutex<crate::logging::Logger>>() {
-            crate::logging::log(
-                app, &logger,
-                crate::logging::LogLevel::Info,
-                crate::logging::LogSource::Process,
-                format!("[pidfile] killing stale sing-box (PID {pid}) from previous session"),
-            );
-        }
+        tracing::info!(target: "process", "[pidfile] killing stale sing-box (PID {pid}) from previous session");
         #[cfg(windows)]
         {
             let _ = std::process::Command::new("taskkill")
@@ -120,7 +105,7 @@ pub fn cleanup_stale_pid(app: &tauri::AppHandle) {
 #[cfg(windows)]
 pub(crate) mod orphan_guard {
     use std::os::windows::io::RawHandle;
-    use tauri::Manager;
+    
 
     type HANDLE = *mut std::ffi::c_void;
 
@@ -180,17 +165,10 @@ pub(crate) mod orphan_guard {
 
     /// Create a job object with KILL_ON_JOB_CLOSE.
     /// Returns None on failure (fallback to taskkill/kill).
-    pub(crate) fn create(app: &tauri::AppHandle) -> Option<JobObject> {
+    pub(crate) fn create(_app: &tauri::AppHandle) -> Option<JobObject> {
         unsafe {
             let log_it = |msg: &str| {
-                if let Some(logger) = app.try_state::<std::sync::Mutex<crate::logging::Logger>>() {
-                    crate::logging::log(
-                        app, &logger,
-                        crate::logging::LogLevel::Warning,
-                        crate::logging::LogSource::Process,
-                        msg.into(),
-                    );
-                }
+                tracing::warn!(target: "process", "{msg}");
             };
 
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());

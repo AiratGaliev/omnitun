@@ -7,7 +7,7 @@
 //! Uses `std::sync::Mutex` (NOT `tokio::sync::Mutex`) so that `Drop`
 //! never panics from calling `tokio::spawn` on a stopped runtime.
 //!
-//! Port range: 20000–25000 (5001 ports — enough for 3 batches × ~50 inbounds,
+//! Port range: 30000–35000 (5001 ports — enough for 3 batches × ~50 inbounds,
 //! system-proxy mixed inbound, and Clash API stats port with margin).
 //!
 //! `PortPool` uses `Arc<Mutex<Vec<u16>>>` internally, making it cheap to
@@ -16,9 +16,9 @@
 
 use std::sync::{Arc, Mutex};
 
-/// Default port range for batch testing.
-const PORT_MIN: u16 = 20_000;
-const PORT_MAX: u16 = 25_000;
+/// Default port range for batch testing (above typical ephemeral range).
+const PORT_MIN: u16 = 30_000;
+const PORT_MAX: u16 = 35_000;
 
 /// RAII port pool. Thread-safe via `Arc<Mutex<Vec<u16>>>`.
 ///
@@ -150,7 +150,7 @@ mod tests {
         let guard = pool.acquire();
         assert!(guard.is_some());
         assert_eq!(pool.available_count(), before - 1);
-        assert_eq!(guard.unwrap().port, 25000); // LIFO — last port in range
+        assert_eq!(guard.unwrap().port, 35000); // LIFO — last port in range
     }
 
     #[test]
@@ -282,7 +282,7 @@ mod tests {
         let pool = PortPool::new();
         let debug = format!("{:?}", pool);
         assert!(debug.contains("5001 available"));
-        assert!(debug.contains("20000"));
+        assert!(debug.contains("30000"));
     }
 
     #[test]

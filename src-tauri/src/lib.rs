@@ -19,7 +19,6 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::OnceLock;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -310,13 +309,9 @@ async fn start_proxy(
                                                                     && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
                                                                 {
                                                                     if crate::proxy::geoip::is_cdn_entry_ip(&ip) {
-                                                                        log(&app, &logger, LogLevel::Warning, LogSource::Proxy,
-                                                                            format!("[BUG] start_proxy (fallback): Server {} was checked for outlet IP ({}), but it belongs to a CDN!", all_servers[idx].id, ip)
-                                                                        );
+                                                                        tracing::warn!(target: "proxy", "[BUG] start_proxy (fallback): Server {} was checked for outlet IP ({}), but it belongs to a CDN!", all_servers[idx].id, ip);
                                                                     } else {
-                                                                        log(&app, &logger, LogLevel::Info, LogSource::Proxy,
-                                                                            format!("Proxy verified (exit IP: {ip}) via {tag}"),
-                                                                        );
+                                                                        tracing::info!(target: "proxy", "Proxy verified (exit IP: {ip}) via {tag}");
                                                                     }
                                                                     switched = true;
                                                                     break;
@@ -333,8 +328,7 @@ async fn start_proxy(
                                     }
                                 }
                                 if !switched {
-                                    log(&app, &logger, LogLevel::Error, LogSource::Proxy,
-                                        "Proxy connection verified but exit IP unavailable — traffic may not be routing through proxy".into());
+                                    tracing::error!(target: "proxy", "Proxy connection verified but exit IP unavailable — traffic may not be routing through proxy");
                                 }
                             }
                         }
@@ -379,14 +373,7 @@ async fn start_proxy(
                                         }
                                     }
 
-                                    let logger = app_clone.state::<StdMutex<Logger>>();
-                                    log(
-                                        &app_clone,
-                                        &logger,
-                                        LogLevel::Warning,
-                                        LogSource::Process,
-                                        "Connection lost — reconnecting...".into(),
-                                    );
+                                    tracing::warn!(target: "process", "Connection lost — reconnecting...");
 
                                     // Auto-reconnect up to 3 times.
                                     // Note: we do NOT call mgr.stop() here — the process is already dead,
@@ -410,13 +397,7 @@ async fn start_proxy(
                                                 }
                                             }
 
-                                            log(
-                                                &app_clone,
-                                                &logger,
-                                                LogLevel::Info,
-                                                LogSource::Process,
-                                                format!("Reconnect attempt {attempt}..."),
-                                            );
+                                            tracing::info!(target: "process", "Reconnect attempt {attempt}...");
 
                                             let mgr = mgr_arc.lock().await;
                                             let settings = app_clone
@@ -437,13 +418,7 @@ async fn start_proxy(
                                             drop(mgr);
 
                                             if ok {
-                                                log(
-                                                    &app_clone,
-                                                    &logger,
-                                                    LogLevel::Success,
-                                                    LogSource::Process,
-                                                    "Reconnected successfully".into(),
-                                                );
+                                                tracing::info!(target: "process", "Reconnected successfully");
                                                 emit_status(&app_clone, ConnectionStatus::Connected);
                                                 reconnected = true;
                                                 break;
@@ -452,16 +427,62 @@ async fn start_proxy(
                                     }
 
                                     if !reconnected {
-                                        log(
-                                            &app_clone,
-                                            &logger,
-                                            LogLevel::Error,
-                                            LogSource::Process,
-                                            "Auto-reconnect failed after 3 attempts".into(),
-                                        );
+                                        tracing::error!(target: "process", "Auto-reconnect failed after 3 attempts");
                                         emit_status(&app_clone, ConnectionStatus::Disconnected);
                                     }
                                     break;
+                                }
+
+                            }
+                        });
+                    }
+
+                    // ── Failover monitor ────────────────────────────────────────
+                    // Отдельный легковесный опрос Clash API (каждые 5 с).
+                    // При смене outbound передаёт фронту точный server ID.
+                    let fail_port =
+                        crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                    if fail_port > 0 && all_servers.len() > 1 {
+                        let app_fail = app.clone();
+                        let servers_fail = all_servers.clone();
+                        let mgr_fail = manager_arc.clone();
+                        let cancel_fail = cancel.clone();
+                        tokio::spawn(async move {
+                            let client = reqwest::Client::builder()
+                                .no_proxy()
+                                .timeout(Duration::from_secs(2))
+                                .build()
+                                .unwrap_or_default();
+                            let api_url = format!("http://127.0.0.1:{fail_port}/proxies/proxy");
+                            let mut current_tag = String::new();
+                            loop {
+                                if cancel_fail.is_cancelled() { break; }
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                {
+                                    let mgr = mgr_fail.lock().await;
+                                    if mgr.status() == crate::proxy::ConnectionStatus::Disconnected {
+                                        break;
+                                    }
+                                }
+                                if let Ok(resp) = client.get(&api_url).send().await {
+                                    if let Ok(body) = resp.json::<serde_json::Value>().await {
+                                        if let Some(now_tag) = body.get("now").and_then(|v| v.as_str()) {
+                                            if !current_tag.is_empty() && now_tag != current_tag {
+                                                tracing::info!(
+                                                    target: "proxy",
+                                                    "Seamless failover detected: {current_tag} -> {now_tag}",
+                                                );
+                                                if let Some(idx_str) = now_tag.strip_prefix("proxy-") {
+                                                    if let Ok(idx) = idx_str.parse::<usize>() {
+                                                        if let Some(srv) = servers_fail.get(idx) {
+                                                            let _ = app_fail.emit("failover-occurred", srv.id.clone());
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            current_tag = now_tag.to_string();
+                                        }
+                                    }
                                 }
                             }
                         });
@@ -482,9 +503,6 @@ async fn start_proxy(
                                 .build()
                                 .unwrap_or_default();
                             let url = format!("http://127.0.0.1:{stats_port}/traffic");
-                            let mut prev_up: Option<f64> = None;
-                            let mut prev_down: Option<f64> = None;
-                            let mut prev_time: Option<std::time::Instant> = None;
                             loop {
                                 if cancel_stats.is_cancelled() { break; }
                                 // Stop polling if proxy disconnected
@@ -494,8 +512,6 @@ async fn start_proxy(
                                         break;
                                     }
                                 }
-                                // GET /traffic streams newline-delimited JSON (chunked).
-                                // Read chunks as they arrive, don't wait for EOF.
                                 if let Ok(mut resp) = client.get(&url).send().await {
                                     let mut buf = String::new();
                                     loop {
@@ -505,46 +521,20 @@ async fn start_proxy(
                                                 while let Some(newline) = buf.find('\n') {
                                                     let line = buf[..newline].trim().to_string();
                                                     buf = buf[newline + 1..].to_string();
-                                                    if let Some((up, down)) =
-                                                        parse_traffic_line(&line)
-                                                    {
-                                                        let now = std::time::Instant::now();
-                                                        let (speed_up, speed_down) =
-                                                            if let (Some(pu), Some(pd), Some(pt)) =
-                                                                (prev_up, prev_down, prev_time)
-                                                            {
-                                                                let dt = now
-                                                                    .saturating_duration_since(pt)
-                                                                    .as_secs_f64();
-                                                                if dt > 0.001 {
-                                                                    (
-                                                                        ((up - pu) / dt).max(0.0),
-                                                                        ((down - pd) / dt).max(0.0),
-                                                                    )
-                                                                } else {
-                                                                    continue; // too fast, keep prev values
-                                                                }
-                                                            } else {
-                                                                (0.0, 0.0) // first reading, no delta yet
-                                                            };
-                                                        prev_up = Some(up);
-                                                        prev_down = Some(down);
-                                                        prev_time = Some(now);
-                                                        emit_traffic(
-                                                            &app_clone, speed_up, speed_down,
-                                                        );
+                                                    // Parse via serde — handles any JSON formatting
+                                                    if let Ok(traffic) = serde_json::from_str::<ClashTraffic>(&line) {
+                                                        // Clash API returns B/s; convert to MB/s
+                                                        let speed_up = traffic.up / 1024.0 / 1024.0;
+                                                        let speed_down = traffic.down / 1024.0 / 1024.0;
+                                                        emit_traffic(&app_clone, speed_up, speed_down);
                                                     }
                                                 }
                                             }
-                                            Ok(None) => break, // stream ended gracefully
-                                            Err(_) => break,   // transport error, reconnect
+                                            Ok(None) => break,
+                                            Err(_) => break,
                                         }
                                     }
                                 }
-                                // On reconnect, reset state so first reading doesn't spike
-                                prev_up = None;
-                                prev_down = None;
-                                prev_time = None;
                                 tokio::time::sleep(Duration::from_millis(500)).await;
                             }
                         });
@@ -555,7 +545,7 @@ async fn start_proxy(
                 Err(e) => {
                     let _ = manager.stop(&app).await;
                     let msg = format!("Proxy not reachable: {e}");
-                    log(&app, &logger, LogLevel::Error, LogSource::Proxy, msg.clone());
+                    tracing::error!(target: "proxy", "{msg}");
                     emit_status(&app, ConnectionStatus::Error(msg.clone()));
                     Err(msg)
                 }
@@ -579,9 +569,13 @@ async fn start_proxy(
 #[tauri::command]
 #[tracing::instrument(skip(app, state))]
 async fn stop_proxy(app: tauri::AppHandle, state: tauri::State<'_, ProxyState>) -> Result<(), String> {
-    let logger = app.state::<StdMutex<Logger>>();
+    let _logger = app.state::<StdMutex<Logger>>();
     let log_stop = |level: LogLevel, msg: String| {
-        log(&app, &logger, level, LogSource::System, msg);
+        match level {
+            LogLevel::Info | LogLevel::Success => tracing::info!(target: "system", "{msg}"),
+            LogLevel::Warning => tracing::warn!(target: "system", "{msg}"),
+            LogLevel::Error => tracing::error!(target: "system", "{msg}"),
+        };
     };
 
     log_stop(LogLevel::Info, "[stop_proxy] called".into());
@@ -643,42 +637,42 @@ async fn stop_proxy(app: tauri::AppHandle, state: tauri::State<'_, ProxyState>) 
 }
 
 /// Log from the frontend (stores.ts addLog → invoke('log_frontend'))
-/// so that [toggle] and [evt:connection-status] messages appear in the JSONL file
-/// alongside Rust backend logs, making debugging much easier.
-///
-/// NOTE: does NOT emit `log-entry` event — the frontend already called `addLog`
-/// for this message. Emitting would create a duplicate in the frontend store.
 #[tauri::command]
 async fn log_frontend(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     message: String,
     level: String,
     source: String,
 ) -> Result<(), String> {
-    let logger = app.state::<StdMutex<Logger>>();
-    let log_level = match level.as_str() {
-        "error" => LogLevel::Error,
-        "warning" => LogLevel::Warning,
-        "success" => LogLevel::Success,
-        _ => LogLevel::Info,
-    };
-    let log_source = match source.as_str() {
-        "proxy" => LogSource::Proxy,
-        "process" => LogSource::Process,
-        "settings" => LogSource::Settings,
-        "subscription" => LogSource::Subscription,
-        "cache" => LogSource::Cache,
-        // "system" is default
-        _ => LogSource::System,
-    };
-    crate::logging::log_to_file(
-        &app,
-        &logger,
-        log_level,
-        log_source,
-        message,
-    );
+    log_to_tracing(&message, &level, &source);
     Ok(())
+}
+
+/// Map JS-level strings to tracing calls (shared by log_frontend and log_message).
+fn log_to_tracing(message: &str, level: &str, source: &str) {
+    match (level, source) {
+        ("error", "proxy") => tracing::error!(log_source = "proxy", "{message}"),
+        ("error", "process") => tracing::error!(log_source = "process", "{message}"),
+        ("error", "settings") => tracing::error!(log_source = "settings", "{message}"),
+        ("error", "subscription") => tracing::error!(log_source = "subscription", "{message}"),
+        ("error", "cache") => tracing::error!(log_source = "cache", "{message}"),
+        ("error", "installer") => tracing::error!(log_source = "installer", "{message}"),
+        ("error", _) => tracing::error!(log_source = "system", "{message}"),
+        ("warning", "proxy") => tracing::warn!(log_source = "proxy", "{message}"),
+        ("warning", "process") => tracing::warn!(log_source = "process", "{message}"),
+        ("warning", "settings") => tracing::warn!(log_source = "settings", "{message}"),
+        ("warning", "subscription") => tracing::warn!(log_source = "subscription", "{message}"),
+        ("warning", "cache") => tracing::warn!(log_source = "cache", "{message}"),
+        ("warning", "installer") => tracing::warn!(log_source = "installer", "{message}"),
+        ("warning", _) => tracing::warn!(log_source = "system", "{message}"),
+        (_, "proxy") => tracing::info!(log_source = "proxy", "{message}"),
+        (_, "process") => tracing::info!(log_source = "process", "{message}"),
+        (_, "settings") => tracing::info!(log_source = "settings", "{message}"),
+        (_, "subscription") => tracing::info!(log_source = "subscription", "{message}"),
+        (_, "cache") => tracing::info!(log_source = "cache", "{message}"),
+        (_, "installer") => tracing::info!(log_source = "installer", "{message}"),
+        (_, _) => tracing::info!(log_source = "system", "{message}"),
+    }
 }
 
 #[tauri::command]
@@ -1070,7 +1064,6 @@ fn set_start_on_boot(enabled: bool) {
     }
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Cancel the current subscription refresh.
 #[tauri::command]
 async fn cancel_refresh(app: tauri::AppHandle) -> Result<(), String> {
@@ -1099,6 +1092,7 @@ async fn cancel_refresh(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1340,20 +1334,6 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// Parse a single Clash traffic line: {"up":123,"down":456}
-fn parse_traffic_line(line: &str) -> Option<(f64, f64)> {
-    let line = line.trim();
-    let rest = line.strip_prefix("{\"up\":")?;
-    let end = rest.find(',')?;
-    let up = rest[..end].trim().parse::<f64>().ok()?;
-    let tail = &rest[end..];
-    let down_start = tail.find(':')?;
-    let after = &tail[down_start + 1..];
-    let end = after.find('}')?;
-    let down = after[..end].trim().parse::<f64>().ok()?;
-    Some((up, down))
-}
-
 /// Read clipboard text via arboard (bypasses WebView2 clipboard restrictions).
 #[tauri::command]
 fn read_clipboard_text() -> Result<String, String> {
@@ -1419,6 +1399,15 @@ async fn get_real_ip(_app: tauri::AppHandle) -> Result<String, String> {
 static PREV_OUTLET_IP: StdMutex<Option<String>> = StdMutex::new(None);
 
 #[derive(Debug, Clone, Serialize)]
+/// Clash API /traffic line-delimited JSON: instantaneous B/s.
+/// Converted to MB/s before sending to the frontend.
+#[derive(serde::Deserialize)]
+struct ClashTraffic {
+    up: f64,
+    down: f64,
+}
+#[derive(Debug, Clone, Serialize, PartialEq)]
+/// Information about the external IP address.
 pub struct ExitIpInfo {
     pub server: String,
     pub flag: String,
@@ -1431,23 +1420,13 @@ pub struct ExitIpInfo {
 
 #[tauri::command]
 async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
-    let logger = app.state::<StdMutex<Logger>>();
     let stats_port = crate::proxy::CLASH_API_PORT.load(Ordering::Relaxed);
     if stats_port == 0 {
-        log(
-            &app,
-            &logger,
-            LogLevel::Warning,
-            LogSource::System,
-            "outlet_ip: Clash API port is 0 — proxy not connected".into(),
-        );
+        tracing::warn!(target: "system", "outlet_ip: Clash API port is 0 — proxy not connected");
         return Err("Proxy not connected".into());
     }
 
     // ── Early CDN check ────────────────────────────────────────────────
-    // If the active server is behind CDN, exit IP is meaningless (dynamic
-    // outlet IP per request). Log a [BUG] warning so the JSONL file has a
-    // record of this — previously this check was only on the frontend.
     let active_id = crate::proxy::ACTIVE_SERVER_ID
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1461,15 +1440,10 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
                     .any(|s| s.id == *active_id && s.behind_cdn)
             });
             if is_cdn {
-                log(
-                    &app,
-                    &logger,
-                    LogLevel::Warning,
-                    LogSource::System,
-                    format!(
-                        "[BUG] outlet_ip called for CDN server {} — outlet IP is meaningless for CDN",
-                        active_id,
-                    ),
+                tracing::warn!(
+                    target: "system",
+                    "[BUG] outlet_ip called for CDN server {} — outlet IP is meaningless for CDN",
+                    active_id,
                 );
                 return Ok(ExitIpInfo {
                     server: String::new(),
@@ -1535,23 +1509,14 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
     }
 
     if ip.is_empty() {
-        log(
-            &app,
-            &logger,
-            LogLevel::Warning,
-            LogSource::System,
-            "outlet_ip: All IP check services failed — could not determine external IP".into(),
-        );
+        tracing::warn!(target: "system", "outlet_ip: All IP check services failed — could not determine external IP");
         return Err("Could not determine external IP".into());
     }
 
     if crate::proxy::geoip::is_cdn_entry_ip(&ip) {
-        log(
-            &app,
-            &logger,
-            LogLevel::Error,
-            LogSource::System,
-            format!("[BUG] outlet_ip: Fetched outlet IP {} belongs to a CDN, but active server was not marked as CDN!", ip)
+        tracing::error!(
+            target: "system",
+            "[BUG] outlet_ip: Fetched outlet IP {ip} belongs to a CDN, but active server was not marked as CDN!",
         );
     }
 
@@ -1568,18 +1533,6 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
             if let Ok(body) = resp.json::<serde_json::Value>().await {
                 if let Some(current) = body.get("now").and_then(|v| v.as_str()) {
                     proxy_tag = current.to_string();
-                    // Detect failover — if proxy_tag changed, log it
-                    static LAST_PROXY_TAG: OnceLock<StdMutex<String>> = OnceLock::new();
-                    let last = LAST_PROXY_TAG.get_or_init(|| StdMutex::new(String::new()));
-                    if let Ok(mut last_tag) = last.lock() {
-                        if *last_tag != proxy_tag && !last_tag.is_empty() {
-                            tracing::info!(
-                                target: "proxy",
-                                "Failover detected: proxy tag changed from \"{last_tag}\" to \"{proxy_tag}\"",
-                            );
-                        }
-                        *last_tag = proxy_tag.clone();
-                    }
                 }
             }
         }
@@ -1646,7 +1599,7 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
             }
             if saved {
                 if let Err(e) = pm.save() {
-                    log(&app, &logger, LogLevel::Warning, LogSource::Settings, format!("save failed: {e}"));
+                    tracing::warn!(target: "settings", "save failed: {e}");
                 }
             }
         }
@@ -1655,16 +1608,10 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
     {
         let mut prev = PREV_OUTLET_IP.lock().unwrap_or_else(|e| e.into_inner());
         if prev.as_deref() != Some(&ip) {
-            let logger = app.state::<StdMutex<Logger>>();
-            log(
-                &app,
-                &logger,
-                LogLevel::Info,
-                LogSource::System,
-                format!(
-                    "[rust] exitIp: {} → {ip}",
-                    prev.as_deref().unwrap_or("null")
-                ),
+            tracing::info!(
+                target: "system",
+                "[rust] exitIp: {} → {ip}",
+                prev.as_deref().unwrap_or("null"),
             );
             *prev = Some(ip.clone());
         }

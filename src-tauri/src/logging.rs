@@ -133,26 +133,39 @@ pub fn log(
 
 /// Same as `log()` but without the Tauri event emit.
 /// Now identical to `log()` since broadcast/Tauri emit is decoupled.
+#[allow(dead_code)]
 pub(crate) fn log_to_file(
-    app_handle: &tauri::AppHandle,
-    logger: &std::sync::Mutex<Logger>,
-    level: LogLevel,
-    source: LogSource,
-    message: String,
+    _app_handle: &tauri::AppHandle,
+    _logger: &std::sync::Mutex<Logger>,
+    _level: LogLevel,
+    _source: LogSource,
+    _message: String,
 ) {
-    log(app_handle, logger, level, source, message);
 }
 
 /// Tauri command: log a message from the frontend.
 #[tauri::command]
 pub fn log_message(
-    app: tauri::AppHandle,
-    logger: tauri::State<'_, std::sync::Mutex<Logger>>,
+    _app: tauri::AppHandle,
+    _logger: tauri::State<'_, std::sync::Mutex<Logger>>,
     level: LogLevel,
     source: LogSource,
     message: String,
 ) {
-    log(&app, &logger, level, source, message);
+    let target_str = match source {
+        LogSource::Proxy => "proxy",
+        LogSource::Subscription => "subscription",
+        LogSource::Cache => "cache",
+        LogSource::Installer => "installer",
+        LogSource::Process => "process",
+        LogSource::Settings => "settings",
+        LogSource::System => "system",
+    };
+    match level {
+        LogLevel::Error => tracing::error!(log_source = target_str, "{message}"),
+        LogLevel::Warning => tracing::warn!(log_source = target_str, "{message}"),
+        LogLevel::Info | LogLevel::Success => tracing::info!(log_source = target_str, "{message}"),
+    }
 }
 
 /// Tauri command: return all current log entries.

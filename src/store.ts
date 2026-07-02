@@ -149,14 +149,11 @@ interface ProxyStore {
   runSpeedTest: () => Promise<SpeedTestResult | null>;
   connections: ConnectionInfo[];
   refreshConnections: () => Promise<void>;
-  _healthCheckTimer: ReturnType<typeof setInterval> | null;
   _isReconnecting: boolean;
   /** Toggle guard — prevents concurrent connect/disconnect. */
   _isConnecting: boolean;
   /** Set of profile IDs currently being refreshed (dedup guard). */
   _refreshingIds: string[];
-  /** Servers active in the current proxy session (ordered: primary then alternatives). */
-  _sessionServers: Server[];
 }
 
 const defaultServers: Server[] = [];
@@ -294,11 +291,9 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   realIp: null,
   speedTestResult: null,
   connections: [],
-  _healthCheckTimer: null,
   _isReconnecting: false,
   _isConnecting: false,
   _refreshingIds: [],
-  _sessionServers: [],
   settings: {
     acceptTerms: false,
     routingMode: 'system-proxy',
@@ -428,7 +423,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         const newActiveServer = autoSelect
           ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
           : activeServerStillExists
-            ? state.activeServer
+            ? allServers.find((s) => s.id === state.activeServer?.id) ?? null
             : (allServers[0] ?? null);
         return {
           profiles: newProfiles,
@@ -635,19 +630,12 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
                 .map((s) => toRustServerProfile(s, 'Default'))
             : [];
 
-        const sessionServers = activeServer
-          ? [activeServer, ...servers.filter((s) => s.id !== activeServer.id).slice(0, 15)]
-          : [];
-        set({ _sessionServers: sessionServers });
-
         const actualPort = await invoke<number>('start_proxy', {
           profile,
           alternativeServers: altServers,
           routingMode: settings.routingMode,
           proxyPort: settings.proxyPort,
         });
-
-        set({ _isConnecting: false });
 
         // Save the actual port (may differ if port fallback was triggered)
         if (actualPort !== settings.proxyPort) {
@@ -671,75 +659,6 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   },
 
   initListener: async () => {
-    // ── UI Sync Check — monitors Sing-Box failover and process health ──────
-    // Now that Sing-Box handles failover internally (urltest/fallback),
-    // this check no longer calls stop_proxy + start_proxy to switch servers.
-    // Instead it:
-    //   1. Checks if the sing-box process is still alive
-    //   2. Queries outlet_ip for the current proxy_tag to detect seamless
-    //      failover (proxy-1, proxy-2) and updates the UI accordingly
-    const startHealthCheck = () => {
-      if (get()._healthCheckTimer) return; // already running
-
-      const timer = setInterval(() => {
-        void (async () => {
-          const state = useAppStore.getState();
-          if (state.status !== 'connected' || state._isReconnecting) {
-            return;
-          }
-
-          try {
-            // 1. Check if the process is still alive.
-            //    Rust logs the failure reason via check_proxy_health.
-            //    That message propagates to UI via the log-entry event.
-            const alive = await invoke<boolean>('check_proxy_health');
-            if (!alive) {
-              set({ status: 'disconnected', connectedAt: null });
-              await invoke('stop_proxy').catch(() => {});
-              return;
-            }
-
-            // 2. Query current exit IP + proxy tag from Clash API.
-            //    Sing-Box's urltest/fallback group reports the active
-            //    outbound tag (proxy-0, proxy-1, etc.) in its response.
-            const exitInfo = await invoke<ExitIpInfo>('outlet_ip').catch(() => null);
-
-            if (exitInfo && exitInfo.proxy_tag) {
-              const tagMatch = exitInfo.proxy_tag.match(/proxy-(\d+)/);
-              if (tagMatch && tagMatch[1]) {
-                const tagIndex = parseInt(tagMatch[1], 10);
-
-                // If tagIndex > 0, Sing-Box autonomously failed over.
-                if (tagIndex > 0) {
-                  const sessionServers = get()._sessionServers;
-                  const actualActiveServer = sessionServers[tagIndex];
-
-                  if (actualActiveServer && state.activeServer?.id !== actualActiveServer.id) {
-                    // Backend logs failover via tracing in outlet_ip
-                    set({ activeServer: actualActiveServer, exitIp: exitInfo });
-                  }
-                }
-              }
-            }
-          } catch (e) {
-            // Log at info level — transient errors (e.g. Clash API flip)
-            // are expected and shouldn't trigger reconnection logic.
-            console.warn('UI Sync check failed', e);
-          }
-        })();
-      }, 15000); // Every 15 seconds
-
-      set({ _healthCheckTimer: timer });
-    };
-
-    const stopHealthCheck = () => {
-      const timer = get()._healthCheckTimer;
-      if (timer) {
-        clearInterval(timer);
-        set({ _healthCheckTimer: null });
-      }
-    };
-
     // ── Initial load ─────────────────────────────────────────────────────
     try {
       const rawStatus = await invoke('get_status');
@@ -767,18 +686,12 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       const errorMsg = extractError(payload);
       if (errorMsg) {
         set({ status: 'error', connectedAt: null });
-        stopHealthCheck();
       } else {
         const newStatus = mapConnectionStatus(payload);
         set({
           status: newStatus,
           connectedAt: newStatus === 'connected' ? Date.now() : null,
         });
-        if (newStatus === 'connected') {
-          startHealthCheck();
-        } else {
-          stopHealthCheck();
-        }
       }
     });
 
@@ -807,13 +720,28 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       }));
     });
 
+    // Listen for seamless failover — Rust watchdog emits this when sing-box
+    // switches to an alternative outbound. Passes exact server ID (no index guessing).
+    const unlistenFailover = await listen<string>('failover-occurred', (event) => {
+      const newServerId = event.payload;
+      const { servers, activeServer, addLog, fetchExitIp } = get();
+      if (activeServer?.id !== newServerId) {
+        const newServer = servers.find((s) => s.id === newServerId);
+        if (newServer) {
+          addLog(`Seamless failover: Switched to ${newServer.name}`, 'success', 'system');
+          set({ activeServer: newServer });
+          void fetchExitIp();
+        }
+      }
+    });
+
     return () => {
-      stopHealthCheck();
       unlisten();
       unlistenLogs();
       unlistenTraffic();
       unlistenExitIp();
       unlistenRefresh();
+      unlistenFailover();
     };
   },
 }));
