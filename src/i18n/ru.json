@@ -179,5 +179,13 @@
   "startingSingbox": "Запуск sing-box",
   "acquiringPorts": "Получение портов",
   "cached": "Кэш",
-  "successful": "Успешно"
+  "successful": "Успешно",
+  "ipinfoGetToken": "Получить бесплатный API токен на ipinfo.io",
+  "ipinfoHowToGet": "Как получить API токен",
+  "ipinfoStep1": "Перейдите на",
+  "ipinfoStep1End": "и создайте бесплатный аккаунт",
+  "ipinfoStep2": "Войдите и откройте панель API",
+  "ipinfoStep3": "Скопируйте ваш персональный API токен",
+  "ipinfoStep4": "Вставьте его выше — приложение автоматически загрузит GeoIP базу",
+  "ipinfoWhy": "Токен используется только для скачивания и периодического обновления базы ipinfo_lite.mmdb. Ваш токен хранится локально и никуда не передаётся."
 }

@@ -2,8 +2,8 @@
 //   - DNS config uses NEW format: type-based servers instead of legacy address+detour
 //   - Custom DNS preserves new format
 
+use crate::proxy::{ProxyError, ServerProfile};
 use crate::settings::AppSettings;
-use crate::proxy::{ServerProfile, ProxyError};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -206,9 +206,9 @@ pub fn generate_config(
         // Base templates have inconsistent defaults (proxy mode has it, local mode doesn't),
         // so we manage it explicitly here.
         let private_rule = json!({"ip_is_private": true, "outbound": "direct"});
-        let private_idx = rules.iter().position(|r| {
-            r.get("ip_is_private") == Some(&serde_json::Value::Bool(true))
-        });
+        let private_idx = rules
+            .iter()
+            .position(|r| r.get("ip_is_private") == Some(&serde_json::Value::Bool(true)));
         match (settings.allow_lan, private_idx) {
             (true, None) => rules.insert(0, private_rule),
             (false, Some(idx)) => {
@@ -338,6 +338,42 @@ pub fn generate_config(
         serde_json::to_string_pretty(&config).map_err(|e| ProxyError::Config(e.to_string()))?;
 
     Ok((json_string, stats_port))
+}
+
+/// Generates a "block-only" config for Kill Switch mode.
+/// Keeps the local port open but rejects all outbound connections,
+/// preventing OS/apps from bypassing the proxy when it's down.
+pub fn generate_kill_switch_config(
+    proxy_port: u16,
+    routing_mode: &str,
+) -> Result<String, ProxyError> {
+    let config = serde_json::json!({
+        "log": {
+            "level": "warn",
+            "timestamp": true
+        },
+        "inbounds": [
+            {
+                "type": "mixed",
+                "tag": "mixed-in",
+                "listen": "127.0.0.1",
+                "listen_port": proxy_port,
+                "set_system_proxy": routing_mode == "system-proxy"
+            }
+        ],
+        "outbounds": [
+            {
+                "type": "block",
+                "tag": "block"
+            }
+        ],
+        "route": {
+            "final": "block",
+            "auto_detect_interface": true
+        }
+    });
+
+    serde_json::to_string_pretty(&config).map_err(|e| ProxyError::Config(e.to_string()))
 }
 
 pub fn write_config(json: &str, config_dir: &Path) -> Result<std::path::PathBuf, ProxyError> {
@@ -845,8 +881,7 @@ mod tests {
 
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
         assert_eq!(
-            config["inbounds"][0]["set_system_proxy"],
-            true,
+            config["inbounds"][0]["set_system_proxy"], true,
             "system-proxy mode should enable set_system_proxy"
         );
     }
@@ -903,8 +938,13 @@ mod tests {
         assert!(result.is_ok());
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
         let rules = config["route"]["rules"].as_array().unwrap();
-        let has_private = rules.iter().any(|r| r.get("ip_is_private") == Some(&Value::Bool(true)));
-        assert!(!has_private, "allow_lan=false should remove ip_is_private rule");
+        let has_private = rules
+            .iter()
+            .any(|r| r.get("ip_is_private") == Some(&Value::Bool(true)));
+        assert!(
+            !has_private,
+            "allow_lan=false should remove ip_is_private rule"
+        );
     }
 
     #[test]
@@ -922,7 +962,9 @@ mod tests {
         assert!(result.is_ok());
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
         let rules = config["route"]["rules"].as_array().unwrap();
-        let has_private = rules.iter().any(|r| r.get("ip_is_private") == Some(&Value::Bool(true)));
+        let has_private = rules
+            .iter()
+            .any(|r| r.get("ip_is_private") == Some(&Value::Bool(true)));
         assert!(has_private, "allow_lan=true should keep ip_is_private rule");
     }
 
@@ -944,7 +986,11 @@ mod tests {
         let has_ru = rules.iter().any(|r| {
             r.get("ip_cidr")
                 .and_then(|c| c.as_array())
-                .is_some_and(|cidrs| cidrs.iter().any(|c| c.as_str().is_some_and(|s| s.starts_with("5.45."))))
+                .is_some_and(|cidrs| {
+                    cidrs
+                        .iter()
+                        .any(|c| c.as_str().is_some_and(|s| s.starts_with("5.45.")))
+                })
         });
         assert!(has_ru, "bypass_ru=true should add Russian CIDR rules");
     }
@@ -967,7 +1013,11 @@ mod tests {
         let has_ru = rules.iter().any(|r| {
             r.get("ip_cidr")
                 .and_then(|c| c.as_array())
-                .is_some_and(|cidrs| cidrs.iter().any(|c| c.as_str().is_some_and(|s| s.starts_with("5.45."))))
+                .is_some_and(|cidrs| {
+                    cidrs
+                        .iter()
+                        .any(|c| c.as_str().is_some_and(|s| s.starts_with("5.45.")))
+                })
         });
         assert!(!has_ru, "bypass_ru=false should NOT add Russian CIDR rules");
     }
@@ -987,8 +1037,12 @@ mod tests {
         assert!(result.is_ok());
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
         // Find the proxy outbound — should have mux section
-        let proxy_ob = config["outbounds"].as_array().unwrap().iter()
-            .find(|o| o["tag"] == "proxy").unwrap();
+        let proxy_ob = config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == "proxy")
+            .unwrap();
         assert!(
             proxy_ob.get("mux").is_some(),
             "enable_mux=true should add mux section to proxy outbound"
@@ -1014,8 +1068,12 @@ mod tests {
         );
         assert!(result.is_ok());
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let proxy_ob = config["outbounds"].as_array().unwrap().iter()
-            .find(|o| o["tag"] == "proxy").unwrap();
+        let proxy_ob = config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == "proxy")
+            .unwrap();
         assert!(
             proxy_ob.get("mux").is_none(),
             "enable_mux=false should NOT add mux section"
@@ -1031,20 +1089,32 @@ mod tests {
             &cache_dir(),
             1080,
             "local-proxy",
-            &[vless_tls_profile()],  // must have TLS enabled
+            &[vless_tls_profile()], // must have TLS enabled
             &settings,
         );
         assert!(result.is_ok());
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let proxy_ob = config["outbounds"].as_array().unwrap().iter()
-            .find(|o| o["tag"] == "proxy").unwrap();
+        let proxy_ob = config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == "proxy")
+            .unwrap();
         let tls = proxy_ob.get("tls");
         assert!(tls.is_some(), "anti_dpi=true — TLS section expected");
         if let Some(t) = tls {
             let utls = t.get("utls");
             assert!(utls.is_some(), "anti_dpi=true should add utls to TLS");
-            assert_eq!(utls.and_then(|u| u.get("enabled")).and_then(|e| e.as_bool()), Some(true));
-            assert_eq!(utls.and_then(|u| u.get("fingerprint")).and_then(|f| f.as_str()), Some("chrome"));
+            assert_eq!(
+                utls.and_then(|u| u.get("enabled"))
+                    .and_then(|e| e.as_bool()),
+                Some(true)
+            );
+            assert_eq!(
+                utls.and_then(|u| u.get("fingerprint"))
+                    .and_then(|f| f.as_str()),
+                Some("chrome")
+            );
         }
     }
 
@@ -1057,18 +1127,25 @@ mod tests {
             &cache_dir(),
             1080,
             "local-proxy",
-            &[vless_tls_profile()],  // has TLS but anti_dpi applies
+            &[vless_tls_profile()], // has TLS but anti_dpi applies
             &settings,
         );
         assert!(result.is_ok());
         let config: Value = serde_json::from_str(&result.unwrap().0).unwrap();
-        let proxy_ob = config["outbounds"].as_array().unwrap().iter()
-            .find(|o| o["tag"] == "proxy").unwrap();
+        let proxy_ob = config["outbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["tag"] == "proxy")
+            .unwrap();
         let tls = proxy_ob.get("tls");
         // With anti_dpi=true (default), utls should be present on TLS outbounds
         if let Some(t) = tls {
             // Default anti_dpi=true means utls IS present
-            assert!(t.get("utls").is_some(), "anti_dpi=true (default) should add utls");
+            assert!(
+                t.get("utls").is_some(),
+                "anti_dpi=true (default) should add utls"
+            );
         }
     }
 
@@ -1110,9 +1187,16 @@ mod tests {
             wg_keepalive: None,
         };
         match protocol {
-            "vless" | "vmess" => { s.uuid = Some("550e8400-e29b-41d4-a716-446655440000".into()); }
-            "trojan" => { s.password = Some("trojan-pass".into()); }
-            "shadowsocks" => { s.method = Some("aes-256-gcm".into()); s.password = Some("ss-pass".into()); }
+            "vless" | "vmess" => {
+                s.uuid = Some("550e8400-e29b-41d4-a716-446655440000".into());
+            }
+            "trojan" => {
+                s.password = Some("trojan-pass".into());
+            }
+            "shadowsocks" => {
+                s.method = Some("aes-256-gcm".into());
+                s.password = Some("ss-pass".into());
+            }
             "wireguard" => {
                 s.private_key = Some("mNbS7RqMxPkL9JfH2GcV5bN8QwE1YtU3IoP6aDfSgU=".into());
                 s.server = "10.0.0.1".into();
@@ -1121,8 +1205,12 @@ mod tests {
                 s.wg_dns = Some("1.1.1.1".into());
                 s.wg_mtu = Some(1420);
             }
-            "hysteria2" => { s.password = Some("hy2-pass".into()); }
-            "tuic" => { s.password = Some("tuic-pass".into()); }
+            "hysteria2" => {
+                s.password = Some("hy2-pass".into());
+            }
+            "tuic" => {
+                s.password = Some("tuic-pass".into());
+            }
             _ => {}
         }
         s
@@ -1156,28 +1244,46 @@ mod tests {
         assert_eq!(outbounds[3]["tag"], "out-1");
 
         let rules = config["route"]["rules"].as_array().unwrap();
-        assert!(rules.iter().any(|r| r.get("inbound") == Some(&Value::String("in-0".into()))));
+        assert!(rules
+            .iter()
+            .any(|r| r.get("inbound") == Some(&Value::String("in-0".into()))));
 
         // DNS should have no detour: direct (fix for sing-box 1.13)
         let dns_servers = config["dns"]["servers"].as_array().unwrap();
         for srv in dns_servers {
-            assert!(srv.get("detour").is_none(), "DNS should not have detour: direct");
+            assert!(
+                srv.get("detour").is_none(),
+                "DNS should not have detour: direct"
+            );
         }
 
         // No clash_api section
-        assert!(config.get("experimental").is_none(), "experimental section should be removed");
+        assert!(
+            config.get("experimental").is_none(),
+            "experimental section should be removed"
+        );
         let _ = std::fs::remove_dir_all(&test_dir);
     }
 
     #[test]
     fn test_generate_batch_config_all_protocols() {
-        for proto in &["vless", "vmess", "trojan", "shadowsocks", "hysteria2", "tuic"] {
+        for proto in &[
+            "vless",
+            "vmess",
+            "trojan",
+            "shadowsocks",
+            "hysteria2",
+            "tuic",
+        ] {
             let profile = test_server_profile(proto);
             let result = build_outbound(&profile);
             assert!(result.is_ok(), "build_outbound for {proto} should succeed");
             let ob = result.unwrap();
             assert!(ob.get("server").is_some(), "{proto} should have server");
-            assert!(ob.get("server_port").is_some(), "{proto} should have server_port");
+            assert!(
+                ob.get("server_port").is_some(),
+                "{proto} should have server_port"
+            );
         }
     }
 

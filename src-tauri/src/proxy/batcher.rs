@@ -197,10 +197,7 @@ async fn process_batch(
     // 2. Generate config
     tracing::info!(target: "cache", "[Batcher] generating N-inbound config ({count} servers)");
 
-    let test_dir = std::env::temp_dir().join(format!(
-        "omnitun-batch-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let test_dir = std::env::temp_dir().join(format!("omnitun-batch-{}", uuid::Uuid::new_v4()));
     if let Err(e) = std::fs::create_dir_all(&test_dir) {
         tracing::error!(target: "cache", "[Batcher] failed to create test dir: {e}");
         for req in batch {
@@ -241,7 +238,10 @@ async fn process_batch(
         Err(e) => {
             tracing::error!(target: "cache", "[Batcher] config serialization failed: {e}");
             for req in batch {
-                if let Err(e) = req.reply.send(Err(format!("Config serialization error: {e}"))) {
+                if let Err(e) = req
+                    .reply
+                    .send(Err(format!("Config serialization error: {e}")))
+                {
                     tracing::warn!(target: "cache", "[Batcher] reply send failed: {:?}", e);
                 }
             }
@@ -268,7 +268,9 @@ async fn process_batch(
     if !binary_path.exists() {
         tracing::error!(target: "cache", "[Batcher] sing-box binary not found at {:?} — installing may be needed (run main proxy first)", binary_path);
         for req in batch {
-            if let Err(e) = req.reply.send(Err("sing-box not installed — connect to proxy first to auto-install".into())) {
+            if let Err(e) = req.reply.send(Err(
+                "sing-box not installed — connect to proxy first to auto-install".into(),
+            )) {
                 tracing::warn!(target: "cache", "[Batcher] reply send failed: {:?}", e);
             }
         }
@@ -305,7 +307,9 @@ async fn process_batch(
                     Err(e) => {
                         tracing::error!(target: "cache", "[Batcher] failed to start sing-box: {e}");
                         for req in batch {
-                            if let Err(e) = req.reply.send(Err(format!("sing-box startup error: {e}"))) {
+                            if let Err(e) =
+                                req.reply.send(Err(format!("sing-box startup error: {e}")))
+                            {
                                 tracing::warn!(target: "cache", "[Batcher] reply send failed: {:?}", e);
                             }
                         }
@@ -343,7 +347,9 @@ async fn process_batch(
         #[cfg(target_os = "linux")]
         unsafe {
             cmd.pre_exec(|| {
-                extern "C" { fn prctl(option: i32, arg2: u64, ...) -> i32; }
+                extern "C" {
+                    fn prctl(option: i32, arg2: u64, ...) -> i32;
+                }
                 prctl(1, 9); // PR_SET_PDEATHSIG=1, SIGKILL=9
                 Ok(())
             });
@@ -371,8 +377,12 @@ async fn process_batch(
     // Port readiness check — ensure sing-box actually bound the ports
     let mut ports_ready = false;
     if let Some(&first_port) = port_list.first() {
-        for _ in 0..20 { // up to 2 seconds
-            if tokio::net::TcpStream::connect(("127.0.0.1", first_port)).await.is_ok() {
+        for _ in 0..20 {
+            // up to 2 seconds
+            if tokio::net::TcpStream::connect(("127.0.0.1", first_port))
+                .await
+                .is_ok()
+            {
                 ports_ready = true;
                 break;
             }
@@ -388,7 +398,9 @@ async fn process_batch(
     // Check if sing-box is still alive after startup
     match child.try_wait() {
         Ok(Some(status)) => {
-            let stderr = child.stderr.take()
+            let stderr = child
+                .stderr
+                .take()
                 .and_then(|mut s| {
                     use std::io::Read;
                     let mut buf = String::new();
@@ -412,7 +424,9 @@ async fn process_batch(
             }
             // Don't delete test_dir — save config for debugging
             for req in batch {
-                let _ = req.reply.send(Err(format!("sing-box exited with status {status}")));
+                let _ = req
+                    .reply
+                    .send(Err(format!("sing-box exited with status {status}")));
             }
             return;
         }
@@ -463,7 +477,9 @@ async fn process_batch(
                     tested_at: chrono::Utc::now().timestamp(),
                 };
 
-                cache.update_positive(&result.server_id, positive.clone()).await;
+                cache
+                    .update_positive(&result.server_id, positive.clone())
+                    .await;
                 let _ = req.reply.send(Ok(positive));
                 success_count += 1;
                 match result.outlet_ip {
@@ -629,7 +645,11 @@ async fn test_single_server(
         exit_flag: exit_geoip.as_ref().map(|g| g.country_code.clone()),
         exit_country: exit_geoip.as_ref().map(|g| g.country_name.clone()),
         exit_city: exit_geoip.as_ref().and_then(|g| {
-            if g.city.is_empty() { None } else { Some(g.city.clone()) }
+            if g.city.is_empty() {
+                None
+            } else {
+                Some(g.city.clone())
+            }
         }),
         diagnostic_warning,
     })
@@ -652,12 +672,17 @@ async fn fetch_outlet_ip_through_port(client: &reqwest::Client) -> Option<String
             let text = resp.text().await.ok()?;
             // cloudflare.com/cdn-cgi/trace returns key=value pairs (ip=... loc=...)
             // Extract the IP line. Other services return just the IP.
-            let ip = text.lines()
+            let ip = text
+                .lines()
                 .find_map(|l| l.strip_prefix("ip="))
                 .map(|s| s.trim().to_string())
                 .or_else(|| {
                     let trimmed = text.trim().to_string();
-                    if !trimmed.is_empty() { Some(trimmed) } else { None }
+                    if !trimmed.is_empty() {
+                        Some(trimmed)
+                    } else {
+                        None
+                    }
                 });
             ip
         });
@@ -711,7 +736,11 @@ mod tests {
         let batch = collect_batch(&mut rx).await;
         assert!(batch.is_some(), "batch should be Some when items available");
         let batch = batch.unwrap();
-        assert_eq!(batch.len(), BATCH_SIZE, "collect_batch should return exactly BATCH_SIZE items");
+        assert_eq!(
+            batch.len(),
+            BATCH_SIZE,
+            "collect_batch should return exactly BATCH_SIZE items"
+        );
     }
 
     #[tokio::test]
@@ -729,7 +758,10 @@ mod tests {
         drop(tx);
 
         let batch = collect_batch(&mut rx).await;
-        assert!(batch.is_some(), "collect_batch should return remaining items on channel close");
+        assert!(
+            batch.is_some(),
+            "collect_batch should return remaining items on channel close"
+        );
         let items = batch.unwrap();
         assert_eq!(items.len(), 3, "should get all 3 sent items");
     }
@@ -740,7 +772,10 @@ mod tests {
         drop(tx); // Close channel immediately
 
         let batch = collect_batch(&mut rx).await;
-        assert!(batch.is_none(), "should return None when channel is empty and closed");
+        assert!(
+            batch.is_none(),
+            "should return None when channel is empty and closed"
+        );
     }
 
     // ── kill_singbox ──────────────────────────────────────────────────────
@@ -762,11 +797,26 @@ mod tests {
 
     #[test]
     fn test_batch_constants() {
-        assert!(BATCH_SIZE > 0 && BATCH_SIZE <= 200, "BATCH_SIZE should be between 1 and 200");
-        assert!(BATCH_TIMEOUT_MS >= 50 && BATCH_TIMEOUT_MS <= 5000, "BATCH_TIMEOUT_MS should be between 50 and 5000");
-        assert!(TEST_TIMEOUT_SECS >= 2 && TEST_TIMEOUT_SECS <= 30, "TEST_TIMEOUT_SECS should be between 2 and 30");
-        assert!(SINGBOX_STARTUP_MS >= 100 && SINGBOX_STARTUP_MS <= 5000, "SINGBOX_STARTUP_MS should be between 100 and 5000");
-        assert!(MAX_CONCURRENT_TESTS >= 1 && MAX_CONCURRENT_TESTS <= 200, "MAX_CONCURRENT_TESTS should be between 1 and 200");
+        assert!(
+            BATCH_SIZE > 0 && BATCH_SIZE <= 200,
+            "BATCH_SIZE should be between 1 and 200"
+        );
+        assert!(
+            BATCH_TIMEOUT_MS >= 50 && BATCH_TIMEOUT_MS <= 5000,
+            "BATCH_TIMEOUT_MS should be between 50 and 5000"
+        );
+        assert!(
+            TEST_TIMEOUT_SECS >= 2 && TEST_TIMEOUT_SECS <= 30,
+            "TEST_TIMEOUT_SECS should be between 2 and 30"
+        );
+        assert!(
+            SINGBOX_STARTUP_MS >= 100 && SINGBOX_STARTUP_MS <= 5000,
+            "SINGBOX_STARTUP_MS should be between 100 and 5000"
+        );
+        assert!(
+            MAX_CONCURRENT_TESTS >= 1 && MAX_CONCURRENT_TESTS <= 200,
+            "MAX_CONCURRENT_TESTS should be between 1 and 200"
+        );
     }
 
     // ── fetch_outlet_ip_through_port ──────────────────────────────────────
@@ -785,7 +835,10 @@ mod tests {
         // With a dead proxy, all 3 services should fail → None
         let client = dead_client();
         let result = fetch_outlet_ip_through_port(&client).await;
-        assert!(result.is_none(), "fetch_outlet_ip should return None when all services fail");
+        assert!(
+            result.is_none(),
+            "fetch_outlet_ip should return None when all services fail"
+        );
     }
 
     #[tokio::test]
@@ -797,7 +850,10 @@ mod tests {
             .build()
             .unwrap();
         let result = fetch_outlet_ip_through_port(&client).await;
-        assert!(result.is_none(), "fetch_outlet_ip should return None even with very short timeout");
+        assert!(
+            result.is_none(),
+            "fetch_outlet_ip should return None even with very short timeout"
+        );
     }
 
     // ── test_single_server with cancellation ──────────────────────────────
@@ -811,7 +867,10 @@ mod tests {
         cancel.cancel();
 
         let result = test_single_server(9999, &server, &cancel).await;
-        assert!(result.is_err(), "test_single_server should return Err when cancelled");
+        assert!(
+            result.is_err(),
+            "test_single_server should return Err when cancelled"
+        );
 
         // Verify cancellation is idempotent
         assert!(cancel.is_cancelled());
@@ -828,7 +887,10 @@ mod tests {
         // We just verify it doesn't panic
         if let Ok(r) = result {
             // If proxy somehow connected, ping_ms should be valid
-            assert!(r.ping_ms > 0 || r.server_id == server.id, "unexpected result state");
+            assert!(
+                r.ping_ms > 0 || r.server_id == server.id,
+                "unexpected result state"
+            );
         }
     }
 

@@ -158,9 +158,10 @@ fn test_build_outbound_all_servers() -> Result<(), Box<dyn std::error::Error>> {
         .flat_map(|p| p["servers"].as_array().unwrap().iter())
         .try_fold(0usize, |acc, s| {
             let server: omnitun_lib::proxy::ServerProfile = serde_json::from_value((*s).clone())?;
-            let outbound = omnitun_lib::proxy::config::build_outbound(&server).unwrap_or_else(|e| {
-                panic!("{}: build_outbound failed: {e}", server.display_name())
-            });
+            let outbound =
+                omnitun_lib::proxy::config::build_outbound(&server).unwrap_or_else(|e| {
+                    panic!("{}: build_outbound failed: {e}", server.display_name())
+                });
             assert_eq!(
                 outbound["type"],
                 server.protocol,

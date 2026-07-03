@@ -1,12 +1,24 @@
+import { useState } from 'react';
 import { useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { i18n } from '../../i18n';
-import { Key, Languages, Minus, RefreshCw, Rocket, Zap } from 'lucide-react';
+import {
+  ChevronDown,
+  ExternalLink,
+  Key,
+  Languages,
+  Minus,
+  RefreshCw,
+  Rocket,
+  Zap,
+} from 'lucide-react';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import { SettingItem } from './SettingItem';
 
 export function GeneralSettings() {
   const { settings, updateSettings, addLog } = useAppStore();
   const { t, lang } = useTranslation();
+  const [showIpinfoHelp, setShowIpinfoHelp] = useState(false);
 
   return (
     <div className="space-y-4">
@@ -151,9 +163,7 @@ export function GeneralSettings() {
             <h3 className="font-semibold text-sm text-zinc-100 tracking-wide">
               {t('ipinfoToken')}
             </h3>
-            <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed">
-              {t('ipinfoTokenDesc')}
-            </p>
+            <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed">{t('ipinfoTokenDesc')}</p>
             <input
               type="text"
               value={settings.ipinfoToken}
@@ -163,6 +173,86 @@ export function GeneralSettings() {
               placeholder={t('ipinfoTokenPlaceholder')}
               className="mt-3 w-full bg-zinc-800/60 border border-white/10 rounded-xl px-4 py-2.5 text-sm font-mono text-zinc-200 placeholder-zinc-500 focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none transition-all shadow-inner"
             />
+
+            {/* Get token link */}
+            <button
+              onClick={() => {
+                void openUrl('https://ipinfo.io/signup');
+                addLog('Opened ipinfo.io signup page', 'info', 'settings');
+              }}
+              className="mt-2.5 inline-flex items-center gap-1.5 text-xs text-amber-400/70 hover:text-amber-300 transition-colors group/link"
+            >
+              <ExternalLink size={14} className="shrink-0" />
+              <span>{t('ipinfoGetToken') || 'Get a free API token at ipinfo.io'}</span>
+              <span className="inline-block transition-transform duration-200 group-hover/link:translate-x-0.5">
+                →
+              </span>
+            </button>
+
+            {/* How to get your token — toggle */}
+            <button
+              onClick={() => {
+                setShowIpinfoHelp(!showIpinfoHelp);
+              }}
+              className="mt-2 inline-flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+            >
+              <ChevronDown
+                size={14}
+                className={`transition-transform duration-200 ${showIpinfoHelp ? 'rotate-180' : ''}`}
+              />
+              <span>{t('ipinfoHowToGet') || 'How to get your API token'}</span>
+            </button>
+
+            {/* Collapsible instructions */}
+            {showIpinfoHelp && (
+              <div className="mt-3 bg-zinc-800/30 border border-white/5 rounded-xl p-4 space-y-2.5 text-xs text-zinc-400 leading-relaxed">
+                <div className="flex items-start gap-2.5">
+                  <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/10 text-amber-400 text-[10px] font-bold shrink-0 mt-0.5">
+                    1
+                  </span>
+                  <span>
+                    {t('ipinfoStep1') || 'Go to'}{' '}
+                    <button
+                      onClick={() => void openUrl('https://ipinfo.io/signup')}
+                      className="text-amber-400/70 hover:text-amber-300 underline underline-offset-2 transition-colors"
+                    >
+                      ipinfo.io/signup
+                    </button>{' '}
+                    {t('ipinfoStep1End') || 'and create a free account'}
+                  </span>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/10 text-amber-400 text-[10px] font-bold shrink-0 mt-0.5">
+                    2
+                  </span>
+                  <span>{t('ipinfoStep2') || 'Log in and navigate to your API dashboard'}</span>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/10 text-amber-400 text-[10px] font-bold shrink-0 mt-0.5">
+                    3
+                  </span>
+                  <span>
+                    {t('ipinfoStep3') || 'Copy your personal API token from the dashboard'}
+                  </span>
+                </div>
+                <div className="flex items-start gap-2.5">
+                  <span className="flex items-center justify-center w-5 h-5 rounded-full bg-amber-500/10 text-amber-400 text-[10px] font-bold shrink-0 mt-0.5">
+                    4
+                  </span>
+                  <span>
+                    {t('ipinfoStep4') ||
+                      'Paste it above — the app will download the GeoIP database automatically'}
+                  </span>
+                </div>
+                <div className="mt-2 pt-2.5 border-t border-white/5 text-zinc-500">
+                  <span>
+                    💡{' '}
+                    {t('ipinfoWhy') ||
+                      'A free IPinfo account gives you 1,000 lookups/day — enough for personal use. Your token stays on-device and is never shared.'}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>

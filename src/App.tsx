@@ -51,7 +51,11 @@ export default function App() {
         }
       })
       .catch((e: unknown) => {
-        console.error('initListener failed:', e);
+        addLog(
+          `initListener failed: ${e instanceof Error ? e.message : String(e)}`,
+          'warning',
+          'system',
+        );
       });
 
     return () => {
@@ -63,9 +67,7 @@ export default function App() {
   // Listen for tray toggle event (system tray "Connect" button)
   useEffect(() => {
     const unlistenPromise = listen('tray-toggle-proxy', () => {
-      useAppStore.getState().toggleConnection().catch((e) => {
-        console.error('tray-toggle failed:', e);
-      });
+      void useAppStore.getState().toggleConnection();
     });
     return () => {
       unlistenPromise.then((fn) => fn());
@@ -74,8 +76,12 @@ export default function App() {
 
   useEffect(() => {
     void Promise.all([
-      loadProfiles().catch(() => undefined),
-      loadSettings().catch(() => undefined),
+      loadProfiles().catch(() => {
+        addLog('Failed to load profiles on startup', 'warning', 'subscription');
+      }),
+      loadSettings().catch(() => {
+        addLog('Failed to load settings on startup, using defaults', 'warning', 'settings');
+      }),
       invoke('initialize_app').catch(() => {
         addLog(
           'Background initialization failed (offline?) — app will work without GeoIP',
@@ -85,7 +91,9 @@ export default function App() {
       }),
     ]).then(async () => {
       setIsInitialized(true);
-      await fetchRealIp().catch(() => undefined);
+      await fetchRealIp().catch(() => {
+        addLog('Failed to fetch real IP on startup', 'warning', 'system');
+      });
       const { profiles: loadedProfiles, settings: loadedSettings } = useAppStore.getState();
       addLog(
         `App initialized: ${String(loadedProfiles.length)} profile(s), language: ${loadedSettings.language}`,
@@ -114,7 +122,9 @@ export default function App() {
         const lastUpdated = p.lastUpdated ?? 0;
         if (now - lastUpdated >= intervalMs) {
           updatedCount++;
-          refreshProfile(p.id).catch(() => undefined);
+          refreshProfile(p.id).catch(() => {
+            addLog(`Auto-refresh failed for profile ${p.id}`, 'warning', 'subscription');
+          });
         }
       });
 

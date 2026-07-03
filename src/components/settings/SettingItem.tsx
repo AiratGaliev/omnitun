@@ -12,7 +12,14 @@ interface SettingItemProps {
   readonly onChange: (checked: boolean) => void;
 }
 
-export function SettingItem({ icon, title, description, checked, disabled, onChange }: SettingItemProps) {
+export function SettingItem({
+  icon,
+  title,
+  description,
+  checked,
+  disabled,
+  onChange,
+}: SettingItemProps) {
   const { t } = useTranslation();
   const addLog = useAppStore((state) => state.addLog);
 
@@ -25,8 +32,10 @@ export function SettingItem({ icon, title, description, checked, disabled, onCha
   };
 
   return (
-    <div className={`bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-2xl p-6 flex items-center justify-between gap-6 shadow-sm group
-      ${disabled ? 'opacity-50 grayscale transition-all duration-300' : 'hover:bg-zinc-900/60 hover:border-white/10 transition-all duration-300'}`}>
+    <div
+      className={`bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-2xl p-6 flex items-center justify-between gap-6 shadow-sm group
+      ${disabled ? 'opacity-50 grayscale transition-all duration-300' : 'hover:bg-zinc-900/60 hover:border-white/10 transition-all duration-300'}`}
+    >
       <div className="flex-1 flex gap-5">
         <div className="mt-0.5 bg-zinc-800/80 p-2.5 rounded-xl shadow-inner h-fit border border-white/5 group-hover:border-white/10 transition-colors">
           {icon}

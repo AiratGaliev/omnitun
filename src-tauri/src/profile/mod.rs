@@ -1,5 +1,5 @@
+use crate::proxy::{ProxyError, ServerProfile};
 use crate::subscription::SubscriptionProfile;
-use crate::proxy::{ServerProfile, ProxyError};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -120,7 +120,9 @@ impl ProfileManager {
         if changed {
             let _ = self.save();
         }
-        log::info!("GeoIP enrichment: {enriched_count} enriched, {cdn_cleanup} CDN exit cleaned up");
+        log::info!(
+            "GeoIP enrichment: {enriched_count} enriched, {cdn_cleanup} CDN exit cleaned up"
+        );
     }
 
     pub fn save(&self) -> Result<(), ProxyError> {
@@ -320,12 +322,27 @@ impl ProfileManager {
         // Batch test (the only source of exit IP enrichment) is skipped when
         // Proxy is running, so freshly parsed servers would lose exit data.
         let old_servers = &self.profiles[idx].servers;
-        let old_exit: std::collections::HashMap<String, (Option<String>, Option<String>, Option<String>, Option<String>)> = old_servers
+        let old_exit: std::collections::HashMap<
+            String,
+            (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        > = old_servers
             .iter()
-            .map(|s| (
-                s.id.clone(),
-                (s.exit_server.clone(), s.exit_flag.clone(), s.exit_country_name.clone(), s.exit_city_name.clone()),
-            ))
+            .map(|s| {
+                (
+                    s.id.clone(),
+                    (
+                        s.exit_server.clone(),
+                        s.exit_flag.clone(),
+                        s.exit_country_name.clone(),
+                        s.exit_city_name.clone(),
+                    ),
+                )
+            })
             .collect();
         servers = process_servers(app, servers, id).await;
         // Restore preserved exit data if batch test didn't update it.
@@ -344,7 +361,8 @@ impl ProfileManager {
         // so the cache can remove entries for deleted servers across all profiles,
         // not just the one being refreshed.
         if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
-            let all_active_ids: std::collections::HashSet<String> = self.profiles
+            let all_active_ids: std::collections::HashSet<String> = self
+                .profiles
                 .iter()
                 .flat_map(|p| p.servers.iter().map(|s| s.id.clone()))
                 .collect();
@@ -382,7 +400,11 @@ impl ProfileManager {
 
 /// Deduplicate servers, apply user filters, run TCP ping, enrich GeoIP flag.
 /// Logs each step (dedup count, testing, unreachable count, final count).
-pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profile_id: &str) -> Vec<ServerProfile> {
+pub async fn process_servers(
+    app: &AppHandle,
+    servers: Vec<ServerProfile>,
+    profile_id: &str,
+) -> Vec<ServerProfile> {
     let initial_count = servers.len();
 
     // Lazy-init GeoIP: load from disk or download synchronously (one-time cost)
@@ -402,8 +424,7 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 );
                 match crate::proxy::geoip::ensure_downloaded(
                     &geo_dir,
-                    &app
-                        .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
+                    &app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
                         .map(|s| s.try_lock().ok().map(|g| g.ipinfo_token.clone()))
                         .flatten()
                         .unwrap_or_default(),
@@ -637,7 +658,8 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             let addr = format!("{}:{}", server.server, server.port);
             let start = std::time::Instant::now();
             // DNS resolve: get the real entry IP from hostname
-            let entry_ip = tokio::net::lookup_host(&addr).await
+            let entry_ip = tokio::net::lookup_host(&addr)
+                .await
                 .ok()
                 .and_then(|mut a| a.next())
                 .map(|s| s.ip().to_string());
@@ -684,7 +706,11 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 // to server.server directly when it's parseable as an IP.
                 if !server.behind_cdn {
                     let check_ip = entry_ip.as_deref().or_else(|| {
-                        server.server.parse::<std::net::IpAddr>().ok().map(|_| &*server.server)
+                        server
+                            .server
+                            .parse::<std::net::IpAddr>()
+                            .ok()
+                            .map(|_| &*server.server)
                     });
                     if let Some(rip) = check_ip {
                         let cdn_ranges_count = crate::proxy::geoip::cdn_ranges_count();
@@ -737,11 +763,15 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
             Ok((server, false, _, _)) => {
                 // TCP ping failed — store in negative cache so it's not re-tested
                 // until the backoff period expires.
-                if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
-                    cache.update_negative(
-                        &server.id,
-                        "TCP ping: connection refused or timeout (3s)".to_string(),
-                    ).await;
+                if let Some(cache) =
+                    app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
+                {
+                    cache
+                        .update_negative(
+                            &server.id,
+                            "TCP ping: connection refused or timeout (3s)".to_string(),
+                        )
+                        .await;
                 }
             }
             Err(_) => {
@@ -840,10 +870,13 @@ pub async fn process_servers(app: &AppHandle, servers: Vec<ServerProfile>, profi
                 needs_batch_test.len(),
             );
 
-            let cancel_token = app.try_state::<Mutex<CancellationToken>>()
+            let cancel_token = app
+                .try_state::<Mutex<CancellationToken>>()
                 .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()).clone());
 
-            let mut updated = cache.batch_test(app, &needs_batch_test, cancel_token, profile_id).await;
+            let mut updated = cache
+                .batch_test(app, &needs_batch_test, cancel_token, profile_id)
+                .await;
             ready_servers.append(&mut updated);
         }
     } else if main_proxy_running && !needs_batch_test.is_empty() {
@@ -993,19 +1026,15 @@ fn emoji_flag_from_name(name: &str) -> Option<String> {
 #[cfg(test)]
 mod extra_tests {
     use super::*;
-    use crate::settings::AppSettings;
     use crate::proxy::config::build_outbound;
     use crate::proxy::config::generate_config;
+    use crate::settings::AppSettings;
     use serde_json::json;
     use std::collections::HashMap;
     use std::process::Command;
 
     fn test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "omnitun-test-{}-{}",
-            std::process::id(),
-            name
-        ))
+        std::env::temp_dir().join(format!("omnitun-test-{}-{}", std::process::id(), name))
     }
 
     fn app_data_dir() -> PathBuf {
@@ -1271,14 +1300,8 @@ mod extra_tests {
         let mut settings_fastest = AppSettings::default();
         settings_fastest.auto_connect_fastest = true;
 
-        let (cfg_str, _) = generate_config(
-            &cache,
-            2080,
-            "local-proxy",
-            &servers,
-            &settings_fastest,
-        )
-        .unwrap();
+        let (cfg_str, _) =
+            generate_config(&cache, 2080, "local-proxy", &servers, &settings_fastest).unwrap();
         let cfg: serde_json::Value = serde_json::from_str(&cfg_str).unwrap();
         let obs = cfg["outbounds"].as_array().unwrap();
 

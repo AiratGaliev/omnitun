@@ -111,10 +111,16 @@ pub fn log(
         LogSource::System => "system",
     };
     match level {
-        LogLevel::Error => tracing::error!(log_source = target_str, log_level = "error", "{message}"),
-        LogLevel::Warning => tracing::warn!(log_source = target_str, log_level = "warning", "{message}"),
+        LogLevel::Error => {
+            tracing::error!(log_source = target_str, log_level = "error", "{message}")
+        }
+        LogLevel::Warning => {
+            tracing::warn!(log_source = target_str, log_level = "warning", "{message}")
+        }
         LogLevel::Info => tracing::info!(log_source = target_str, log_level = "info", "{message}"),
-        LogLevel::Success => tracing::info!(log_source = target_str, log_level = "success", "{message}"),
+        LogLevel::Success => {
+            tracing::info!(log_source = target_str, log_level = "success", "{message}")
+        }
     }
 
     let entry = LogEntry {

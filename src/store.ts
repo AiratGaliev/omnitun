@@ -26,11 +26,11 @@
 //    as alternative servers so the backend can construct the urltest group
 //    and auto-pick the fastest outbound.
 
-import {create} from 'zustand';
-import {invoke} from '@tauri-apps/api/core';
-import {listen} from '@tauri-apps/api/event';
-import {toast} from 'sonner';
-import {i18n} from './i18n';
+import { create } from 'zustand';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { toast } from 'sonner';
+import { i18n } from './i18n';
 import type {
   ConnectionInfo,
   ConnectionStatus,
@@ -276,6 +276,28 @@ function toRustServerProfile(s: Server | null, fallbackName: string): Record<str
   };
 }
 
+/**
+ * Асинхронно запрашивает у бэкенда лучший сервер с учётом всех фильтров
+ * (страны, протоколы, CDN). Устраняет дублирование бизнес-логики на фронтенде.
+ * При пустом currentServerId бэкенд выбирает из всего пула (без исключения).
+ */
+async function getBestServer(
+  servers: Server[],
+  autoSelect: boolean,
+  currentActiveId?: string,
+): Promise<Server | null> {
+  if (!autoSelect || servers.length === 0) {
+    return servers.find((s) => s.id === currentActiveId) ?? servers[0] ?? null;
+  }
+  const best = await invoke<RustServerProfile | null>('pick_replacement_server', {
+    current_server_id: '',
+  }).catch(() => null);
+  if (best) {
+    return servers.find((s) => s.id === best.id) ?? null;
+  }
+  return servers[0] ?? null;
+}
+
 export const useAppStore = create<ProxyStore>((set, get) => ({
   status: 'disconnected',
   activeServer: null,
@@ -330,7 +352,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     set((state) => {
       const currentActive = state.activeServer;
       const updatedActive = currentActive
-        ? servers.find((s) => s.id === currentActive.id) ?? currentActive
+        ? (servers.find((s) => s.id === currentActive.id) ?? currentActive)
         : null;
       return { servers, activeServer: updatedActive };
     });
@@ -340,32 +362,30 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   },
 
   addProfile: async (data) => {
-    try {
-      const result = await invoke<RustSubscriptionProfile>('add_subscription', {
-        name: data.name,
-        url: data.url,
-      });
-      const profile = mapRustProfile(result);
-      set((state) => {
-        const allServers = [...state.servers, ...profile.servers];
-        const autoSelect = state.settings.autoConnectFastest;
-        const newActive = autoSelect
-          ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
-          : (state.activeServer ?? allServers[0] ?? null);
-        return {
-          profiles: [...state.profiles, profile],
-          servers: allServers,
-          activeServer: newActive,
-        };
-      });
-      get().addLog(
-        `Profile "${data.name}" added (${String(profile.servers.length)} server(s))`,
-        'success',
-        'subscription',
-      );
-    } catch (e) {
-      throw e; // caller shows toast
-    }
+    const result = await invoke<RustSubscriptionProfile>('add_subscription', {
+      name: data.name,
+      url: data.url,
+    });
+    const profile = mapRustProfile(result);
+
+    // Compute best server from current state snapshot, then use functional
+    // set() for profiles/servers to avoid losing concurrent updates.
+    const newActive = await getBestServer(
+      [...get().servers, ...profile.servers],
+      get().settings.autoConnectFastest,
+      get().activeServer?.id,
+    );
+
+    set((state) => ({
+      profiles: [...state.profiles, profile],
+      servers: [...state.servers, ...profile.servers],
+      activeServer: newActive,
+    }));
+    get().addLog(
+      `Profile "${data.name}" added (${String(profile.servers.length)} server(s))`,
+      'success',
+      'subscription',
+    );
   },
 
   updateProfile: (id, data) => {
@@ -375,31 +395,26 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   },
 
   removeProfile: async (id) => {
-    try {
-      await invoke('remove_subscription', { id });
-      set((state) => {
-        const removed = state.profiles.find((p) => p.id === id);
-        const removedIds = new Set(removed?.servers.map((s) => s.id) ?? []);
-        const remaining = state.servers.filter((s) => !removedIds.has(s.id));
-        const wasActiveRemoved = removedIds.has(state.activeServer?.id ?? '');
-        const autoSelect = state.settings.autoConnectFastest;
-        return {
-          profiles: state.profiles.filter((p) => p.id !== id),
-          servers: remaining,
-          activeServer: wasActiveRemoved
-            ? autoSelect
-              ? remaining.reduce(
-                  (best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best),
-                  remaining[0],
-                )
-              : (remaining[0] ?? null)
-            : state.activeServer,
-        };
-      });
-      get().addLog('Profile removed', 'success', 'subscription');
-    } catch (e) {
-      throw e; // caller shows toast
+    await invoke('remove_subscription', { id });
+
+    // removedIds derived from the removed profile — immutable, safe from snapshot
+    const removed = get().profiles.find((p) => p.id === id);
+    const removedIds = new Set(removed?.servers.map((s) => s.id) ?? []);
+    const wasActiveRemoved = removedIds.has(get().activeServer?.id ?? '');
+
+    let newActive = get().activeServer;
+    if (wasActiveRemoved) {
+      const remaining = get().servers.filter((s) => !removedIds.has(s.id));
+      newActive = await getBestServer(remaining, get().settings.autoConnectFastest);
     }
+
+    // Functional set: profiles/servers always based on latest state
+    set((state) => ({
+      profiles: state.profiles.filter((p) => p.id !== id),
+      servers: state.servers.filter((s) => !removedIds.has(s.id)),
+      activeServer: newActive,
+    }));
+    get().addLog('Profile removed', 'success', 'subscription');
   },
 
   refreshProfile: async (id) => {
@@ -414,22 +429,25 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     try {
       const result = await invoke<RustSubscriptionProfile>('refresh_subscription', { id });
       const updated = mapRustProfile(result);
+
+      // Compute new active from snapshot; profiles/servers set inside functional set
+      const stateSnap = get();
+      const newActiveServer = await getBestServer(
+        stateSnap.servers,
+        stateSnap.settings.autoConnectFastest,
+        stateSnap.activeServer?.id,
+      );
+
       set((state) => {
         const newProfiles = state.profiles.map((p) => (p.id === id ? { ...p, ...updated } : p));
         const allServers = newProfiles.flatMap((p) => p.servers);
-        const activeServerStillExists = allServers.some((s) => s.id === state.activeServer?.id);
-        // Auto-select fastest only when enabled. When disabled, never swap
-        // even if the current server ID is gone — user picks manually.
-        const autoSelect = state.settings.autoConnectFastest;
-        const newActiveServer = autoSelect
-          ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
-          : activeServerStillExists
-            ? allServers.find((s) => s.id === state.activeServer?.id) ?? null
-            : (allServers[0] ?? null);
+        const activeStillValid = newActiveServer
+          ? allServers.some((s) => s.id === newActiveServer.id)
+          : false;
         return {
           profiles: newProfiles,
           servers: allServers,
-          activeServer: newActiveServer,
+          activeServer: activeStillValid ? newActiveServer : (allServers[0] ?? null),
         };
       });
       get().addLog(
@@ -459,12 +477,13 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       const profiles = results.map(mapRustProfile);
       const allServers = profiles.flatMap((p) => p.servers);
       const state = get();
-      const autoSelect = state.settings.autoConnectFastest;
-      const newActive: Server | null = autoSelect
-        ? allServers.length > 0
-          ? allServers.reduce((best, s) => ((s.ping ?? 9999) < (best.ping ?? 9999) ? s : best))
-          : null
-        : (allServers.find((s) => s.id === state.activeServer?.id) ?? allServers[0] ?? null);
+
+      const newActive = await getBestServer(
+        allServers,
+        state.settings.autoConnectFastest,
+        state.activeServer?.id,
+      );
+
       set({
         profiles,
         servers: allServers,
@@ -621,7 +640,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         set({ status: 'connecting' });
 
         // Persist settings before connecting (routingMode, proxyPort from Dashboard)
-        await get().saveSettings().catch(() => {});
+        await get().saveSettings();
 
         const profile = toRustServerProfile(activeServer, 'Default');
         const altServers: ReturnType<typeof toRustServerProfile>[] =

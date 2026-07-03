@@ -105,7 +105,10 @@ mod tests {
 
     #[test]
     fn test_traffic_payload_serialization() {
-        let p = TrafficPayload { up: 123.0, down: 456.5 };
+        let p = TrafficPayload {
+            up: 123.0,
+            down: 456.5,
+        };
         let json = serde_json::to_string(&p).unwrap();
         assert!(json.contains("123.0"));
         assert!(json.contains("456.5"));

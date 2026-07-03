@@ -82,7 +82,10 @@ impl PortPool {
 
     /// Number of ports currently available.
     pub fn available_count(&self) -> usize {
-        self.available.lock().unwrap_or_else(|e| e.into_inner()).len()
+        self.available
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// Total capacity (always the same unless ports were exhausted).
@@ -106,7 +109,11 @@ impl Drop for PortGuard {
     /// ⚠️ SYNCHRONOUS Drop — uses `std::sync::Mutex`, NOT `tokio::spawn`.
     /// This is safe even when the Tokio runtime is shutting down.
     fn drop(&mut self) {
-        let mut pool = self.pool.available.lock().unwrap_or_else(|e| e.into_inner());
+        let mut pool = self
+            .pool
+            .available
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         pool.push(self.port);
     }
 }
@@ -250,7 +257,7 @@ mod tests {
         let port2 = g2.port;
         drop(g1); // returned to pool via shared Arc
         drop(g2); // returned to pool via shared Arc
-        // Both ports should be back
+                  // Both ports should be back
         assert_eq!(pool.available_count(), 3);
         // Verify the returned ports re-enter the pool
         let g3 = pool.acquire().unwrap();
@@ -301,7 +308,7 @@ mod tests {
         let pool = Arc::new(PortPool::with_range(41000, 41005));
         let guard = pool.acquire_guarded().unwrap();
         assert_eq!(pool.available_count(), 5); // 1 taken
-        // Drop the guard outside any tokio runtime (this test is sync)
+                                               // Drop the guard outside any tokio runtime (this test is sync)
         drop(guard);
         assert_eq!(pool.available_count(), 6); // all returned
     }

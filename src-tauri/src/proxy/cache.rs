@@ -224,15 +224,11 @@ impl ServerCache {
 
         let (batch_tx, batch_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        log::info!(
-            "[ServerCache] initialized with {persisted_count} persisted entries"
-        );
+        log::info!("[ServerCache] initialized with {persisted_count} persisted entries");
         log::info!(
             "[ServerCache] hot cache TTL={POSITIVE_TTL_SECS}s, idle={POSITIVE_IDLE_SECS}s, SWR stale={POSITIVE_STALE_SECS}s"
         );
-        log::info!(
-            "[ServerCache] batch channel created (not started — call start_batcher)"
-        );
+        log::info!("[ServerCache] batch channel created (not started — call start_batcher)");
 
         Self {
             store,
@@ -315,7 +311,9 @@ impl ServerCache {
                                 tokio::spawn(async move {
                                     let rx = cache.queue_test(&srv, "");
                                     match rx.await {
-                                        Ok(Ok(r)) => log::info!("SWR refresh ok for {}", r.server_id),
+                                        Ok(Ok(r)) => {
+                                            log::info!("SWR refresh ok for {}", r.server_id)
+                                        }
                                         Ok(Err(e)) => log::warn!("SWR refresh failed: {e}"),
                                         Err(_) => log::warn!("SWR refresh cancelled"),
                                     }
@@ -330,13 +328,7 @@ impl ServerCache {
                                 let sid = server_id.to_string();
                                 drop(store);
                                 self.hot
-                                    .insert(
-                                        sid,
-                                        Arc::new(HotEntry {
-                                            ping_ms,
-                                            tested_at,
-                                        }),
-                                    )
+                                    .insert(sid, Arc::new(HotEntry { ping_ms, tested_at }))
                                     .await;
                                 return Ok(result);
                             }
@@ -405,14 +397,21 @@ impl ServerCache {
 
     /// Queue a server test in the batch channel and return a oneshot receiver.
     /// Does NOT block — caller must await the receiver separately.
-    fn queue_test(&self, server: &ServerProfile, profile_id: &str) -> tokio::sync::oneshot::Receiver<Result<PositiveResult, String>> {
+    fn queue_test(
+        &self,
+        server: &ServerProfile,
+        profile_id: &str,
+    ) -> tokio::sync::oneshot::Receiver<Result<PositiveResult, String>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if let Err(e) = self.batch_tx.send(BatchRequest {
             server: server.clone(),
             profile_id: profile_id.to_string(),
             reply: tx,
         }) {
-            log::warn!("[Cache] batch channel closed, request for {} lost: {e}", server.id);
+            log::warn!(
+                "[Cache] batch channel closed, request for {} lost: {e}",
+                server.id
+            );
         }
         rx
     }
@@ -426,7 +425,11 @@ impl ServerCache {
 
         let (consecutive_failures, previously_worked) = match previous {
             Some(CacheEntry {
-                status: CacheStatus::Negative { consecutive_failures, .. },
+                status:
+                    CacheStatus::Negative {
+                        consecutive_failures,
+                        ..
+                    },
                 ..
             }) => (consecutive_failures + 1, false),
             Some(CacheEntry {
@@ -613,7 +616,10 @@ impl ServerCache {
                     &logger,
                     LogLevel::Info,
                     LogSource::Cache,
-                    format!("[Cache] server {} behind CDN — skipping batch test, using TCP ping", server.id),
+                    format!(
+                        "[Cache] server {} behind CDN — skipping batch test, using TCP ping",
+                        server.id
+                    ),
                 );
                 let mut s = server.clone();
                 s.exit_server = None;
@@ -765,7 +771,10 @@ impl ServerCache {
     ///
     /// `all_active_ids` — all server IDs currently present across ALL subscriptions.
     /// Entries whose ID is not in this set are removed from the cache.
-    pub async fn handle_subscription_refresh(&self, all_active_ids: &std::collections::HashSet<String>) {
+    pub async fn handle_subscription_refresh(
+        &self,
+        all_active_ids: &std::collections::HashSet<String>,
+    ) {
         let mut store = self.store.write().await;
         let before = store.len();
 
@@ -789,7 +798,11 @@ impl ServerCache {
 
     /// Remove entries not in `active_ids` and older than `max_age`.
     /// Grace period: recently-used entries survive `max_age` even without a profile.
-    pub async fn prune_old(&self, active_ids: &std::collections::HashSet<String>, max_age: std::time::Duration) -> usize {
+    pub async fn prune_old(
+        &self,
+        active_ids: &std::collections::HashSet<String>,
+        max_age: std::time::Duration,
+    ) -> usize {
         let now = chrono::Utc::now().timestamp();
         let max_age_secs = max_age.as_secs() as i64;
         let mut store = self.store.write().await;
@@ -1000,10 +1013,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_removes_deleted_servers() {
-        let dir = std::env::temp_dir().join(format!(
-            "cache-test-refresh-remove-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cache-test-refresh-remove-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1030,10 +1041,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_refresh_keeps_surviving_negative() {
-        let dir = std::env::temp_dir().join(format!(
-            "cache-test-keep-neg-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("cache-test-keep-neg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1062,10 +1070,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_old_keeps_active_ids_regardless_of_age() {
-        let dir = std::env::temp_dir().join(format!(
-            "cache-test-prune-active-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cache-test-prune-active-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1110,7 +1116,9 @@ mod tests {
         }
 
         let active: std::collections::HashSet<String> =
-            ["old-active".into(), "fresh-active".into()].into_iter().collect();
+            ["old-active".into(), "fresh-active".into()]
+                .into_iter()
+                .collect();
         let max_age = Duration::from_secs(86400 * 30); // 30 days
         let removed = cache.prune_old(&active, max_age).await;
 
@@ -1125,10 +1133,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_old_removes_orphans_older_than_max_age() {
-        let dir = std::env::temp_dir().join(format!(
-            "cache-test-prune-orphan-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cache-test-prune-orphan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1166,10 +1172,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_prune_old_keeps_orphans_within_grace_period() {
-        let dir = std::env::temp_dir().join(format!(
-            "cache-test-prune-grace-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cache-test-prune-grace-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -1210,10 +1214,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_counts() {
-        let dir = std::env::temp_dir().join(format!(
-            "cache-test-counts-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("cache-test-counts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

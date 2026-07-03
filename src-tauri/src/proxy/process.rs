@@ -20,10 +20,10 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 #[cfg(not(windows))]
 use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -105,7 +105,6 @@ pub fn cleanup_stale_pid(_app: &tauri::AppHandle) {
 #[cfg(windows)]
 pub(crate) mod orphan_guard {
     use std::os::windows::io::RawHandle;
-    
 
     type HANDLE = *mut std::ffi::c_void;
 
@@ -173,7 +172,10 @@ pub(crate) mod orphan_guard {
 
             let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
             if job.is_null() {
-                log_it(&format!("[orphan_guard] CreateJobObjectW failed: err={}", GetLastError()));
+                log_it(&format!(
+                    "[orphan_guard] CreateJobObjectW failed: err={}",
+                    GetLastError()
+                ));
                 return None;
             }
 
@@ -206,10 +208,8 @@ pub(crate) mod orphan_guard {
     }
 
     extern "system" {
-        fn CreateJobObjectW(
-            lpJobAttributes: *const std::ffi::c_void,
-            lpName: *const u16,
-        ) -> HANDLE;
+        fn CreateJobObjectW(lpJobAttributes: *const std::ffi::c_void, lpName: *const u16)
+            -> HANDLE;
         fn CloseHandle(hObject: HANDLE) -> i32;
         fn GetLastError() -> u32;
         fn SetInformationJobObject(
@@ -218,10 +218,7 @@ pub(crate) mod orphan_guard {
             lpJobObjectInformation: *mut std::ffi::c_void,
             cbJobObjectInformationLength: u32,
         ) -> i32;
-        fn AssignProcessToJobObject(
-            hJob: HANDLE,
-            hProcess: HANDLE,
-        ) -> i32;
+        fn AssignProcessToJobObject(hJob: HANDLE, hProcess: HANDLE) -> i32;
     }
 }
 
@@ -260,7 +257,11 @@ impl ProcessManager {
         self.pid.lock().unwrap_or_else(|e| e.into_inner()).is_some()
     }
 
-    pub async fn start(&self, config_path: &Path, app: &tauri::AppHandle) -> Result<(), ProxyError> {
+    pub async fn start(
+        &self,
+        config_path: &Path,
+        app: &tauri::AppHandle,
+    ) -> Result<(), ProxyError> {
         let existing_pid = *self.pid.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pid) = existing_pid {
             // Process crash recovery: stale PID that no longer exists
@@ -391,7 +392,9 @@ impl ProcessManager {
                         .stderr(std::process::Stdio::null())
                         .creation_flags(CREATE_NO_WINDOW)
                         .spawn()
-                        .map_err(|e| ProxyError::Process(format!("Failed to start sing-box: {e}")))?
+                        .map_err(|e| {
+                            ProxyError::Process(format!("Failed to start sing-box: {e}"))
+                        })?
                 }
             };
 

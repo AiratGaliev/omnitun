@@ -84,17 +84,13 @@ pub fn save_cache(data_dir: &Path, entries: &HashMap<String, CacheEntry>) {
                     }
                 }
                 Err(e) => {
-                    log::error!(
-                        "[Cache Persistence] write failed: {e} — cache NOT saved"
-                    );
+                    log::error!("[Cache Persistence] write failed: {e} — cache NOT saved");
                     let _ = std::fs::remove_file(&tmp_path);
                 }
             }
         }
         Err(e) => {
-            log::error!(
-                "[Cache Persistence] serialization failed: {e} — cache NOT saved"
-            );
+            log::error!("[Cache Persistence] serialization failed: {e} — cache NOT saved");
         }
     }
 }

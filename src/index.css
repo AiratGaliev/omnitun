@@ -9,16 +9,16 @@
 body {
   @apply bg-zinc-950 text-zinc-50 antialiased;
   /* Disable text selection throughout the entire application */
-  user-select: none;
-  -webkit-user-select: none; /* Для Safari / macOS */
+  /*user-select: none;*/
+  /*-webkit-user-select: none; !* Для Safari / macOS *!*/
 }
 
 /* Allow text selection inside input fields */
 input,
 textarea,
 [contenteditable='true'] {
-  user-select: auto;
-  -webkit-user-select: auto;
+  /*user-select: auto;*/
+  /*-webkit-user-select: auto;*/
 }
 
 /* Custom Scrollbar */

@@ -148,13 +148,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     toast.info(label);
     // Clear stale exit IP before changing connection
     useAppStore.setState({ exitIp: null });
-    try {
-      await toggleConnection();
-      await new Promise((r) => setTimeout(r, 500));
-      await toggleConnection();
-    } catch (e) {
-      console.error('Reconnect failed', e);
-    }
+    await toggleConnection();
+    await new Promise((r) => setTimeout(r, 500));
+    await toggleConnection();
   };
 
   const handleToggleConnection = async () => {

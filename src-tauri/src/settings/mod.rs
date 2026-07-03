@@ -102,7 +102,11 @@ mod tests {
     use super::*;
 
     fn test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("omnitun-settings-test-{}-{}", std::process::id(), name))
+        std::env::temp_dir().join(format!(
+            "omnitun-settings-test-{}-{}",
+            std::process::id(),
+            name
+        ))
     }
 
     #[test]
@@ -232,10 +236,7 @@ mod tests {
             json.contains("routingMode"),
             "expected camelCase 'routingMode'"
         );
-        assert!(
-            json.contains("bypassRu"),
-            "expected camelCase 'bypassRu'"
-        );
+        assert!(json.contains("bypassRu"), "expected camelCase 'bypassRu'");
         assert!(
             json.contains("blockCdnNodes"),
             "expected camelCase 'blockCdnNodes'"

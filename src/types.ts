@@ -16,7 +16,14 @@ export type ConnectionStatus =
   | 'disconnecting'
   | 'error';
 
-export type LogSource = 'system' | 'proxy' | 'installer' | 'process' | 'subscription' | 'settings' | 'cache';
+export type LogSource =
+  | 'system'
+  | 'proxy'
+  | 'installer'
+  | 'process'
+  | 'subscription'
+  | 'settings'
+  | 'cache';
 
 export interface LogEntry {
   id: string;

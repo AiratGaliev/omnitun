@@ -3,7 +3,7 @@
 pub mod fetcher;
 pub mod parser;
 
-use crate::proxy::{ServerProfile, ProxyError};
+use crate::proxy::{ProxyError, ServerProfile};
 use fetcher::{HttpFetcher, SubscriptionFetcher};
 use serde::{Deserialize, Serialize};
 

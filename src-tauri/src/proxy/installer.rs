@@ -99,32 +99,30 @@ impl Installer {
             .await;
 
         match resp {
-            Ok(r) if r.status().is_success() => {
-                match r.json::<serde_json::Value>().await {
-                    Ok(json) => {
-                        if let Some(tag) = json["tag_name"].as_str() {
-                            let version = tag.trim_start_matches('v').to_string();
-                            log(
-                                app_handle,
-                                &logger,
-                                LogLevel::Info,
-                                LogSource::Installer,
-                                format!("Latest version: {version}"),
-                            );
-                            return Ok(version);
-                        }
-                    }
-                    Err(e) => {
+            Ok(r) if r.status().is_success() => match r.json::<serde_json::Value>().await {
+                Ok(json) => {
+                    if let Some(tag) = json["tag_name"].as_str() {
+                        let version = tag.trim_start_matches('v').to_string();
                         log(
                             app_handle,
                             &logger,
-                            LogLevel::Error,
+                            LogLevel::Info,
                             LogSource::Installer,
-                            format!("Failed to parse GitHub response: {e}"),
+                            format!("Latest version: {version}"),
                         );
+                        return Ok(version);
                     }
                 }
-            }
+                Err(e) => {
+                    log(
+                        app_handle,
+                        &logger,
+                        LogLevel::Error,
+                        LogSource::Installer,
+                        format!("Failed to parse GitHub response: {e}"),
+                    );
+                }
+            },
             Ok(r) => {
                 log(
                     app_handle,
@@ -199,7 +197,9 @@ impl Installer {
         if found_binary {
             Ok(())
         } else {
-            Err(ProxyError::Install("Binary not found in zip archive".into()))
+            Err(ProxyError::Install(
+                "Binary not found in zip archive".into(),
+            ))
         }
     }
 
@@ -209,12 +209,14 @@ impl Installer {
 
         for entry in archive
             .entries()
-            .map_err(|e| ProxyError::Install(format!("Failed to read tar: {e}")))? 
+            .map_err(|e| ProxyError::Install(format!("Failed to read tar: {e}")))?
         {
             let mut entry =
                 entry.map_err(|e| ProxyError::Install(format!("Failed to read tar entry: {e}")))?;
 
-            let path = entry.path().map_err(|e| ProxyError::Install(e.to_string()))?;
+            let path = entry
+                .path()
+                .map_err(|e| ProxyError::Install(e.to_string()))?;
             let file_name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -243,12 +245,17 @@ impl Installer {
         // First attempt: direct GitHub download
         match reqwest::get(url).await {
             Ok(resp) if resp.status().is_success() => {
-                return resp.bytes().await
+                return resp
+                    .bytes()
+                    .await
                     .map(|b| b.to_vec())
                     .map_err(|e| ProxyError::Install(format!("Failed to read response: {e}")));
             }
             Ok(resp) => {
-                log::warn!("Direct download returned HTTP {}, trying ghproxy...", resp.status());
+                log::warn!(
+                    "Direct download returned HTTP {}, trying ghproxy...",
+                    resp.status()
+                );
             }
             Err(e) => {
                 log::warn!("Direct download failed ({e}), trying ghproxy...");
@@ -259,22 +266,18 @@ impl Installer {
         let ghproxy_url = format!("https://ghproxy.net/{}", url);
         match reqwest::get(&ghproxy_url).await {
             Ok(resp) if resp.status().is_success() => {
-                resp.bytes().await
-                    .map(|b| b.to_vec())
-                    .map_err(|e| ProxyError::Install(format!("Failed to read ghproxy response: {e}")))
+                resp.bytes().await.map(|b| b.to_vec()).map_err(|e| {
+                    ProxyError::Install(format!("Failed to read ghproxy response: {e}"))
+                })
             }
-            Ok(resp) => {
-                Err(ProxyError::Install(format!(
-                    "ghproxy download failed (HTTP {}): {}",
-                    resp.status(),
-                    resp.text().await.unwrap_or_default().trim().to_string()
-                )))
-            }
-            Err(e) => {
-                Err(ProxyError::Install(format!(
-                    "All download methods failed. Last error (ghproxy): {e}"
-                )))
-            }
+            Ok(resp) => Err(ProxyError::Install(format!(
+                "ghproxy download failed (HTTP {}): {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default().trim().to_string()
+            ))),
+            Err(e) => Err(ProxyError::Install(format!(
+                "All download methods failed. Last error (ghproxy): {e}"
+            ))),
         }
     }
 
@@ -404,10 +407,8 @@ mod tests {
         }
 
         let bytes = buf.into_inner();
-        let temp_dir = std::env::temp_dir().join(format!(
-            "omnitun-test-zip-empty-{}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("omnitun-test-zip-empty-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 

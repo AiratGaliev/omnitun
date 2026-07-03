@@ -4,8 +4,7 @@ import { useAppStore } from '@/store.ts';
 import { Edit2, Globe2, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useTranslation } from '@/hooks/useTranslation.ts';
-import type { Profile } from '@/types.ts';
-import type { RefreshProgress } from '@/types.ts';
+import type { Profile, RefreshProgress } from '@/types.ts';
 import type { TranslationKey } from '@/i18n.ts';
 import * as z from 'zod';
 import { AddProfileOptions } from '../AddProfileOptions';
@@ -25,7 +24,8 @@ function formatBytes(bytes: number): string {
 }
 
 export function Profiles() {
-  const { profiles, addProfile, removeProfile, refreshProfile, updateProfile, refreshProgress } = useAppStore();
+  const { profiles, addProfile, removeProfile, refreshProfile, updateProfile, refreshProgress } =
+    useAppStore();
   const { t } = useTranslation();
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -259,21 +259,19 @@ function ProfileItem({
                         : progress.phase === 'tcp_ping'
                           ? `TCP Ping: ${progress.tested}/${progress.total} (${Math.round((progress.tested / Math.max(1, progress.total)) * 100)}%)`
                           : progress.phase === 'singbox_starting'
-                          ? t('startingSingbox')
-                          : progress.phase === 'acquiring_ports'
-                            ? t('acquiringPorts')
-                            : progress.phase}
+                            ? t('startingSingbox')
+                            : progress.phase === 'acquiring_ports'
+                              ? t('acquiringPorts')
+                              : progress.phase}
                     </span>
                     <span className="text-[11px] text-zinc-500">
                       {progress.cache_hits > 0 && (
                         <span className="text-emerald-500">
-                          {progress.cache_hits}{' '}
-                          {t('cached').toLowerCase()}
+                          {progress.cache_hits} {t('cached').toLowerCase()}
                           {' · '}
                         </span>
                       )}
-                      {progress.successful}/{progress.total}{' '}
-                      {t('successful').toLowerCase()}
+                      {progress.successful}/{progress.total} {t('successful').toLowerCase()}
                     </span>
                   </div>
                   {progress.total > 0 && (

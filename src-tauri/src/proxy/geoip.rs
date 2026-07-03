@@ -239,17 +239,23 @@ pub fn set_cdn_ranges(ranges: Vec<(IpAddr, u8)>) {
 /// Parse a .srs file: call `sing-box rule-set decompile` on the raw file
 /// to convert to JSON, then extract ip_cidr entries.
 pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
-    let sb = SINGBOX_BIN.get().ok_or_else(|| "sing-box binary not set".to_string())?;
+    let sb = SINGBOX_BIN
+        .get()
+        .ok_or_else(|| "sing-box binary not set".to_string())?;
 
     let tmp_dir = std::env::temp_dir();
     let tmp_json = tmp_dir.join("cdn_srs_tmp.json");
 
     let status = std::process::Command::new(sb)
-        .args(["rule-set", "decompile", "-o", &tmp_json.to_string_lossy(), &path.to_string_lossy()])
+        .args([
+            "rule-set",
+            "decompile",
+            "-o",
+            &tmp_json.to_string_lossy(),
+            &path.to_string_lossy(),
+        ])
         .output()
-        .map_err(|e| {
-            format!("Failed to run sing-box: {e}")
-        });
+        .map_err(|e| format!("Failed to run sing-box: {e}"));
 
     let out = status?;
     if !out.status.success() {
@@ -292,7 +298,11 @@ pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
 /// Load a .srs file and set CDN_RANGES.
 pub fn init_cdn_ranges(path: &Path) -> Result<(), String> {
     let ranges = parse_srs_file(path)?;
-    log::info!("Loaded {} CDN CIDR entries from {}", ranges.len(), path.display());
+    log::info!(
+        "Loaded {} CDN CIDR entries from {}",
+        ranges.len(),
+        path.display()
+    );
     set_cdn_ranges(ranges);
     Ok(())
 }
@@ -345,11 +355,15 @@ fn addr_to_bits(ip: IpAddr) -> u128 {
 fn prefix_mask(ip: IpAddr, len: u8) -> u128 {
     match ip {
         IpAddr::V4(_) => {
-            if len >= 32 { return !0u128; }
+            if len >= 32 {
+                return !0u128;
+            }
             (!0u128) << (32 - len)
         }
         IpAddr::V6(_) => {
-            if len >= 128 { return !0u128; }
+            if len >= 128 {
+                return !0u128;
+            }
             (!0u128) << (128 - len)
         }
     }
@@ -510,8 +524,13 @@ fn sync_meta_file(db_dir: &Path) {
     let mut meta = load_meta(db_dir);
     let mut changed = false;
 
-    for name in &["GeoLite2-City.mmdb", "GeoLite2-ASN.mmdb", "ipinfo_lite.mmdb",
-                  "cdn-only_singbox.srs", "merged.srs"] {
+    for name in &[
+        "GeoLite2-City.mmdb",
+        "GeoLite2-ASN.mmdb",
+        "ipinfo_lite.mmdb",
+        "cdn-only_singbox.srs",
+        "merged.srs",
+    ] {
         if meta.databases.contains_key(*name) {
             continue; // already tracked
         }
@@ -519,10 +538,8 @@ fn sync_meta_file(db_dir: &Path) {
         if let Ok(meta_info) = std::fs::metadata(&path) {
             if let Ok(modified) = meta_info.modified() {
                 if let Ok(dur) = SystemTime::now().duration_since(modified) {
-                    let iso = chrono::DateTime::<chrono::Utc>::from(
-                        SystemTime::now() - dur,
-                    )
-                    .to_rfc3339();
+                    let iso =
+                        chrono::DateTime::<chrono::Utc>::from(SystemTime::now() - dur).to_rfc3339();
                     meta.databases.insert(
                         name.to_string(),
                         DbMeta {
@@ -600,10 +617,7 @@ pub(crate) fn should_download_ipinfo(path: &Path) -> bool {
 /// Per the ipinfo.io docs, a valid token returns HTTP 302 (redirect to CDN).
 /// An invalid or missing token returns 401 Unauthorized.
 async fn validate_ipinfo_token(client: &reqwest::Client, token: &str) -> Result<(), String> {
-    let url = format!(
-        "https://ipinfo.io/data/ipinfo_lite.mmdb?token={}",
-        token
-    );
+    let url = format!("https://ipinfo.io/data/ipinfo_lite.mmdb?token={}", token);
 
     // Don't follow redirects — we just check for the initial 302
     let resp = client
@@ -616,7 +630,9 @@ async fn validate_ipinfo_token(client: &reqwest::Client, token: &str) -> Result<
     match status.as_u16() {
         302 => Ok(()), // redirect to CDN = token valid
         401 => Err("IPinfo token is invalid or missing — check your token at ipinfo.io".into()),
-        403 => Err("IPinfo token does not have access to the Lite database — upgrade at ipinfo.io".into()),
+        403 => Err(
+            "IPinfo token does not have access to the Lite database — upgrade at ipinfo.io".into(),
+        ),
         404 => Err("IPinfo database URL not found — check the API endpoint".into()),
         code if code >= 400 => Err(format!(
             "IPinfo token validation failed with HTTP {code} — check your token at ipinfo.io"
@@ -667,7 +683,10 @@ async fn check_latest_release(client: &reqwest::Client, db_dir: &Path) -> Option
     let url = "https://api.github.com/repos/P3TERX/GeoLite.mmdb/releases/latest";
     let resp = client.get(url).send().await.ok()?;
     if !resp.status().is_success() {
-        log::warn!("GitHub API returned HTTP {} for release check", resp.status().as_u16());
+        log::warn!(
+            "GitHub API returned HTTP {} for release check",
+            resp.status().as_u16()
+        );
         return None;
     }
     let body: serde_json::Value = resp.json().await.ok()?;
@@ -751,7 +770,9 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
             .build()
         {
             match download_db_geoip(&dl, &city_path, &urls, "City").await {
-                Ok(bytes) => update_db_meta(db_dir, "GeoLite2-City.mmdb", latest_tag.as_deref(), bytes),
+                Ok(bytes) => {
+                    update_db_meta(db_dir, "GeoLite2-City.mmdb", latest_tag.as_deref(), bytes)
+                }
                 Err(e) => log::warn!("City DB download: {e}"),
             }
         }
@@ -785,7 +806,9 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
             .build()
         {
             match download_db_geoip(&dl, &asn_path, &urls, "ASN").await {
-                Ok(bytes) => update_db_meta(db_dir, "GeoLite2-ASN.mmdb", latest_tag.as_deref(), bytes),
+                Ok(bytes) => {
+                    update_db_meta(db_dir, "GeoLite2-ASN.mmdb", latest_tag.as_deref(), bytes)
+                }
                 Err(e) => log::warn!("ASN DB download: {e}"),
             }
         }
@@ -849,7 +872,11 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
         let needs = !path.exists()
             || std::fs::metadata(&path)
                 .and_then(|m| m.modified())
-                .map(|t| t.elapsed().map(|d| d > Duration::from_secs(24 * 3600)).unwrap_or(true))
+                .map(|t| {
+                    t.elapsed()
+                        .map(|d| d > Duration::from_secs(24 * 3600))
+                        .unwrap_or(true)
+                })
                 .unwrap_or(true);
         if needs {
             let mut downloaded = false;
@@ -911,13 +938,19 @@ async fn download_db_geoip(
                 let status = resp.status();
                 if status.as_u16() >= 400 {
                     let body = resp.text().await.unwrap_or_default();
-                    last_err = format!("HTTP {} — {}", status.as_u16(),
-                        body.chars().take(200).collect::<String>().trim());
+                    last_err = format!(
+                        "HTTP {} — {}",
+                        status.as_u16(),
+                        body.chars().take(200).collect::<String>().trim()
+                    );
                     continue;
                 }
                 let bytes = match resp.bytes().await {
                     Ok(b) => b,
-                    Err(e) => { last_err = format!("{e}"); continue; }
+                    Err(e) => {
+                        last_err = format!("{e}");
+                        continue;
+                    }
                 };
                 let len = bytes.len() as u64;
                 if len < 1000 {
@@ -1070,9 +1103,7 @@ async fn download_db(
                 };
                 let len = bytes.len() as u64;
                 if len < 100_000 {
-                    last_err = format!(
-                        "response too small ({len} bytes) — likely an error page"
-                    );
+                    last_err = format!("response too small ({len} bytes) — likely an error page");
                     continue;
                 }
                 let tmp_path = target_path.with_extension("mmdb.tmp");
@@ -1080,10 +1111,7 @@ async fn download_db(
                     .map_err(|e| format!("Failed to write GeoIP {} database: {e}", label))?;
                 std::fs::rename(&tmp_path, target_path)
                     .map_err(|e| format!("Failed to finalize GeoIP {} database: {e}", label))?;
-                log::info!(
-                    "GeoIP {} database downloaded ({len} bytes)",
-                    label
-                );
+                log::info!("GeoIP {} database downloaded ({len} bytes)", label);
                 return Ok(len);
             }
             Err(e) => {
@@ -1217,9 +1245,7 @@ mod tests {
     #[test]
     fn test_is_cdn_ip_loaded() {
         // Directly set CDN ranges without needing sing-box binary
-        let ranges = vec![
-            ("1.1.1.0".parse::<IpAddr>().unwrap(), 24u8),
-        ];
+        let ranges = vec![("1.1.1.0".parse::<IpAddr>().unwrap(), 24u8)];
         set_cdn_ranges(ranges);
 
         assert!(is_cdn_ip("1.1.1.1"));
@@ -1249,7 +1275,10 @@ mod tests {
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("\"DE\""), "JSON should contain country code");
-        assert!(json.contains("\"city\":\"\""), "JSON should have empty city");
+        assert!(
+            json.contains("\"city\":\"\""),
+            "JSON should have empty city"
+        );
     }
 
     // ── resolve_hostname edge cases ────────────────────────────────────

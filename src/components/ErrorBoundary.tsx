@@ -23,7 +23,11 @@ export class ErrorBoundary extends Component<Props, State> {
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     // Log to console only — no addLog to avoid circular dependency.
     // Rust backend's panic hook + tracing will catch unhandled promises.
-    console.error('[ErrorBoundary] Uncaught render error:', error.message, errorInfo.componentStack);
+    console.error(
+      '[ErrorBoundary] Uncaught render error:',
+      error.message,
+      errorInfo.componentStack,
+    );
   }
 
   public render() {

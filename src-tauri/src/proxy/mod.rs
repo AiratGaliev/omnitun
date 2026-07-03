@@ -29,8 +29,7 @@ pub(crate) static LAST_PROFILE: std::sync::Mutex<Option<LastConnection>> =
     std::sync::Mutex::new(None);
 
 /// ID of the currently active (connected) server, for exit IP enrichment.
-pub(crate) static ACTIVE_SERVER_ID: std::sync::Mutex<Option<String>> =
-    std::sync::Mutex::new(None);
+pub(crate) static ACTIVE_SERVER_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Data needed to re-establish a connection after unexpected exit.
 #[derive(Clone)]
@@ -262,6 +261,22 @@ impl ProxyManager {
         settings: &AppSettings,
     ) -> Result<(), ProxyError> {
         let logger = app_handle.state::<Mutex<Logger>>();
+
+        // ── Idempotent start: clean up any existing process (proxy or Kill Switch) ──
+        // Frontend must never manage process lifecycle. This is backend's job.
+        if self.process_mgr.is_running() {
+            log(
+                app_handle,
+                &logger,
+                LogLevel::Info,
+                LogSource::Proxy,
+                "Cleaning up existing process (Kill Switch or stale proxy) before starting..."
+                    .into(),
+            );
+            let _ = self.stop(app_handle).await;
+        }
+        // ────────────────────────────────────────────────────────────────────────────
+
         log(
             app_handle,
             &logger,
@@ -365,6 +380,28 @@ impl ProxyManager {
             self.process_mgr.clear_pid();
         }
         ConnectionStatus::Disconnected
+    }
+
+    /// Activates Kill Switch: stops any running process and starts a block-only
+    /// sing-box config that holds the port open but rejects all traffic.
+    /// This prevents OS/apps from bypassing the proxy when it's down.
+    pub async fn activate_kill_switch(
+        &self,
+        app_handle: &AppHandle,
+        proxy_port: u16,
+        routing_mode: &str,
+    ) -> Result<(), ProxyError> {
+        // Stop any existing process (dead proxy or previous kill switch)
+        let _ = self.stop(app_handle).await;
+
+        // Ensure sing-box binary exists (it should from initial start, but guard against edge cases)
+        self.ensure_installed(app_handle).await?;
+
+        let ks_config_json = config::generate_kill_switch_config(proxy_port, routing_mode)?;
+        let config_path = config::write_config(&ks_config_json, &self.config_dir)?;
+
+        self.process_mgr.start(&config_path, app_handle).await?;
+        Ok(())
     }
 }
 

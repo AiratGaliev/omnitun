@@ -179,5 +179,13 @@
   "startingSingbox": "Starting sing-box",
   "acquiringPorts": "Acquiring ports",
   "cached": "Cached",
-  "successful": "Successful"
+  "successful": "Successful",
+  "ipinfoGetToken": "Get a free API token at ipinfo.io",
+  "ipinfoHowToGet": "How to get your API token",
+  "ipinfoStep1": "Go to",
+  "ipinfoStep1End": "and create a free account",
+  "ipinfoStep2": "Log in and navigate to your API dashboard",
+  "ipinfoStep3": "Copy your personal API token from the dashboard",
+  "ipinfoStep4": "Paste it above — the app will download the GeoIP database automatically",
+  "ipinfoWhy": "The token is used only to download and periodically update the ipinfo_lite.mmdb database. Your token stays on-device and is never sent anywhere."
 }

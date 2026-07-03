@@ -5,7 +5,7 @@
 //
 // All other functions are unchanged from the original codebase.
 
-use crate::proxy::{ServerProfile, ProxyError};
+use crate::proxy::{ProxyError, ServerProfile};
 use std::collections::HashMap;
 
 pub fn parse_subscription(data: &str) -> Result<Vec<ServerProfile>, ProxyError> {

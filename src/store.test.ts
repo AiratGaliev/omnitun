@@ -745,7 +745,12 @@ describe('store — IP fetching', () => {
   });
 
   it('fetchRealIp stores IP on success', async () => {
-    mockInvoke.mockResolvedValueOnce({ server: '9.9.9.9', flag: '', country_name: '', city_name: '' });
+    mockInvoke.mockResolvedValueOnce({
+      server: '9.9.9.9',
+      flag: '',
+      country_name: '',
+      city_name: '',
+    });
     await useAppStore.getState().fetchRealIp();
     expect(useAppStore.getState().realIp?.server).toBe('9.9.9.9');
   });
