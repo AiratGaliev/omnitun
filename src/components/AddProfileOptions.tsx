@@ -23,14 +23,27 @@ function extractDomain(url: string): string {
   }
 }
 
+function uniqueName(desired: string, existing: ReadonlySet<string>): string {
+  if (!existing.has(desired)) return desired;
+  let counter = 1;
+  while (existing.has(`${desired} ${counter}`)) {
+    counter++;
+  }
+  return `${desired} ${counter}`;
+}
+
 interface AddProfileOptionsProps {
-  readonly onAdd: (url: string, name?: string) => void;
+  readonly onAdd: (url: string, name?: string) => Promise<void>;
+  readonly onProfileAdded?: () => void;
+  readonly onProfileError?: (err: unknown) => void;
   readonly className?: string;
   readonly horizontal?: boolean;
 }
 
 export function AddProfileOptions({
   onAdd,
+  onProfileAdded,
+  onProfileError,
   className = '',
   horizontal = false,
 }: AddProfileOptionsProps) {
@@ -39,6 +52,20 @@ export function AddProfileOptions({
   const [name, setName] = useState('');
   const [url, setUrl] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleAddWithToast = (url: string, name?: string) => {
+    toast.promise(
+      onAdd(url, name).then(() => onProfileAdded?.()),
+      {
+        loading: `${t('updatingProfile')}...`,
+        success: t('profileAdded'),
+        error: (err: unknown) => {
+          onProfileError?.(err);
+          return t('addFailed');
+        },
+      },
+    );
+  };
 
   const handleClipboardAdd = async () => {
     try {
@@ -57,8 +84,9 @@ export function AddProfileOptions({
       const cleanText = clipboardText.trim().replace(/^[\p{Cf}\p{Zs}]+/u, '');
 
       if (cleanText.startsWith('http://') || cleanText.startsWith('https://')) {
-        const name = extractDomain(cleanText);
-        onAdd(cleanText, name);
+        const domainName = extractDomain(cleanText);
+        const existingNames = new Set(useAppStore.getState().profiles.map((p) => p.name));
+        handleAddWithToast(cleanText, uniqueName(domainName, existingNames));
       } else if (
         cleanText.startsWith('vless://') ||
         cleanText.startsWith('ss://') ||
@@ -71,7 +99,7 @@ export function AddProfileOptions({
         cleanText.startsWith('socks5://') ||
         cleanText.startsWith('socks://')
       ) {
-        onAdd(cleanText);
+        handleAddWithToast(cleanText);
       } else {
         throw new Error('invalid config');
       }
@@ -92,7 +120,9 @@ export function AddProfileOptions({
     if (!file) return;
     try {
       const text = await file.text();
-      const name = file.name.replace(/\.[^.]+$/, '');
+      const rawName = file.name.replace(/\.[^.]+$/, '');
+      const existingNames = new Set(useAppStore.getState().profiles.map((p) => p.name));
+      const name = uniqueName(rawName, existingNames);
       const result = await invoke<RustSubscriptionProfile>('import_subscription_content', {
         name,
         content: text,
@@ -120,7 +150,7 @@ export function AddProfileOptions({
       toast.error(result.error.issues[0].message);
       return;
     }
-    onAdd(url.trim(), name.trim());
+    handleAddWithToast(url.trim(), name.trim());
     setViewMode('initial');
     setName('');
     setUrl('');

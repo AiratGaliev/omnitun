@@ -72,17 +72,7 @@ export function Profiles() {
 
       <div className="mb-8 flex justify-center w-full">
         <AddProfileOptions
-          onAdd={(url, name) => {
-            const promise = addProfile({
-              name: name ?? 'New Profile',
-              url,
-            });
-            toast.promise(promise, {
-              loading: `${t('updatingProfile')}...`,
-              success: t('profileAdded'),
-              error: t('addFailed') || 'Failed to add profile',
-            });
-          }}
+          onAdd={(url, name) => addProfile({ name: name ?? 'New Profile', url })}
           horizontal={true}
           className="max-w-full"
         />

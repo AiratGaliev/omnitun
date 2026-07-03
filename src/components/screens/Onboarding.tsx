@@ -1,6 +1,5 @@
 import { motion } from 'framer-motion';
 import { Languages, ShieldCheck } from 'lucide-react';
-import { toast } from 'sonner';
 import { useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { i18n } from '../../i18n';
@@ -13,16 +12,9 @@ export function Onboarding() {
   const { updateSettings } = useAppStore();
   const { t, lang } = useTranslation();
 
-  const handleConnectImpl = async (linkStr: string, customName?: string) => {
-    try {
-      addLog('Adding initial subscription...', 'info', 'system');
-      if (linkStr) await addProfile({ name: customName ?? 'Initial Profile', url: linkStr });
-      toast.success(t('addedSuccess'));
-      completeOnboarding();
-    } catch {
-      addLog('Failed to add profile during onboarding', 'error', 'system');
-      toast.error(t('addFailed'));
-    }
+  const handleConnectImpl = (linkStr: string, customName?: string) => {
+    addLog('Adding initial subscription...', 'info', 'system');
+    return addProfile({ name: customName ?? 'Initial Profile', url: linkStr });
   };
 
   return (
@@ -74,7 +66,9 @@ export function Onboarding() {
       </p>
 
       <AddProfileOptions
-        onAdd={(url, name) => void handleConnectImpl(url, name)}
+        onAdd={(url, name) => handleConnectImpl(url, name)}
+        onProfileAdded={() => completeOnboarding()}
+        onProfileError={() => addLog('Failed to add profile during onboarding', 'error', 'system')}
         horizontal={true}
       />
 
