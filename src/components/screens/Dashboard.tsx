@@ -229,7 +229,10 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     whileTap={{ scale: settings.autoConnectFastest ? 1 : 0.98 }}
                     onClick={() => {
                       if (settings.autoConnectFastest) {
-                        toast.info(t('smartNodeDesc') || 'Manual selection is disabled while Smart Node is active');
+                        toast.info(
+                          t('smartNodeDesc') ||
+                            'Manual selection is disabled while Smart Node is active',
+                        );
                         return;
                       }
                       setIsServerDropdownOpen(!isServerDropdownOpen);
@@ -537,27 +540,54 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     >
                       {/* Neatly grouped IP Pill */}
                       {activeServer && (
-                        <div className="inline-flex items-center gap-2 bg-zinc-900/50 border border-white/5 rounded-xl px-3 py-1.5 max-w-full shadow-inner">
-                          <Globe size={12} className="text-emerald-500 shrink-0" />
-                          <div className="flex items-center gap-1.5 overflow-hidden text-xs text-zinc-400 font-mono min-w-0">
-                            {activeServer.behindCdn ? (
-                              <>
-                                <span className="truncate">{activeServer.server}</span>
-                                <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded shrink-0">
-                                  CDN
-                                </span>
-                              </>
-                            ) : exitIp && exitIp.server !== activeServer.server ? (
-                              <>
-                                <span className="truncate max-w-[120px]">
-                                  {exitIp.country_name}
-                                </span>
-                                <span className="text-zinc-600 shrink-0">→</span>
-                                <span className="truncate text-zinc-300">{exitIp.server}</span>
-                              </>
-                            ) : (
-                              <span className="truncate">{activeServer.server}</span>
+                        <div className="flex flex-col items-center bg-zinc-900/50 border border-white/5 rounded-xl px-4 py-2 shadow-inner w-full max-w-[280px]">
+                          {/* Row 1: country info */}
+                          <div className="flex items-center gap-1.5 text-xs text-zinc-300 font-medium min-w-0 w-full justify-center">
+                            <Globe size={12} className="text-emerald-500 shrink-0" />
+                            {activeServer.flag && (
+                              <FlagDisplay code={activeServer.flag} className="text-xs shrink-0" />
                             )}
+                            <span className="truncate">
+                              {activeServer.countryName ?? activeServer.flag}
+                            </span>
+                            {activeServer.cityName && (
+                              <span className="text-zinc-500 shrink-0">
+                                ({activeServer.cityName})
+                              </span>
+                            )}
+                            {activeServer.behindCdn && (
+                              <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded shrink-0 font-mono">
+                                CDN
+                              </span>
+                            )}
+                            {!activeServer.behindCdn && exitIp && (
+                              <>
+                                <span className="text-zinc-600 shrink-0">→</span>
+                                {exitIp.flag && (
+                                  <FlagDisplay code={exitIp.flag} className="text-xs shrink-0" />
+                                )}
+                                <span className="truncate">
+                                  {exitIp.country_name ?? exitIp.flag}
+                                </span>
+                                {exitIp.city_name && (
+                                  <span className="text-zinc-500 shrink-0">
+                                    ({exitIp.city_name})
+                                  </span>
+                                )}
+                              </>
+                            )}
+                          </div>
+                          {/* Row 2: IP addresses */}
+                          <div className="flex items-center gap-1.5 text-[11px] text-zinc-500 font-mono min-w-0 w-full justify-center mt-0.5">
+                            <span className="truncate">{activeServer.server}</span>
+                            {!activeServer.behindCdn &&
+                              exitIp &&
+                              exitIp.server !== activeServer.server && (
+                                <>
+                                  <span className="text-zinc-700 shrink-0">·</span>
+                                  <span className="truncate">{exitIp.server}</span>
+                                </>
+                              )}
                           </div>
                         </div>
                       )}
@@ -568,11 +598,22 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                       initial={{ opacity: 0, y: 10 }}
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, y: -10 }}
-                      className="flex flex-col items-center text-center w-full mt-2"
+                      className="flex flex-col items-center text-center w-full"
                     >
-                      <div className="inline-flex items-center gap-2 bg-zinc-900/30 border border-white/5 rounded-xl px-3 py-1.5 max-w-full">
-                        <Globe size={12} className="text-zinc-500 shrink-0" />
-                        <span className="text-xs text-zinc-500 font-mono truncate">{realIp}</span>
+                      <div className="flex flex-col items-center bg-zinc-900/30 border border-white/5 rounded-xl px-4 py-2 shadow-inner w-full max-w-[200px]">
+                        <div className="flex items-center gap-1.5 text-xs text-zinc-300 font-medium min-w-0 w-full justify-center">
+                          <Globe size={12} className="text-zinc-500 shrink-0" />
+                          {realIp.flag && (
+                            <FlagDisplay code={realIp.flag} className="text-xs shrink-0" />
+                          )}
+                          <span className="truncate">{realIp.country_name ?? realIp.flag}</span>
+                          {realIp.city_name && (
+                            <span className="text-zinc-500 shrink-0">({realIp.city_name})</span>
+                          )}
+                        </div>
+                        <span className="text-[11px] text-zinc-500 font-mono mt-0.5">
+                          {realIp.server}
+                        </span>
                       </div>
                     </motion.div>
                   ) : null}

@@ -616,7 +616,7 @@ describe('store — toggleConnection', () => {
         { id: 'srv-1', name: 'Test', protocol: 'vless', server: '10.0.0.1', port: 443 },
         { id: 'srv-2', name: 'Alt', protocol: 'vless', server: '10.0.0.2', port: 443 },
       ],
-      realIp: '1.2.3.4',
+      realIp: { server: '1.2.3.4', flag: '', country_name: '', city_name: '' },
     });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
@@ -655,7 +655,7 @@ describe('store — toggleConnection', () => {
         { id: 'srv-2', name: 'Alt1', server: '10.0.0.2', port: 443 },
         { id: 'srv-3', name: 'Alt2', server: '10.0.0.3', port: 443 },
       ],
-      realIp: '1.2.3.4',
+      realIp: { server: '1.2.3.4', flag: '', country_name: '', city_name: '' },
     });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
@@ -679,7 +679,7 @@ describe('store — toggleConnection', () => {
     useAppStore.setState({
       activeServer: { id: 'srv-1', name: 'Test', protocol: 'vless', server: '10.0.0.1', port: 443 },
       servers: [{ id: 'srv-1', name: 'Test', server: '10.0.0.1', port: 443 }],
-      realIp: '1.2.3.4',
+      realIp: { server: '1.2.3.4', flag: '', country_name: '', city_name: '' },
     });
     useAppStore.getState().updateSettings({ autoConnectFastest: false });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
@@ -709,7 +709,7 @@ describe('store — toggleConnection', () => {
   it('sets error state on connection failure', async () => {
     useAppStore.setState({
       activeServer: { id: 'srv-1', name: 'Test', server: '10.0.0.1', port: 443 },
-      realIp: '1.2.3.4',
+      realIp: { server: '1.2.3.4', flag: '', country_name: '', city_name: '' },
     });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
     mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
@@ -745,9 +745,9 @@ describe('store — IP fetching', () => {
   });
 
   it('fetchRealIp stores IP on success', async () => {
-    mockInvoke.mockResolvedValueOnce('9.9.9.9');
+    mockInvoke.mockResolvedValueOnce({ server: '9.9.9.9', flag: '', country_name: '', city_name: '' });
     await useAppStore.getState().fetchRealIp();
-    expect(useAppStore.getState().realIp).toBe('9.9.9.9');
+    expect(useAppStore.getState().realIp?.server).toBe('9.9.9.9');
   });
 
   it('fetchRealIp stores null on error', async () => {

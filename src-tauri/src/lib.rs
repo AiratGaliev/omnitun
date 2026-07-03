@@ -1346,7 +1346,7 @@ fn read_clipboard_text() -> Result<String, String> {
 /// Get the user's real IP (before proxy) with GeoIP location.
 /// Always fetches directly (no proxy) — works whether connected or not.
 #[tauri::command]
-async fn get_real_ip(_app: tauri::AppHandle) -> Result<String, String> {
+async fn get_real_ip(_app: tauri::AppHandle) -> Result<RealIpInfo, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .build()
@@ -1356,7 +1356,6 @@ async fn get_real_ip(_app: tauri::AppHandle) -> Result<String, String> {
     for url in IP_URLS {
         if let Ok(resp) = client.get(*url).send().await {
             if let Ok(text) = resp.text().await {
-                // Try to extract ip=... line (Cloudflare trace)
                 let extracted = text.lines()
                     .find_map(|l| l.strip_prefix("ip="))
                     .map(|s| s.trim().to_string())
@@ -1373,22 +1372,11 @@ async fn get_real_ip(_app: tauri::AppHandle) -> Result<String, String> {
         return Err("Could not determine external IP".into());
     }
 
-    // GeoIP location from local GeoLite2 database (no network call, no rate limit)
-    let location = crate::proxy::geoip::resolve(&ip)
-        .map(|geo| {
-            if !geo.city.is_empty() {
-                format!("{}, {}", geo.city, geo.country_name)
-            } else {
-                geo.country_name
-            }
-        })
+    let (flag, country_name, city_name) = crate::proxy::geoip::resolve(&ip)
+        .map(|geo| (geo.country_code.clone(), geo.country_name.clone(), geo.city.clone()))
         .unwrap_or_default();
 
-    if !location.is_empty() {
-        Ok(format!("{} ({})", ip, location))
-    } else {
-        Ok(ip)
-    }
+    Ok(RealIpInfo { server: ip, flag, country_name, city_name })
 }
 
 /// Find the active proxy's outlet (external) IP address via IP echo services.
@@ -1406,6 +1394,15 @@ struct ClashTraffic {
     up: f64,
     down: f64,
 }
+#[derive(Debug, Clone, Serialize, PartialEq)]
+/// Real IP info (before proxy) — structured like ExitIpInfo.
+pub struct RealIpInfo {
+    pub server: String,
+    pub flag: String,
+    pub country_name: String,
+    pub city_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 /// Information about the external IP address.
 pub struct ExitIpInfo {

@@ -144,6 +144,13 @@ export interface ExitIpInfo {
   proxy_tag: string;
 }
 
+export interface RealIpInfo {
+  server: string;
+  flag: string;
+  country_name: string;
+  city_name: string;
+}
+
 /** Batch refresh progress event payload. */
 export interface RefreshProgress {
   profile_id: string;

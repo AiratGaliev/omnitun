@@ -38,6 +38,7 @@ import type {
   LogEntry,
   LogSource,
   Profile,
+  RealIpInfo,
   RefreshProgress,
   Server,
   Settings,
@@ -143,7 +144,7 @@ interface ProxyStore {
   initListener: () => Promise<() => void>;
   exitIp: ExitIpInfo | null;
   fetchExitIp: () => Promise<void>;
-  realIp: string | null;
+  realIp: RealIpInfo | null;
   fetchRealIp: () => Promise<void>;
   speedTestResult: SpeedTestResult | null;
   runSpeedTest: () => Promise<SpeedTestResult | null>;
@@ -573,8 +574,8 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
 
   fetchRealIp: async () => {
     try {
-      const ip = await invoke<string>('get_real_ip');
-      set({ realIp: ip });
+      const info = await invoke<RealIpInfo>('get_real_ip');
+      set({ realIp: info });
     } catch (e) {
       // Backend already logged the error via tracing
       set({ realIp: null });
