@@ -1,5 +1,5 @@
 use crate::logging::{log, LogLevel, LogSource, Logger};
-use crate::proxy::ProxyError;
+use crate::proxy::{ErrorCode, ProxyError};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
@@ -160,13 +160,19 @@ impl Installer {
 
     fn extract_zip(bytes: &[u8], bin_dir: &Path, binary_name: &str) -> Result<(), ProxyError> {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
-            .map_err(|e| ProxyError::Install(format!("Failed to open zip: {e}")))?;
+            .map_err(|e| ProxyError::install(
+                ErrorCode::InstallExtractFailed,
+                format!("Failed to open zip: {e}"),
+            ))?;
 
         let mut found_binary = false;
         for i in 0..archive.len() {
             let mut entry = archive
                 .by_index(i)
-                .map_err(|e| ProxyError::Install(format!("Failed to read zip entry: {e}")))?;
+                .map_err(|e| ProxyError::install(
+                    ErrorCode::InstallExtractFailed,
+                    format!("Failed to read zip entry: {e}"),
+                ))?;
 
             if entry.is_dir() {
                 continue;
@@ -189,16 +195,23 @@ impl Installer {
 
             let out_path = bin_dir.join(&file_name);
             let mut out = std::fs::File::create(&out_path)
-                .map_err(|e| ProxyError::Install(format!("Failed to create {file_name}: {e}")))?;
+                .map_err(|e| ProxyError::install(
+                    ErrorCode::InstallExtractFailed,
+                    format!("Failed to create {file_name}: {e}"),
+                ))?;
             std::io::copy(&mut entry, &mut out)
-                .map_err(|e| ProxyError::Install(format!("Failed to extract {file_name}: {e}")))?;
+                .map_err(|e| ProxyError::install(
+                    ErrorCode::InstallExtractFailed,
+                    format!("Failed to extract {file_name}: {e}"),
+                ))?;
         }
 
         if found_binary {
             Ok(())
         } else {
-            Err(ProxyError::Install(
-                "Binary not found in zip archive".into(),
+            Err(ProxyError::install(
+                ErrorCode::InstallBinaryNotFound,
+                "Binary not found in zip archive",
             ))
         }
     }
@@ -209,14 +222,20 @@ impl Installer {
 
         for entry in archive
             .entries()
-            .map_err(|e| ProxyError::Install(format!("Failed to read tar: {e}")))?
+            .map_err(|e| ProxyError::install(
+                ErrorCode::InstallExtractFailed,
+                format!("Failed to read tar: {e}"),
+            ))?
         {
             let mut entry =
-                entry.map_err(|e| ProxyError::Install(format!("Failed to read tar entry: {e}")))?;
+                entry.map_err(|e| ProxyError::install(
+                    ErrorCode::InstallExtractFailed,
+                    format!("Failed to read tar entry: {e}"),
+                ))?;
 
             let path = entry
                 .path()
-                .map_err(|e| ProxyError::Install(e.to_string()))?;
+                .map_err(|e| ProxyError::install(ErrorCode::InstallExtractFailed, e.to_string()))?;
             let file_name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -225,13 +244,17 @@ impl Installer {
             if file_name == binary_name || file_name == "sing-box" {
                 entry
                     .unpack(bin_dir.join(binary_name))
-                    .map_err(|e| ProxyError::Install(format!("Failed to extract binary: {e}")))?;
+                    .map_err(|e| ProxyError::install(
+                        ErrorCode::InstallExtractFailed,
+                        format!("Failed to extract binary: {e}"),
+                    ))?;
                 return Ok(());
             }
         }
 
-        Err(ProxyError::Install(
-            "Binary not found in tar.gz archive".into(),
+        Err(ProxyError::install(
+            ErrorCode::InstallBinaryNotFound,
+            "Binary not found in tar.gz archive",
         ))
     }
 
@@ -249,7 +272,10 @@ impl Installer {
                     .bytes()
                     .await
                     .map(|b| b.to_vec())
-                    .map_err(|e| ProxyError::Install(format!("Failed to read response: {e}")));
+                    .map_err(|e| ProxyError::install(
+                        ErrorCode::InstallDownloadFailed,
+                        format!("Failed to read response: {e}"),
+                    ));
             }
             Ok(resp) => {
                 log::warn!(
@@ -267,17 +293,26 @@ impl Installer {
         match reqwest::get(&ghproxy_url).await {
             Ok(resp) if resp.status().is_success() => {
                 resp.bytes().await.map(|b| b.to_vec()).map_err(|e| {
-                    ProxyError::Install(format!("Failed to read ghproxy response: {e}"))
+                    ProxyError::install(
+                        ErrorCode::InstallDownloadFailed,
+                        format!("Failed to read ghproxy response: {e}"),
+                    )
                 })
             }
-            Ok(resp) => Err(ProxyError::Install(format!(
-                "ghproxy download failed (HTTP {}): {}",
-                resp.status(),
-                resp.text().await.unwrap_or_default().trim().to_string()
-            ))),
-            Err(e) => Err(ProxyError::Install(format!(
-                "All download methods failed. Last error (ghproxy): {e}"
-            ))),
+            Ok(resp) => Err(ProxyError::install(
+                ErrorCode::InstallDownloadFailed,
+                format!(
+                    "ghproxy download failed (HTTP {}): {}",
+                    resp.status(),
+                    resp.text().await.unwrap_or_default().trim().to_string()
+                ),
+            )),
+            Err(e) => Err(ProxyError::install(
+                ErrorCode::InstallDownloadFailed,
+                format!(
+                    "All download methods failed. Last error (ghproxy): {e}"
+                ),
+            )),
         }
     }
 

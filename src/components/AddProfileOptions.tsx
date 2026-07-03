@@ -6,7 +6,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { readText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTranslation } from '@/hooks/useTranslation';
 import type { RustSubscriptionProfile } from '@/store';
-import { mapRustProfile, useAppStore } from '@/store';
+import {mapRustProfile, useAppStore} from '@/store';
+import {isRustError} from '@/types';
+import {getErrorMessage} from '@/lib/errors';
 import * as z from 'zod';
 
 const manualSchema = z.object({
@@ -61,6 +63,14 @@ export function AddProfileOptions({
         success: t('profileAdded'),
         error: (err: unknown) => {
           onProfileError?.(err);
+
+          // Структурированная ошибка из Rust: код → i18n-ключ напрямую.
+          // Если перевода нет — i18next вернёт err.message (англ. dev-текст).
+          if (isRustError(err)) {
+            return t(err.code, {defaultValue: err.message});
+          }
+
+          // Легаси-ошибки (String) и прочее — общий fallback.
           return t('addFailed');
         },
       },
@@ -104,14 +114,15 @@ export function AddProfileOptions({
         throw new Error('invalid config');
       }
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      // getErrorMessage — безопасное извлечение без [object Object]
+      const msg = getErrorMessage(err);
       useAppStore.getState().addLog(`Clipboard error: ${msg}`, 'error', 'subscription');
       invoke('log_message', {
         level: 'error',
         source: 'subscription',
         message: `Clipboard error: ${msg}`,
       }).catch(() => undefined);
-      toast.error(t('clipboardErrMsg'), { description: msg, duration: 4000 });
+      toast.error(t('clipboardErrMsg'), {description: msg, duration: 4000});
     }
   };
 
@@ -136,9 +147,20 @@ export function AddProfileOptions({
           'subscription',
         );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      useAppStore.getState().addLog(`File import error: ${msg}`, 'error', 'subscription');
-      toast.error(msg);
+      const msg = getErrorMessage(err);
+
+      // Only log frontend-side errors (browser file read, etc.).
+      // Backend already logs Rust errors via tracing (import_subscription_content).
+      if (!isRustError(err)) {
+        useAppStore.getState().addLog(`File import error: ${msg}`, 'error', 'subscription');
+      }
+
+      // Тост: локализованное сообщение
+      if (isRustError(err)) {
+        toast.error(t(err.code, {defaultValue: err.message}));
+      } else {
+        toast.error(msg);
+      }
     }
     // Reset input so same file can be re-imported
     e.target.value = '';

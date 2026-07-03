@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Toaster } from 'sonner';
+import { Toaster, toast } from 'sonner';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Loader2, Shield } from 'lucide-react';
+import { useTranslation } from './hooks/useTranslation';
 import { useAppStore } from './store';
 import { i18n } from './i18n';
+import { getErrorMessage } from './lib/errors';
+import { isRustError } from './types';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Onboarding } from './components/screens/Onboarding';
@@ -37,6 +40,7 @@ export default function App() {
   const loadSettings = useAppStore((state) => state.loadSettings);
   const fetchRealIp = useAppStore((state) => state.fetchRealIp);
   const addLog = useAppStore((state) => state.addLog);
+  const { t } = useTranslation();
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -52,7 +56,7 @@ export default function App() {
       })
       .catch((e: unknown) => {
         addLog(
-          `initListener failed: ${e instanceof Error ? e.message : String(e)}`,
+          `initListener failed: ${getErrorMessage(e)}`,
           'warning',
           'system',
         );
@@ -70,18 +74,20 @@ export default function App() {
       void useAppStore.getState().toggleConnection();
     });
     return () => {
-      unlistenPromise.then((fn) => fn());
+      unlistenPromise.then((fn) => fn()).catch(() => {
+        useAppStore.getState().addLog(
+          'Failed to clean up tray listener',
+          'warning',
+          'system',
+        );
+      });
     };
   }, []);
 
   useEffect(() => {
     void Promise.all([
-      loadProfiles().catch(() => {
-        addLog('Failed to load profiles on startup', 'warning', 'subscription');
-      }),
-      loadSettings().catch(() => {
-        addLog('Failed to load settings on startup, using defaults', 'warning', 'settings');
-      }),
+      loadProfiles(),
+      loadSettings(),
       invoke('initialize_app').catch(() => {
         addLog(
           'Background initialization failed (offline?) — app will work without GeoIP',
@@ -91,9 +97,7 @@ export default function App() {
       }),
     ]).then(async () => {
       setIsInitialized(true);
-      await fetchRealIp().catch(() => {
-        addLog('Failed to fetch real IP on startup', 'warning', 'system');
-      });
+      await fetchRealIp();
       const { profiles: loadedProfiles, settings: loadedSettings } = useAppStore.getState();
       addLog(
         `App initialized: ${String(loadedProfiles.length)} profile(s), language: ${loadedSettings.language}`,
@@ -122,8 +126,12 @@ export default function App() {
         const lastUpdated = p.lastUpdated ?? 0;
         if (now - lastUpdated >= intervalMs) {
           updatedCount++;
-          refreshProfile(p.id).catch(() => {
-            addLog(`Auto-refresh failed for profile ${p.id}`, 'warning', 'subscription');
+          refreshProfile(p.id).catch((err: unknown) => {
+            if (isRustError(err)) {
+              toast.error(t(err.code, {defaultValue: err.message}));
+            } else {
+              toast.error(t('autoRefreshFailed'));
+            }
           });
         }
       });

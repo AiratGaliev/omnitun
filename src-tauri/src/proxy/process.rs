@@ -14,7 +14,7 @@
 //   Linux   — prctl(PR_SET_PDEATHSIG, SIGKILL) inside pre_exec.
 //   macOS   — process group kill via process_group(0).
 
-use crate::proxy::ProxyError;
+use crate::proxy::{ErrorCode, ProxyError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -268,13 +268,19 @@ impl ProcessManager {
             if !crate::is_process_alive(pid) {
                 *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = None; // clear stale PID
             } else {
-                return Err(ProxyError::Process("Proxy is already running".into()));
+                return Err(ProxyError::process(
+                    ErrorCode::ProcessAlreadyRunning,
+                    "Proxy is already running",
+                ));
             }
         }
 
         let config_str = config_path
             .to_str()
-            .ok_or_else(|| ProxyError::Process("Invalid config path".into()))?;
+            .ok_or_else(|| ProxyError::process(
+                ErrorCode::ProcessStartFailed,
+                "Invalid config path",
+            ))?;
 
         let new_pid = self.launch(config_str, app).await?;
         *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(new_pid);
@@ -347,13 +353,17 @@ impl ProcessManager {
             std::process::Command::new("kill")
                 .args(["-9", &p.to_string()])
                 .output()
-                .map_err(|e| ProxyError::Process(format!("Failed to kill process {p}: {e}")))?;
+                .map_err(|e| ProxyError::process(
+                    ErrorCode::ProcessKillFailed,
+                    format!("Failed to kill process {p}: {e}"),
+                ))?;
 
             tokio::time::sleep(Duration::from_millis(500)).await;
             if crate::is_process_alive(p) {
-                return Err(ProxyError::Process(format!(
-                    "Could not kill sing-box (PID {p}) even with SIGKILL"
-                )));
+                return Err(ProxyError::process(
+                    ErrorCode::ProcessKillFailed,
+                    format!("Could not kill sing-box (PID {p}) even with SIGKILL"),
+                ));
             }
 
             Ok(())
@@ -364,7 +374,10 @@ impl ProcessManager {
         let binary = self
             .binary_path
             .to_str()
-            .ok_or_else(|| ProxyError::Process("Invalid binary path".into()))?;
+            .ok_or_else(|| ProxyError::process(
+                ErrorCode::ProcessStartFailed,
+                "Invalid binary path",
+            ))?;
 
         #[cfg(windows)]
         {
@@ -393,7 +406,10 @@ impl ProcessManager {
                         .creation_flags(CREATE_NO_WINDOW)
                         .spawn()
                         .map_err(|e| {
-                            ProxyError::Process(format!("Failed to start sing-box: {e}"))
+                            ProxyError::process(
+                                ErrorCode::ProcessStartFailed,
+                                format!("Failed to start sing-box: {e}"),
+                            )
                         })?
                 }
             };
@@ -434,7 +450,10 @@ impl ProcessManager {
 
             let child = cmd
                 .spawn()
-                .map_err(|e| ProxyError::Process(format!("Failed to start sing-box: {e}")))?;
+                .map_err(|e| ProxyError::process(
+                    ErrorCode::ProcessStartFailed,
+                    format!("Failed to start sing-box: {e}"),
+                ))?;
 
             Ok(child.id())
         }

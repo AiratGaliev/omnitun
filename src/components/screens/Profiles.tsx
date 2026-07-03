@@ -5,6 +5,8 @@ import { Edit2, Globe2, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import type { Profile, RefreshProgress } from '@/types.ts';
+import {isRustError} from '@/types.ts';
+import {getErrorMessage} from '@/lib/errors.ts';
 import type { TranslationKey } from '@/i18n.ts';
 import * as z from 'zod';
 import { AddProfileOptions } from '../AddProfileOptions';
@@ -43,8 +45,17 @@ export function Profiles() {
       .then(() => {
         toast.success(t('profileDeleted'));
       })
-      .catch(() => {
-        toast.error(t('deleteFailed'));
+      .catch((err: unknown) => {
+        useAppStore.getState().addLog(
+            `Delete failed: ${getErrorMessage(err)}`,
+            'error',
+            'subscription',
+        );
+        if (isRustError(err)) {
+          toast.error(t(err.code, {defaultValue: err.message}));
+        } else {
+          toast.error(t('deleteFailed'));
+        }
       });
   };
 
@@ -54,8 +65,17 @@ export function Profiles() {
       .then(() => {
         toast.success(`${t('profileStr')}${profile.name}${t('profileUpdated')}`);
       })
-      .catch(() => {
-        toast.error(t('refreshFailed'));
+      .catch((err: unknown) => {
+        useAppStore.getState().addLog(
+            `Refresh failed: ${getErrorMessage(err)}`,
+            'error',
+            'subscription',
+        );
+        if (isRustError(err)) {
+          toast.error(t(err.code, {defaultValue: err.message}));
+        } else {
+          toast.error(t('refreshFailed'));
+        }
       });
   };
 
@@ -130,7 +150,10 @@ interface ProfileItemProps {
   readonly progress: RefreshProgress | null;
   readonly updateProfile: (id: string, data: Partial<Profile>) => void;
   readonly handleRefresh: (profile: Profile) => void;
-  readonly t: (key: TranslationKey) => string;
+  readonly t: (
+      key: TranslationKey | (string & {}),
+      options?: Record<string, unknown>,
+  ) => string;
   readonly editingId: string | null;
   readonly setEditingId: (id: string | null) => void;
   readonly handleDelete: (id: string, name: string) => void;

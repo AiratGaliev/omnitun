@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { ShieldAlert } from 'lucide-react';
+import { useAppStore } from '@/store.ts';
 
 interface Props {
   children: ReactNode;
@@ -20,13 +21,13 @@ export class ErrorBoundary extends Component<Props, State> {
     return { hasError: true, error };
   }
 
-  public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    // Log to console only — no addLog to avoid circular dependency.
-    // Rust backend's panic hook + tracing will catch unhandled promises.
-    console.error(
-      '[ErrorBoundary] Uncaught render error:',
-      error.message,
-      errorInfo.componentStack,
+  public componentDidCatch(error: Error, _errorInfo: ErrorInfo) {
+    // Use store directly — safe even during render crashes since getState()
+    // does not trigger React reconciliation.
+    useAppStore.getState().addLog(
+      `[UI] Render error: ${error.message}`,
+      'warning',
+      'system',
     );
   }
 

@@ -13,12 +13,10 @@ import { useAppStore } from './store';
 // user can see them in the Logs viewer.
 globalThis.addEventListener('unhandledrejection', (event) => {
   const msg = event.reason instanceof Error ? event.reason.message : String(event.reason);
-  console.error('[UI] Unhandled Promise Rejection:', msg);
   useAppStore.getState().addLog(`[UI] Unhandled Promise Rejection: ${msg}`, 'warning', 'system');
 });
 
 globalThis.addEventListener('error', (event) => {
-  console.error('[UI] Uncaught Error:', event.message);
   useAppStore.getState().addLog(`[UI] Uncaught Error: ${event.message}`, 'warning', 'system');
 });
 

@@ -2,7 +2,7 @@
 //   - DNS config uses NEW format: type-based servers instead of legacy address+detour
 //   - Custom DNS preserves new format
 
-use crate::proxy::{ProxyError, ServerProfile};
+use crate::proxy::{ErrorCode, ProxyError, ServerProfile};
 use crate::settings::AppSettings;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -52,10 +52,16 @@ pub fn generate_config(
 ) -> Result<(String, u16), ProxyError> {
     let base_template = include_str!("../../config/base.json");
     let mut config: Value =
-        serde_json::from_str(base_template).map_err(|e| ProxyError::Config(e.to_string()))?;
+        serde_json::from_str(base_template).map_err(|e| ProxyError::config(
+            ErrorCode::ConfigGenerationFailed,
+            e.to_string(),
+        ))?;
 
     if server_profiles.is_empty() {
-        return Err(ProxyError::Config("No server profiles provided".into()));
+        return Err(ProxyError::config(
+            ErrorCode::ConfigNoServers,
+            "No server profiles provided",
+        ));
     }
 
     // Build all outbounds
@@ -119,8 +125,9 @@ pub fn generate_config(
             outbounds.push(proxy_outbounds.into_iter().next().unwrap());
         }
     } else {
-        return Err(ProxyError::Config(
-            "Missing outbounds array in template".into(),
+        return Err(ProxyError::config(
+            ErrorCode::ConfigGenerationFailed,
+            "Missing outbounds array in template",
         ));
     }
 
@@ -335,7 +342,7 @@ pub fn generate_config(
     }
 
     let json_string =
-        serde_json::to_string_pretty(&config).map_err(|e| ProxyError::Config(e.to_string()))?;
+        serde_json::to_string_pretty(&config).map_err(|e| ProxyError::config(ErrorCode::ConfigGenerationFailed, e.to_string()))?;
 
     Ok((json_string, stats_port))
 }
@@ -373,7 +380,7 @@ pub fn generate_kill_switch_config(
         }
     });
 
-    serde_json::to_string_pretty(&config).map_err(|e| ProxyError::Config(e.to_string()))
+    serde_json::to_string_pretty(&config).map_err(|e| ProxyError::config(ErrorCode::ConfigGenerationFailed, e.to_string()))
 }
 
 pub fn write_config(json: &str, config_dir: &Path) -> Result<std::path::PathBuf, ProxyError> {
@@ -394,10 +401,10 @@ pub fn build_outbound(server_profile: &ServerProfile) -> Result<Value, ProxyErro
         "tuic" => Ok(build_tuic(server_profile)),
         "socks" => Ok(build_socks(server_profile)),
         "http" => Ok(build_http(server_profile)),
-        _ => Err(ProxyError::Config(format!(
-            "Unsupported protocol: {}",
-            server_profile.protocol
-        ))),
+        _ => Err(ProxyError::config(
+            ErrorCode::ConfigUnsupportedProtocol,
+            format!("Unsupported protocol: {}", server_profile.protocol),
+        )),
     }
 }
 
@@ -728,11 +735,10 @@ pub fn generate_batch_config(
     use serde_json::json;
 
     if servers.len() != ports.len() {
-        return Err(ProxyError::Config(format!(
-            "servers.len()={} != ports.len()={}",
-            servers.len(),
-            ports.len()
-        )));
+        return Err(ProxyError::config(
+            ErrorCode::ConfigGenerationFailed,
+            format!("servers.len()={} != ports.len()={}", servers.len(), ports.len()),
+        ));
     }
 
     let log_path = test_dir.join("sing-box.log");

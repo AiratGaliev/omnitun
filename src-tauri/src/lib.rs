@@ -12,7 +12,7 @@ use crate::logging::{log, LogLevel, LogSource, Logger};
 use crate::profile::ProfileManager;
 use crate::proxy::cache::ServerCache;
 use crate::proxy::port_pool::PortPool;
-use crate::proxy::{ConnectionStatus, ProxyManager, ServerProfile};
+use crate::proxy::{ConnectionStatus, ErrorCode, ProxyManager, ProxyError, ServerProfile};
 use crate::settings::{AppSettings, SettingsManager};
 use crate::subscription::SubscriptionProfile;
 use serde::Serialize;
@@ -63,7 +63,7 @@ async fn start_proxy(
     routing_mode: String,
     proxy_port: u16,
     alternative_servers: Vec<ServerProfile>,
-) -> Result<u16, String> {
+) -> Result<u16, ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
     let cancel_state = app.state::<StdMutex<CancellationToken>>();
     let cancel = cancel_state.lock().unwrap().clone();
@@ -168,8 +168,13 @@ async fn start_proxy(
             );
 
             let result = match manager.process_pid() {
-                Some(pid) => wait_for_proxy_ready(pid, proxy_port).await,
-                None => Err("no PID".into()),
+                Some(pid) => wait_for_proxy_ready(pid, proxy_port)
+                    .await
+                    .map_err(|e| ProxyError::process(ErrorCode::ProcessNotReachable, e)),
+                None => Err(ProxyError::process(
+                    ErrorCode::ProcessStartFailed,
+                    "no PID after start",
+                )),
             };
             match result {
                 Ok(attempts) => {
@@ -646,21 +651,20 @@ async fn start_proxy(
                     let msg = format!("Proxy not reachable: {e}");
                     tracing::error!(target: "proxy", "{msg}");
                     emit_status(&app, ConnectionStatus::Error(msg.clone()));
-                    Err(msg)
+                    Err(ProxyError::process(ErrorCode::ProcessNotReachable, msg))
                 }
             }
         }
         Err(e) => {
-            let msg = e.to_string();
             log(
                 &app,
                 &logger,
                 LogLevel::Error,
                 LogSource::Proxy,
-                format!("Connection failed: {msg}"),
+                format!("Connection failed: {e}"),
             );
-            emit_status(&app, ConnectionStatus::Error(msg.clone()));
-            Err(msg)
+            emit_status(&app, ConnectionStatus::Error(e.to_string()));
+            Err(e)
         }
     }
 }
@@ -818,7 +822,7 @@ async fn add_subscription(
     state: tauri::State<'_, ProfileState>,
     name: String,
     url: String,
-) -> Result<SubscriptionProfile, String> {
+) -> Result<SubscriptionProfile, ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
     log(
         &app,
@@ -842,15 +846,14 @@ async fn add_subscription(
             Ok(profile)
         }
         Err(e) => {
-            let msg = e.to_string();
             log(
                 &app,
                 &logger,
                 LogLevel::Error,
                 LogSource::Subscription,
-                format!("Failed to add subscription: {msg}"),
+                format!("Failed to add subscription: {e}"),
             );
-            Err(msg)
+            Err(e)
         }
     }
 }
@@ -860,7 +863,7 @@ async fn remove_subscription(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProfileState>,
     id: String,
-) -> Result<(), String> {
+) -> Result<(), ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
 
     let mut mgr = state.manager.lock().await;
@@ -876,15 +879,14 @@ async fn remove_subscription(
             Ok(())
         }
         Err(e) => {
-            let msg = e.to_string();
             log(
                 &app,
                 &logger,
                 LogLevel::Error,
                 LogSource::Subscription,
-                format!("Failed to remove subscription: {msg}"),
+                format!("Failed to remove subscription: {e}"),
             );
-            Err(msg)
+            Err(e)
         }
     }
 }
@@ -1045,7 +1047,7 @@ async fn refresh_subscription(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProfileState>,
     id: String,
-) -> Result<SubscriptionProfile, String> {
+) -> Result<SubscriptionProfile, ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
     log(
         &app,
@@ -1101,15 +1103,14 @@ async fn refresh_subscription(
             Ok(profile)
         }
         Err(e) => {
-            let msg = e.to_string();
             log(
                 &app,
                 &logger,
                 LogLevel::Error,
                 LogSource::Subscription,
-                format!("Failed to refresh subscription: {msg}"),
+                format!("Failed to refresh subscription: {e}"),
             );
-            Err(msg)
+            Err(e)
         }
     }
 }
@@ -1165,7 +1166,10 @@ async fn update_settings(
         *current = new_settings.clone();
     }
     let mgr = settings_mgr.lock().await;
-    mgr.save(&new_settings)?;
+    mgr.save(&new_settings).map_err(|e| {
+        tracing::error!(target: "settings", "Failed to save settings: {e}");
+        e
+    })?;
 
     // Handle startWithWindows
     set_start_on_boot(new_settings.start_with_windows);
@@ -1535,6 +1539,7 @@ async fn get_real_ip(_app: tauri::AppHandle) -> Result<RealIpInfo, String> {
     }
 
     if ip.is_empty() {
+        tracing::error!(target: "system", "get_real_ip: could not determine external IP");
         return Err("Could not determine external IP".into());
     }
 
@@ -1884,11 +1889,15 @@ async fn switch_proxy(proxy_tag: String) -> Result<(), String> {
 
     match client.put(&url).json(&body).send().await {
         Ok(resp) if resp.status().is_success() => Ok(()),
-        Ok(resp) => Err(format!(
-            "Clash API returned HTTP {}",
-            resp.status().as_u16()
-        )),
-        Err(e) => Err(e.to_string()),
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            tracing::error!(target: "proxy", "switch_proxy: Clash API returned HTTP {code}");
+            Err(format!("Clash API returned HTTP {code}"))
+        }
+        Err(e) => {
+            tracing::error!(target: "proxy", "switch_proxy: Clash API request failed: {e}");
+            Err(e.to_string())
+        }
     }
 }
 
@@ -1897,6 +1906,7 @@ async fn switch_proxy(proxy_tag: String) -> Result<(), String> {
 async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
     let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if stats_port == 0 {
+        tracing::error!(target: "proxy", "speed_test: proxy not connected");
         return Err("Proxy not connected".into());
     }
 
@@ -1904,7 +1914,10 @@ async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
         .no_proxy()
         .timeout(Duration::from_secs(10))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            tracing::error!(target: "proxy", "speed_test: failed to build HTTP client: {e}");
+            e.to_string()
+        })?;
 
     let api_url = format!("http://127.0.0.1:{stats_port}");
     let test_url = "http://cp.cloudflare.com/generate_204";
@@ -1914,12 +1927,18 @@ async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
         .get(format!("{api_url}/proxies"))
         .send()
         .await
-        .map_err(|e| format!("Clash API error: {e}"))?;
+        .map_err(|e| {
+            tracing::error!(target: "proxy", "speed_test: Clash API request failed: {e}");
+            format!("Clash API error: {e}")
+        })?;
 
     let groups: serde_json::Value = groups_resp
         .json()
         .await
-        .map_err(|e| format!("Parse error: {e}"))?;
+        .map_err(|e| {
+            tracing::error!(target: "proxy", "speed_test: failed to parse Clash response: {e}");
+            format!("Parse error: {e}")
+        })?;
 
     let mut results = Vec::new();
 
@@ -1967,6 +1986,7 @@ async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
 async fn get_connections() -> Result<Vec<serde_json::Value>, String> {
     let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
     if stats_port == 0 {
+        tracing::error!(target: "proxy", "get_connections: proxy not connected");
         return Err("Proxy not connected".into());
     }
 
@@ -1974,15 +1994,24 @@ async fn get_connections() -> Result<Vec<serde_json::Value>, String> {
         .no_proxy()
         .timeout(Duration::from_secs(3))
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            tracing::error!(target: "proxy", "get_connections: failed to build HTTP client: {e}");
+            e.to_string()
+        })?;
 
     let resp = client
         .get(format!("http://127.0.0.1:{stats_port}/connections"))
         .send()
         .await
-        .map_err(|e| format!("Clash API error: {e}"))?;
+        .map_err(|e| {
+            tracing::error!(target: "proxy", "get_connections: Clash API request failed: {e}");
+            format!("Clash API error: {e}")
+        })?;
 
-    let data: serde_json::Value = resp.json().await.map_err(|e| format!("Parse error: {e}"))?;
+    let data: serde_json::Value = resp.json().await.map_err(|e| {
+        tracing::error!(target: "proxy", "get_connections: failed to parse Clash response: {e}");
+        format!("Parse error: {e}")
+    })?;
 
     let connections = data["connections"].as_array().cloned().unwrap_or_default();
 
@@ -1996,7 +2025,7 @@ async fn import_subscription_content(
     state: tauri::State<'_, ProfileState>,
     name: String,
     content: String,
-) -> Result<SubscriptionProfile, String> {
+) -> Result<SubscriptionProfile, ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
     log(
         &app,
@@ -2007,10 +2036,29 @@ async fn import_subscription_content(
     );
 
     let servers = crate::subscription::parser::parse_subscription(&content)
-        .map_err(|e| format!("Failed to parse subscription: {e}"))?;
+        .map_err(|e| {
+            log(
+                &app,
+                &logger,
+                LogLevel::Error,
+                LogSource::Subscription,
+                format!("Failed to parse imported content: {e}"),
+            );
+            e
+        })?;
 
     if servers.is_empty() {
-        return Err("No servers found in content".into());
+        log(
+            &app,
+            &logger,
+            LogLevel::Error,
+            LogSource::Subscription,
+            "Import failed: no servers found in content".into(),
+        );
+        return Err(ProxyError::subscription(
+            ErrorCode::SubscriptionNoServers,
+            "No servers found in content",
+        ));
     }
 
     let servers = crate::profile::process_servers(&app, servers, "").await;
@@ -2028,7 +2076,7 @@ async fn import_subscription_content(
 
     let mut mgr = state.manager.lock().await;
     mgr.list_mut().push(profile.clone());
-    mgr.save().map_err(|e| e.to_string())?;
+    mgr.save()?;
 
     log(
         &app,
@@ -2047,7 +2095,7 @@ async fn import_subscription_file(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProfileState>,
     file_path: String,
-) -> Result<SubscriptionProfile, String> {
+) -> Result<SubscriptionProfile, ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
     log(
         &app,
@@ -2060,14 +2108,42 @@ async fn import_subscription_file(
     // Read file content
     let content = tokio::fs::read_to_string(&file_path)
         .await
-        .map_err(|e| format!("Failed to read file: {e}"))?;
+        .map_err(|e| {
+            log(
+                &app,
+                &logger,
+                LogLevel::Error,
+                LogSource::Subscription,
+                format!("Failed to read import file: {e}"),
+            );
+            e
+        })?;
 
     // Try to parse as subscription data
     let servers = crate::subscription::parser::parse_subscription(&content)
-        .map_err(|e| format!("Failed to parse subscription: {e}"))?;
+        .map_err(|e| {
+            log(
+                &app,
+                &logger,
+                LogLevel::Error,
+                LogSource::Subscription,
+                format!("Failed to parse imported file content: {e}"),
+            );
+            e
+        })?;
 
     if servers.is_empty() {
-        return Err("No servers found in file".into());
+        log(
+            &app,
+            &logger,
+            LogLevel::Error,
+            LogSource::Subscription,
+            "Import failed: no servers found in file".into(),
+        );
+        return Err(ProxyError::subscription(
+            ErrorCode::SubscriptionNoServers,
+            "No servers found in file",
+        ));
     }
 
     let file_name = std::path::Path::new(&file_path)
@@ -2095,7 +2171,7 @@ async fn import_subscription_file(
     };
 
     mgr.list_mut().push(profile.clone());
-    mgr.save().map_err(|e| e.to_string())?;
+    mgr.save()?;
 
     log(
         &app,

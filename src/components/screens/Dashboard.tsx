@@ -129,18 +129,14 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
 
   const handleSpeedTest = async () => {
     setIsSpeedTesting(true);
-    try {
-      const result = await runSpeedTest();
-      if (result?.delay) {
-        toast.success(`Latency: ${String(result.delay)} ms`);
-      } else {
-        toast.error('Speed test failed');
-      }
-    } catch {
+    const result = await runSpeedTest();
+    if (result?.delay) {
+      toast.success(`Latency: ${String(result.delay)} ms`);
+    } else {
+      addLog('Speed test returned no result', 'warning', 'system');
       toast.error('Speed test failed');
-    } finally {
-      setIsSpeedTesting(false);
     }
+    setIsSpeedTesting(false);
   };
 
   /** Бесшовный реконнект: отключаем → ждём 500ms → включаем. */
@@ -154,21 +150,17 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   };
 
   const handleToggleConnection = async () => {
-    try {
-      await toggleConnection();
-      const freshStatus = useAppStore.getState().status;
-      if (freshStatus === 'disconnected' || freshStatus === 'error') {
-        toast(t('protectionDisabled'));
-      } else {
-        toast.success(`${t('connectedTo')}${activeServer?.name ?? ''}`, {
-          description: t('trafficProtected'),
-        });
-      }
-    } catch (e: unknown) {
-      const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : t('statusError');
-      addLog(`Connection error: ${msg}`, 'error', 'system');
-      toast.error(msg, { description: t('connectionFailedDesc') });
+    await toggleConnection();
+    const freshStatus = useAppStore.getState().status;
+    const freshActiveServer = useAppStore.getState().activeServer;
+    if (freshStatus === 'disconnected') {
+      toast(t('protectionDisabled'));
+    } else if (freshStatus === 'connected') {
+      toast.success(`${t('connectedTo')}${freshActiveServer?.name ?? ''}`, {
+        description: t('trafficProtected'),
+      });
     }
+    // status === 'error' toast is already shown by store.ts toggleConnection
   };
 
   const isConnected = status === 'connected';

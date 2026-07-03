@@ -1,4 +1,4 @@
-use crate::proxy::{ProxyError, ServerProfile};
+use crate::proxy::{ErrorCode, ProxyError, ServerProfile};
 use crate::subscription::SubscriptionProfile;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -54,7 +54,10 @@ impl ProfileManager {
             Ok(json) => {
                 let profiles: Vec<SubscriptionProfile> =
                     serde_json::from_str(&json).map_err(|e| {
-                        ProxyError::Subscription(format!("Failed to parse profiles.json: {e}"))
+                        ProxyError::subscription(
+                            ErrorCode::SubscriptionSaveFailed,
+                            format!("Failed to parse profiles.json: {e}"),
+                        )
                     })?;
                 self.profiles = profiles;
                 Ok(())
@@ -127,12 +130,21 @@ impl ProfileManager {
 
     pub fn save(&self) -> Result<(), ProxyError> {
         let json = serde_json::to_string_pretty(&self.profiles)
-            .map_err(|e| ProxyError::Subscription(format!("Failed to serialize profiles: {e}")))?;
+            .map_err(|e| ProxyError::subscription(
+                ErrorCode::SubscriptionSaveFailed,
+                format!("Failed to serialize profiles: {e}"),
+            ))?;
         let tmp = self.file_path.with_extension("json.tmp");
         std::fs::write(&tmp, &json)
-            .map_err(|e| ProxyError::Subscription(format!("Failed to write temp profiles: {e}")))?;
+            .map_err(|e| ProxyError::subscription(
+                ErrorCode::SubscriptionSaveFailed,
+                format!("Failed to write temp profiles: {e}"),
+            ))?;
         std::fs::rename(&tmp, &self.file_path)
-            .map_err(|e| ProxyError::Subscription(format!("Failed to rename profiles: {e}")))?;
+            .map_err(|e| ProxyError::subscription(
+                ErrorCode::SubscriptionSaveFailed,
+                format!("Failed to rename profiles: {e}"),
+            ))?;
         Ok(())
     }
 
@@ -153,10 +165,10 @@ impl ProfileManager {
         let clean_url = url.trim().to_string();
 
         if self.profiles.iter().any(|p| p.url == clean_url) {
-            return Err(ProxyError::Subscription(format!(
-                "Subscription with URL '{}' already exists",
-                clean_url
-            )));
+            return Err(ProxyError::subscription(
+                ErrorCode::SubscriptionDuplicateUrl,
+                format!("Subscription with URL '{clean_url}' already exists"),
+            ));
         }
 
         let mut servers = if clean_url.starts_with("http://") || clean_url.starts_with("https://") {
@@ -213,7 +225,10 @@ impl ProfileManager {
         let len_before = self.profiles.len();
         self.profiles.retain(|p| p.id != id);
         if self.profiles.len() == len_before {
-            return Err(ProxyError::Subscription("Profile not found".into()));
+            return Err(ProxyError::subscription(
+                ErrorCode::SubscriptionNotFound,
+                "Profile not found",
+            ));
         }
         self.save()?;
         Ok(())
@@ -228,7 +243,10 @@ impl ProfileManager {
             .profiles
             .iter()
             .position(|p| p.id == id)
-            .ok_or_else(|| ProxyError::Subscription("Profile not found".into()))?;
+            .ok_or_else(|| ProxyError::subscription(
+                ErrorCode::SubscriptionNotFound,
+                "Profile not found",
+            ))?;
 
         let url = &self.profiles[idx].url;
         let fetch_result = match url {
@@ -248,8 +266,7 @@ impl ProfileManager {
                     }
                 }
             }
-            _ => crate::subscription::parser::parse_subscription(url)
-                .map_err(|e| ProxyError::Subscription(format!("Parse error: {e}"))),
+            _ => crate::subscription::parser::parse_subscription(url),
         };
 
         // On HTTP/parse error: still bump updated_at so the frontend timer
@@ -280,7 +297,7 @@ impl ProfileManager {
                     .await;
                 }
                 self.save()?;
-                return Err(ProxyError::Subscription(format!("{e}")));
+                return Err(e);
             }
         };
 
@@ -372,8 +389,9 @@ impl ProfileManager {
 
         // Guard: don't overwrite servers with empty list (e.g. content:// URLs)
         if servers.is_empty() {
-            return Err(ProxyError::Subscription(
-                "Refresh returned 0 servers — keeping existing servers".into(),
+            return Err(ProxyError::subscription(
+                ErrorCode::SubscriptionNoServers,
+                "Refresh returned 0 servers — keeping existing servers",
             ));
         }
 

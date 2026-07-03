@@ -1,4 +1,4 @@
-use crate::proxy::ProxyError;
+use crate::proxy::{ErrorCode, ProxyError};
 
 /// Trait so the fetcher can be mocked in tests.
 #[async_trait::async_trait]
@@ -44,12 +44,18 @@ impl SubscriptionFetcher for HttpFetcher {
             .get(url)
             .send()
             .await
-            .map_err(|e| ProxyError::Subscription(format!("HTTP request failed: {e}")))?;
+            .map_err(|e| ProxyError::subscription(
+                ErrorCode::SubscriptionFetchFailed,
+                format!("HTTP request failed: {e}"),
+            ))?;
 
         let body = response
             .text()
             .await
-            .map_err(|e| ProxyError::Subscription(format!("Failed to read response: {e}")))?;
+            .map_err(|e| ProxyError::subscription(
+                ErrorCode::SubscriptionFetchFailed,
+                format!("Failed to read response: {e}"),
+            ))?;
 
         Ok(body)
     }

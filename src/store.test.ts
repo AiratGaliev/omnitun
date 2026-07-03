@@ -138,6 +138,9 @@ function makeRustProfile(
 
 beforeEach(() => {
   mockInvoke.mockReset();
+  // Default: pick_replacement_server returns null (no preference — use first server)
+  // This is consumed by getBestServer() in profile management tests.
+  mockInvoke.mockResolvedValue(null);
   mockListenFns.length = 0;
   // Reset store to initial state
   useAppStore.setState({
@@ -502,10 +505,13 @@ describe('store — profile management', () => {
       ],
     });
     mockInvoke.mockResolvedValueOnce(refreshed);
+    // getBestServer now operates on the post-refresh server list (srv-new-1, srv-new-2)
+    // pick_replacement_server returns the lowest-ping server from the backend
+    mockInvoke.mockResolvedValueOnce({ id: 'srv-new-2' });
     await useAppStore.getState().refreshProfile('prof-1');
 
     const state = useAppStore.getState();
-    // Fastest ping is 30 -> srv-new-2
+    // Fastest ping is 30 → srv-new-2
     expect(state.activeServer?.id).toBe('srv-new-2');
   });
 

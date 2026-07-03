@@ -168,3 +168,42 @@ export interface RefreshProgress {
   failed: number;
   phase: string;
 }
+
+// ─── Rust backend structured errors ─────────────────────────────────────────
+//
+// ProxyError on the Rust side serializes to { code, message } via custom
+// Serialize impl (see src-tauri/src/proxy/mod.rs).
+//
+// `code` is a camelCase string produced by #[serde(rename_all = "camelCase")]
+// on the Rust ErrorCode enum. It matches an i18n key in en.json / ru.json
+// directly — the frontend calls t(err.code, { defaultValue: err.message })
+// without any mapping table.
+//
+// FORWARD COMPATIBILITY:
+//   `code` is typed as `string` (not a union of known codes) so the frontend
+//   gracefully handles codes from a newer backend. If the i18n key is missing,
+//   t() falls back to err.message (English dev text from Rust).
+
+export interface RustError {
+  readonly code: string;
+  readonly message: string;
+}
+
+/**
+ * Type guard: checks if a value is a structured Rust error.
+ * Returns false for:
+ *   - strings (legacy commands returning Result<_, String>)
+ *   - Error instances (JS errors)
+ *   - null/undefined
+ *   - objects missing `code` or `message`
+ */
+export function isRustError(err: unknown): err is RustError {
+  return (
+      typeof err === 'object' &&
+      err !== null &&
+      'code' in err &&
+      'message' in err &&
+      typeof (err as { code: unknown }).code === 'string' &&
+      typeof (err as { message: unknown }).message === 'string'
+  );
+}

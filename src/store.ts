@@ -31,6 +31,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { i18n } from './i18n';
+import {getErrorMessage, localizeError} from './lib/errors';
 import type {
   ConnectionInfo,
   ConnectionStatus,
@@ -430,10 +431,14 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       const result = await invoke<RustSubscriptionProfile>('refresh_subscription', { id });
       const updated = mapRustProfile(result);
 
-      // Compute new active from snapshot; profiles/servers set inside functional set
+      // Build the new server list before getBestServer — so it picks from post-refresh state
       const stateSnap = get();
+      const newProfilesForSelection = stateSnap.profiles.map((p) =>
+        p.id === id ? { ...p, ...updated } : p,
+      );
+      const allServersForSelection = newProfilesForSelection.flatMap((p) => p.servers);
       const newActiveServer = await getBestServer(
-        stateSnap.servers,
+        allServersForSelection,
         stateSnap.settings.autoConnectFastest,
         stateSnap.activeServer?.id,
       );
@@ -490,7 +495,8 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         activeServer: newActive,
         hasOnboarded: profiles.length > 0 || get().hasOnboarded,
       });
-    } catch {
+    } catch (e) {
+      get().addLog(`Failed to load profiles: ${getErrorMessage(e)}`, 'error', 'subscription');
       set({ servers: [], profiles: [] });
     }
   },
@@ -518,10 +524,15 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
             toast.info(i18n.t('ipinfoCached'), { id: toastId });
           }
         } catch (e) {
-          toast.error(`${i18n.t('ipinfoDownloadFailed')}: ${String(e)}`, { id: toastId });
+          toast.error(`${i18n.t('ipinfoDownloadFailed')}: ${getErrorMessage(e)}`, { id: toastId });
         }
       }
-    } catch {
+    } catch (e) {
+      get().addLog(
+          `Failed to save settings: ${getErrorMessage(e)}`,
+          'error',
+          'settings',
+      );
       toast.error('Failed to save settings');
     }
   },
@@ -534,8 +545,12 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         (result as { routingMode: string }).routingMode = 'system-proxy';
       }
       set({ settings: result });
-    } catch {
-      // can't load settings from backend — defaults already set on init
+    } catch (e) {
+      get().addLog(
+        `Failed to load settings: ${getErrorMessage(e)}`,
+        'error',
+        'settings',
+      );
       set({ settingsVersion: get().settingsVersion });
     }
   },
@@ -585,7 +600,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     try {
       const info = await invoke<ExitIpInfo>('outlet_ip');
       set({ exitIp: info });
-    } catch (e) {
+    } catch {
       // Backend already logged the error via tracing
       set({ exitIp: null });
     }
@@ -595,7 +610,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     try {
       const info = await invoke<RealIpInfo>('get_real_ip');
       set({ realIp: info });
-    } catch (e) {
+    } catch {
       // Backend already logged the error via tracing
       set({ realIp: null });
     }
@@ -610,7 +625,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
           : null;
       set({ speedTestResult: best });
       return best;
-    } catch (e) {
+    } catch {
       // Backend already logged the error via tracing
       set({ speedTestResult: null });
       return null;
@@ -670,9 +685,12 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       }
     } catch (e: unknown) {
       set({ status: 'error', _isConnecting: false });
-      const msg = e instanceof Error ? e.message : String(e);
-      // UI-only notification — Rust backend already logged the error via tracing
-      toast.error(msg);
+      // Лог: dev-сообщение (англ., без [object Object])
+      get().addLog(`Connection error: ${getErrorMessage(e)}`, 'error', 'system');
+      // Тост: локализованное сообщение
+      // Для RustError (processNotReachable и др.) — перевод по коду.
+      // Для прочих — connectionFailedDesc.
+      toast.error(localizeError(e, 'connectionFailedDesc'));
     } finally {
       set({ _isConnecting: false });
     }
@@ -685,7 +703,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       if (typeof rawStatus === 'string') {
         set({ status: rawStatus as ConnectionStatus });
       }
-    } catch (e: unknown) {
+    } catch {
       // Backend already logged the error via tracing
       set({ status: 'disconnected' });
     }
@@ -712,6 +730,20 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
           status: newStatus,
           connectedAt: newStatus === 'connected' ? Date.now() : null,
         });
+        // Warn about disabled Kill Switch on first connect
+        if (newStatus === 'connected' && !get().settings.killSwitch) {
+          toast.warning(i18n.t('killSwitchOffWarning'), {
+            description: i18n.t('killSwitchOffWarningDesc'),
+            duration: 8000,
+            action: {
+              label: i18n.t('enable'),
+              onClick: () => {
+                get().updateSettings({ killSwitch: true });
+                void get().saveSettings();
+              },
+            },
+          });
+        }
       }
     });
 
