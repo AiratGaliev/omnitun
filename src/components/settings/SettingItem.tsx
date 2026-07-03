@@ -5,7 +5,9 @@ import { useTranslation } from '@/hooks/useTranslation.ts';
 
 interface SettingItemProps {
   readonly icon: ReactNode;
-  readonly title: string;
+  readonly title: ReactNode;
+  /** Plain text for log messages and toast notifications. Falls back to String(title). */
+  readonly titleText?: string;
   readonly description: string;
   readonly checked: boolean;
   readonly disabled?: boolean;
@@ -15,6 +17,7 @@ interface SettingItemProps {
 export function SettingItem({
   icon,
   title,
+  titleText,
   description,
   checked,
   disabled,
@@ -26,9 +29,12 @@ export function SettingItem({
   const handleChange = (v: boolean) => {
     if (disabled) return;
     onChange(v);
-    addLog(`"${title}" ${v ? 'enabled' : 'disabled'}`, 'info', 'settings');
-    if (v) toast.success(`${title} ${t('enabled')}`);
-    else toast(`${title} ${t('disabled')}`);
+    const label = titleText ?? (typeof title === 'string' ? title : '');
+    if (label) {
+      addLog(`"${label}" ${v ? 'enabled' : 'disabled'}`, 'info', 'settings');
+      if (v) toast.success(`${label} ${t('enabled')}`);
+      else toast(`${label} ${t('disabled')}`);
+    }
   };
 
   return (
@@ -41,7 +47,9 @@ export function SettingItem({
           {icon}
         </div>
         <div>
-          <h3 className="font-semibold text-sm text-zinc-100 tracking-wide">{title}</h3>
+          <h3 className="font-semibold text-sm text-zinc-100 tracking-wide flex items-center gap-2">
+            {title}
+          </h3>
           <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed max-w-xl">{description}</p>
         </div>
       </div>

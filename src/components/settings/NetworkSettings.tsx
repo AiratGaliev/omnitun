@@ -20,8 +20,18 @@ export function NetworkSettings() {
       />
       <SettingItem
         icon={<PowerOff size={20} className="text-red-400" />}
-        title={t('killSwitch')}
+        title={
+          <span className="flex items-center gap-2">
+            {t('killSwitch')}
+            {!settings.killSwitch && (
+              <span className="text-[9px] font-bold uppercase tracking-wider bg-red-500/15 text-red-400 px-1.5 py-0.5 rounded select-none">
+                {t('killSwitchRecommended')}
+              </span>
+            )}
+          </span>
+        }
         description={t('killSwitchDesc')}
+        titleText={t('killSwitch')}
         checked={settings.killSwitch}
         onChange={(checked) => {
           updateSettings({ killSwitch: checked });
@@ -43,7 +53,7 @@ export function NetworkSettings() {
               <Network size={20} className="text-cyan-400" />
             </div>
             <div>
-              <h3 className="font-semibold text-sm text-zinc-100 tracking-wide">
+              <h3 className="font-semibold text-sm text-zinc-100 tracking-wide flex items-center gap-2">
                 {t('customDns')}
               </h3>
               <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed">{t('customDnsDesc')}</p>
@@ -75,9 +85,18 @@ export function NetworkSettings() {
               onChange={(e) => {
                 updateSettings({ dnsAddress: e.target.value });
               }}
-              placeholder="e.g. 1.1.1.1 or 8.8.8.8"
-              className="w-full max-w-62.5 bg-zinc-950/50 border border-white/10 rounded-xl px-4 py-2.5 text-sm font-mono text-zinc-300 focus:border-emerald-500/50 focus:ring-2 focus:ring-emerald-500/30 focus:outline-none shadow-inner transition-all"
+              placeholder="1.1.1.1"
+              className={`w-full max-w-62.5 bg-zinc-950/50 border ${
+                settings.customDns && !settings.dnsAddress
+                  ? 'border-amber-500/30 focus:border-amber-500/50 focus:ring-amber-500/30'
+                  : 'border-white/10 focus:border-emerald-500/50 focus:ring-emerald-500/30'
+              } rounded-xl px-4 py-2.5 text-sm font-mono text-zinc-300 focus:outline-none focus:ring-2 shadow-inner transition-all`}
             />
+            {!settings.dnsAddress && (
+              <p className="text-xs text-zinc-500 mt-1.5 ml-1 leading-relaxed">
+                {t('customDnsHint')}
+              </p>
+            )}
           </div>
         )}
       </div>

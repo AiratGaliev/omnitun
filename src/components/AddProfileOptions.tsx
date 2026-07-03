@@ -114,14 +114,8 @@ export function AddProfileOptions({
         throw new Error('invalid config');
       }
     } catch (err) {
-      // getErrorMessage — безопасное извлечение без [object Object]
       const msg = getErrorMessage(err);
       useAppStore.getState().addLog(`Clipboard error: ${msg}`, 'error', 'subscription');
-      invoke('log_message', {
-        level: 'error',
-        source: 'subscription',
-        message: `Clipboard error: ${msg}`,
-      }).catch(() => undefined);
       toast.error(t('clipboardErrMsg'), {description: msg, duration: 4000});
     }
   };

@@ -45,11 +45,11 @@ impl Default for AppSettings {
         Self {
             accept_terms: false,
             routing_mode: "system-proxy".to_string(),
-            proxy_port: 1080,
+            proxy_port: 5050,
             bypass_ru: true,
             start_with_windows: true,
             auto_connect_fastest: true,
-            kill_switch: false,
+            kill_switch: true,
             allow_lan: true,
             custom_dns: false,
             dns_address: "1.1.1.1".to_string(),
