@@ -214,5 +214,9 @@
   "ipinfoStep3": "Copy your personal API token from the dashboard",
   "ipinfoStep4": "Paste it above — the app will download the GeoIP database automatically",
   "ipinfoWhy": "The token is used only to download and periodically update the ipinfo_lite.mmdb database. Your token stays on-device and is never sent anywhere.",
-  "ipinfoTokenRemoved": "IPinfo token removed. GeoIP database will no longer be updated."
-}
+  "ipinfoTokenRemoved": "IPinfo token removed. GeoIP database will no longer be updated.",
+  "speedBps": "B/s",
+  "speedKbps": "KB/s",
+  "speedMbps": "MB/s",
+  "speedGbps": "GB/s"
+  }

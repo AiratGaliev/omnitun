@@ -551,7 +551,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
 
   loadSettings: async () => {
     try {
-      const result = await invoke<Settings>('get_settings');
+      const result = await invoke<Settings | null>('get_settings');
       if (result) {
         set({ settings: result });
       }

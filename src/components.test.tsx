@@ -17,7 +17,6 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { SegmentedControl } from './components/SegmentedControl';
 import { SettingItem } from './components/settings/SettingItem';
 import App from './App';
-import type { Settings } from './types';
 
 const mockInvoke = vi.hoisted(() => vi.fn<(...args: unknown[]) => unknown>());
 
@@ -335,7 +334,7 @@ describe('Full App Rendering', () => {
       if (cmd === 'get_settings') {
         return Promise.resolve({
           ...useAppStore.getState().settings,
-        } as Settings);
+        });
       }
       return Promise.resolve(undefined);
     });

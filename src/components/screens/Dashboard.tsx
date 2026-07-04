@@ -65,6 +65,20 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     return `${h}:${m}:${s}`;
   };
 
+  const formatSpeed = (mbs: number): { value: string; unit: string } => {
+    const bps = mbs * 1_048_576; // Rust backend sends MB/s, convert to B/s
+    if (bps >= 1_073_741_824) {
+      return { value: (bps / 1_073_741_824).toFixed(1), unit: t('speedGbps') };
+    }
+    if (bps >= 1_048_576) {
+      return { value: (bps / 1_048_576).toFixed(1), unit: t('speedMbps') };
+    }
+    if (bps >= 1024) {
+      return { value: (bps / 1024).toFixed(1), unit: t('speedKbps') };
+    }
+    return { value: bps.toFixed(1), unit: t('speedBps') };
+  };
+
   const [isServerDropdownOpen, setIsServerDropdownOpen] = useState(false);
   const [isSpeedTesting, setIsSpeedTesting] = useState(false);
   const [sessionDuration, setSessionDuration] = useState<string>(() =>
@@ -183,7 +197,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
         </div>
       </header>
 
-      <div className="flex-1 flex flex-row gap-8 lg:gap-12 items-start justify-center w-full max-w-5xl mx-auto">
+      <div className="flex-1 flex flex-row gap-8 lg:gap-12 items-start justify-center w-full mx-auto">
         {servers.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-5 bg-zinc-900/30 border border-white/5 p-12 rounded-3xl backdrop-blur-sm w-full max-w-lg">
             <div className="w-20 h-20 bg-white/5 rounded-2xl flex items-center justify-center shadow-inner">
@@ -221,10 +235,10 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                       }
                       setIsServerDropdownOpen(!isServerDropdownOpen);
                     }}
-                    className={`w-full px-5 py-3 bg-zinc-900/60 hover:bg-zinc-800/80 backdrop-blur-xl transition-all rounded-2xl border border-white/10 flex items-center justify-between gap-3 shadow-lg ${settings.autoConnectFastest ? 'opacity-80 cursor-default' : ''}`}
+                    className={`w-full px-5 py-3 h-13 bg-zinc-900/60 hover:bg-zinc-800/80 backdrop-blur-xl transition-all rounded-2xl border border-white/10 flex items-center justify-between gap-3 shadow-lg ${settings.autoConnectFastest ? 'opacity-80 cursor-default' : ''}`}
                   >
                     <div className="flex items-center gap-3 overflow-hidden w-full min-w-0">
-                      <div className="flex items-center gap-1 shrink-0">
+                      <div className="flex items-center gap-1 shrink-0 h-7">
                         {activeServer?.exitFlag &&
                         activeServer.flag &&
                         activeServer.exitServer !== activeServer.server ? (
@@ -269,8 +283,8 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                       <div
                         className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_10px_rgba(16,185,129,0.8)]' : 'bg-zinc-600'}`}
                       />
-                      <span className="text-xs font-mono text-zinc-400 w-10 text-right">
-                        {activeServer?.ping} ms
+                      <span className="text-xs font-mono text-zinc-400 w-12 text-right truncate">
+                        {activeServer?.ping ?? '-'}ms
                       </span>
                       <ChevronDown
                         size={16}
@@ -317,14 +331,14 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                   }
                                 }}
                                 disabled={status === 'connecting'}
-                                className={`flex items-center justify-between p-2.5 rounded-xl transition-all w-full text-left ${
+                                className={`flex items-center justify-between p-2.5 min-h-11 rounded-xl transition-all w-full text-left ${
                                   activeServer?.id === server.id
                                     ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20'
                                     : 'hover:bg-white/5 text-zinc-300 border border-transparent'
                                 }`}
                               >
                                 <div className="flex items-center gap-3 overflow-hidden w-full min-w-0">
-                                  <div className="flex items-center gap-1 shrink-0">
+                                  <div className="flex items-center gap-1 shrink-0 h-7">
                                     {server.exitFlag &&
                                     server.flag &&
                                     server.exitServer !== server.server ? (
@@ -425,7 +439,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                             : t('proxyModeDesc')}
                         </p>
                         {/* Proxy port is always shown — both routing modes use a proxy port */}
-                        <motion.div className="flex items-center justify-between gap-3 mt-2 bg-zinc-900/80 w-[150px] mx-auto rounded-xl border border-white/10 p-1.5 px-4 transition-all shadow-inner focus-within:ring-2 focus-within:ring-emerald-500/30 focus-within:border-emerald-500/50">
+                        <motion.div className="flex items-center justify-between gap-3 mt-2 bg-zinc-900/80 w-37.5 mx-auto rounded-xl border border-white/10 p-1.5 px-4 transition-all shadow-inner focus-within:ring-2 focus-within:ring-emerald-500/30 focus-within:border-emerald-500/50">
                           <span className="text-[10px] text-zinc-500 font-semibold tracking-wide uppercase">
                             {t('proxyPort')}
                           </span>
@@ -470,13 +484,13 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                   onClick={() => void handleToggleConnection()}
                   disabled={isConnecting}
                   className={`relative z-10 w-44 h-44 rounded-full flex flex-col items-center justify-center transition-all duration-500 group
-                    ${isConnected ? 'bg-gradient-to-b from-zinc-800 to-zinc-900 border-2 border-emerald-500/80 shadow-[0_0_50px_-10px_rgba(16,185,129,0.4)]' : 'bg-gradient-to-b from-zinc-800 to-zinc-900 border-2 border-white/5 shadow-2xl hover:border-white/10'}
+                    ${isConnected ? 'bg-linear-to-b from-zinc-800 to-zinc-900 border-2 border-emerald-500/80 shadow-[0_0_50px_-10px_rgba(16,185,129,0.4)]' : 'bg-linear-to-b from-zinc-800 to-zinc-900 border-2 border-white/5 shadow-2xl hover:border-white/10'}
                     ${isConnecting ? 'animate-pulse border-blue-500/80 shadow-[0_0_40px_-10px_rgba(59,130,246,0.4)]' : ''}
                     ${status === 'error' ? 'border-red-500/80 shadow-[0_0_40px_-10px_rgba(239,68,68,0.4)]' : ''}
                   `}
                 >
                   <div
-                    className={`absolute inset-0 rounded-full bg-gradient-to-tr opacity-20 transition-opacity duration-500 ${isConnected ? 'from-emerald-500 to-transparent' : 'from-white/5 to-transparent'}`}
+                    className={`absolute inset-0 rounded-full bg-linear-to-tr opacity-20 transition-opacity duration-500 ${isConnected ? 'from-emerald-500 to-transparent' : 'from-white/5 to-transparent'}`}
                   />
                   {isConnected ? (
                     <>
@@ -528,7 +542,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     >
                       {/* Neatly grouped IP Pill */}
                       {activeServer && (
-                        <div className="flex flex-col items-center bg-zinc-900/50 border border-white/5 rounded-xl px-4 py-2 shadow-inner w-full max-w-[280px]">
+                        <div className="flex flex-col items-center bg-zinc-900/30 border border-white/5 rounded-xl px-4 py-2 shadow-inner w-full">
                           {/* Row 1: country info */}
                           <div className="flex items-center gap-1.5 text-xs text-zinc-300 font-medium min-w-0 w-full justify-center">
                             <Globe size={12} className="text-emerald-500 shrink-0" />
@@ -600,7 +614,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                       exit={{ opacity: 0, y: -10 }}
                       className="flex flex-col items-center text-center w-full"
                     >
-                      <div className="flex flex-col items-center bg-zinc-900/30 border border-white/5 rounded-xl px-4 py-2 shadow-inner w-full max-w-[200px]">
+                      <div className="flex flex-col items-center bg-zinc-900/30 border border-white/5 rounded-xl px-4 py-2 shadow-inner w-full">
                         <div className="flex items-center gap-1.5 text-xs text-zinc-300 font-medium min-w-0 w-full justify-center">
                           <Globe size={12} className="text-zinc-500 shrink-0" />
                           {realIp.flag && (
@@ -634,7 +648,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest mb-3">
                   {t('protocolStatus')}
                 </p>
-                <div className="h-[24px] flex items-center justify-between">
+                <div className="h-6 flex items-center justify-between">
                   <span className="text-sm font-semibold text-zinc-200 truncate pr-2 min-w-0">
                     {isConnected
                       ? activeServer?.protocol
@@ -655,30 +669,30 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest mb-3">
                   {t('networkTraffic')}
                 </p>
-                <div className="h-[84px] flex flex-col justify-end">
+                <div className="h-21 flex flex-col justify-end">
                   {isConnected ? (
                     <>
                       <div className="flex justify-between items-end gap-3">
                         <div className="flex flex-col w-24 min-w-0">
                           <span className="text-emerald-400 font-mono text-xl font-medium tracking-tight truncate">
-                            {speeds.down.toFixed(1)}
+                            {formatSpeed(speeds.down).value}
                           </span>
                           <span className="text-[10px] text-zinc-500 uppercase tracking-wider mt-0.5 truncate">
-                            MB/s {t('down')}
+                            {formatSpeed(speeds.down).unit} {t('down')}
                           </span>
                         </div>
                         <div className="flex flex-col items-end w-24 min-w-0">
                           <span className="text-blue-400 font-mono text-xl font-medium tracking-tight truncate">
-                            {speeds.up.toFixed(1)}
+                            {formatSpeed(speeds.up).value}
                           </span>
                           <span className="text-[10px] text-zinc-500 uppercase tracking-wider mt-0.5 truncate">
-                            MB/s {t('up')}
+                            {formatSpeed(speeds.up).unit} {t('up')}
                           </span>
                         </div>
                       </div>
                       {/* Sparkline */}
                       {sparklineData.length >= 2 && (
-                        <div className="mt-2 flex justify-center opacity-60 h-[30px]">
+                        <div className="mt-2 flex justify-center opacity-60 h-7.5">
                           <svg
                             width="120"
                             height="30"
@@ -712,7 +726,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 <p className="text-zinc-500 text-[10px] font-bold uppercase tracking-widest mb-3">
                   {t('smartRouting')}
                 </p>
-                <div className="h-[76px] flex flex-col justify-between">
+                <div className="h-19 flex flex-col justify-between">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-3 overflow-hidden min-w-0">
                       <div
@@ -754,7 +768,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                         </span>
                       </motion.button>
                     ) : (
-                      <div className="h-[36px]" /> // Placeholder
+                      <div className="h-9" /> // Placeholder
                     )}
                   </AnimatePresence>
                 </div>
