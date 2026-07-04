@@ -6,6 +6,21 @@ use std::time::{Duration, SystemTime};
 
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 
+/// Current UI locale for city name localisation (set from AppSettings on init).
+/// MaxMind GeoLite2-City supports: de, en, es, fr, ja, pt-BR, ru, zh-CN.
+static LOCALE: OnceLock<String> = OnceLock::new();
+
+/// Set the locale for city name localisation. Call during app initialization
+/// from the frontend's language setting. Falls back to "en" if not set.
+pub fn set_locale(locale: &str) {
+    let _ = LOCALE.set(locale.to_string());
+}
+
+/// Get current locale or default to "en".
+fn current_locale() -> &'static str {
+    LOCALE.get().map_or("en", |l| l.as_str())
+}
+
 /// Lazily-initialized MaxMind GeoLite2 City reader.
 static CITY_READER: OnceLock<maxminddb::Reader<Vec<u8>>> = OnceLock::new();
 /// Lazily-initialized MaxMind GeoLite2 ASN reader.
@@ -863,7 +878,13 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
                 .city
                 .as_ref()
                 .and_then(|c| c.names.as_ref())
-                .and_then(|n| n.get("en").map(|s| s.to_string()))
+                .and_then(|n| {
+                    // Пробуем запрошенную локаль (ru, de, fr...),
+                    // fallback на "en" если перевод отсутствует.
+                    n.get(current_locale())
+                        .or_else(|| n.get("en"))
+                        .map(|s| s.to_string())
+                })
                 .unwrap_or_default();
 
             // Fallback country: только если ipinfo Lite не дал

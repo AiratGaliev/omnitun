@@ -552,18 +552,21 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                 CDN
                               </span>
                             )}
-                            {!activeServer.behindCdn && exitIp && (
+                            {!activeServer.behindCdn && (exitIp ?? activeServer.exitServer) && (
                               <>
                                 <span className="text-zinc-600 shrink-0">→</span>
-                                {exitIp.flag && (
-                                  <FlagDisplay code={exitIp.flag} className="text-xs shrink-0" />
+                                {(exitIp?.flag ?? activeServer.exitFlag) && (
+                                  <FlagDisplay
+                                    code={exitIp?.flag ?? activeServer.exitFlag}
+                                    className="text-xs shrink-0"
+                                  />
                                 )}
                                 <span className="truncate">
                                   {getExitIpDisplayName(
-                                    {
-                                      country_name: exitIp.country_name,
-                                      flag: exitIp.flag,
-                                      server: exitIp.server,
+                                    exitIp ?? {
+                                      server: activeServer.exitServer,
+                                      flag: activeServer.exitFlag,
+                                      country_name: activeServer.exitCountryName,
                                     },
                                     i18n.language,
                                   )}
@@ -575,11 +578,14 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                           <div className="flex items-center gap-1.5 text-[11px] text-zinc-500 font-mono min-w-0 w-full justify-center mt-0.5">
                             <span className="truncate">{activeServer.server}</span>
                             {!activeServer.behindCdn &&
-                              exitIp &&
-                              exitIp.server !== activeServer.server && (
+                              (exitIp ?? activeServer.exitServer) &&
+                              (exitIp?.server ?? activeServer.exitServer) !==
+                                activeServer.server && (
                                 <>
                                   <span className="text-zinc-700 shrink-0">·</span>
-                                  <span className="truncate">{exitIp.server}</span>
+                                  <span className="truncate">
+                                    {exitIp?.server ?? activeServer.exitServer}
+                                  </span>
                                 </>
                               )}
                           </div>

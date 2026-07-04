@@ -2268,6 +2268,12 @@ async fn initialize_app(
         .map(|s| s.try_lock().ok().map(|g| g.ipinfo_token.clone()))
         .flatten()
         .unwrap_or_default();
+    // Set locale for city name localisation (MaxMind City supports en/ru/etc.)
+    if let Some(settings_state) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
+        if let Ok(guard) = settings_state.try_lock() {
+            crate::proxy::geoip::set_locale(&guard.language);
+        }
+    }
     // U7: Cleanup stale tmp files from previous sessions before downloading.
     crate::proxy::geoip::cleanup_stale_tmp_files();
     crate::proxy::geoip::ensure_downloaded(&geo_dir, &ipinfo_token).await?;

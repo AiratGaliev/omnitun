@@ -45,6 +45,7 @@ import type {
   Settings,
   SpeedTestResult,
 } from './types';
+import { getCountryName } from './lib/countryNames';
 
 interface StatusPayload {
   status: string | { error: string };
@@ -587,13 +588,27 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   },
 
   fetchExitIp: async () => {
-    try {
-      const info = await invoke<ExitIpInfo>('outlet_ip');
-      set({ exitIp: info });
-    } catch {
-      // Backend already logged the error via tracing
-      set({ exitIp: null });
+    const maxRetries = 3;
+    const retryDelayMs = 1000;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        const info = await invoke<ExitIpInfo>('outlet_ip');
+        if (info.server) {
+          set({ exitIp: info });
+          return;
+        }
+      } catch {
+        // Clash API may not be ready yet — wait and retry
+      }
+
+      if (attempt < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+      }
     }
+
+    // All retries failed — keep exitIp as null.
+    // The UI will use activeServer.exitServer as fallback.
   },
 
   fetchRealIp: async () => {
@@ -661,6 +676,22 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
           routingMode: settings.routingMode,
           proxyPort: settings.proxyPort,
         });
+
+        // Сразу после успешного старта прокси устанавливаем exitIp из данных
+        // батч-тестирования (activeServer.exitServer/exitFlag и т.д.).
+        // Это даёт мгновенный рендер outlet IP, пока fetchExitIp не получил
+        // живые данные от Clash API. Когда fetchExitIp вернёт ответ — перетрёт.
+        if (activeServer?.exitServer) {
+          set({
+            exitIp: {
+              server: activeServer.exitServer,
+              flag: activeServer.exitFlag ?? '',
+              country_name: activeServer.exitCountryName ?? '',
+              city_name: activeServer.exitCityName ?? '',
+              proxy_tag: '',
+            },
+          });
+        }
 
         // Save the actual port (may differ if port fallback was triggered)
         if (actualPort !== settings.proxyPort) {
@@ -788,8 +819,6 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   },
 }));
 
-import { getCountryName } from './lib/countryNames';
-
 /**
  * Get display name for a server, with localized country name.
  *
@@ -803,31 +832,26 @@ import { getCountryName } from './lib/countryNames';
  * @returns display name: 'Country, City' | 'Country' | original_name | 'host:port'
  */
 export function getServerDisplayName(
-  server: {
-    countryName?: string | null;
-    cityName?: string | null;
-    flag?: string | null;
-    name?: string;
-    server?: string;
-    port?: number;
-  } | null | undefined,
+  server:
+    | {
+        countryName?: string | null;
+        flag?: string | null;
+        name?: string;
+        server?: string;
+        port?: number;
+      }
+    | null
+    | undefined,
   locale = 'en',
 ): string {
   if (!server) return '';
   // 1. Если есть flag (country_code) — локализуем через i18n-iso-countries
   //    Всегда, даже если countryName пришёл с бэкенда.
   if (server.flag && server.flag.length > 0) {
-    const countryName = getCountryName(server.flag, locale);
-    if (server.cityName && server.cityName.length > 0) {
-      return `${countryName}, ${server.cityName}`;
-    }
-    return countryName;
+    return getCountryName(server.flag, locale);
   }
   // 2. Fallback на countryName с бэкенда (без локализации, только English)
   if (server.countryName && server.countryName.length > 0) {
-    if (server.cityName && server.cityName.length > 0) {
-      return `${server.countryName}, ${server.cityName}`;
-    }
     return server.countryName;
   }
   // 3. Fallback на name (display_name из бэкенда или original_name)
@@ -843,28 +867,23 @@ export function getServerDisplayName(
  * Аналогично getServerDisplayName — всегда локализует через flag.
  */
 export function getExitIpDisplayName(
-  exitIp: {
-    server?: string | null;
-    country_name?: string | null;
-    city_name?: string | null;
-    flag?: string | null;
-  } | null | undefined,
+  exitIp:
+    | {
+        server?: string | null;
+        country_name?: string | null;
+        flag?: string | null;
+      }
+    | null
+    | undefined,
   locale = 'en',
 ): string {
   if (!exitIp) return '';
   // 1. flag доступен — локализуем через i18n-iso-countries
   if (exitIp.flag && exitIp.flag.length > 0) {
-    const countryName = getCountryName(exitIp.flag, locale);
-    if (exitIp.city_name && exitIp.city_name.length > 0) {
-      return `${countryName}, ${exitIp.city_name}`;
-    }
-    return countryName;
+    return getCountryName(exitIp.flag, locale);
   }
   // 2. Fallback на country_name с бэкенда (English)
   if (exitIp.country_name && exitIp.country_name.length > 0) {
-    if (exitIp.city_name && exitIp.city_name.length > 0) {
-      return `${exitIp.country_name}, ${exitIp.city_name}`;
-    }
     return exitIp.country_name;
   }
   // 3. Fallback на server IP
