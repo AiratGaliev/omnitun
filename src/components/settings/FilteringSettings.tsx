@@ -1,29 +1,18 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import { CloudOff, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import * as z from 'zod';
 import { SettingItem } from './SettingItem';
+import { getAllCountries } from '@/lib/countryNames';
+import { i18n } from '@/i18n.ts';
 
 const countrySchema = z.object({
   code: z.string().min(2).max(3),
   name: z.string().min(2),
   flag: z.string().min(1),
 });
-
-const DEFAULT_COUNTRIES = [
-  { code: 'US', name: 'United States', flag: '🇺🇸' },
-  { code: 'DE', name: 'Germany', flag: '🇩🇪' },
-  { code: 'NL', name: 'Netherlands', flag: '🇳🇱' },
-  { code: 'FR', name: 'France', flag: '🇫🇷' },
-  { code: 'GB', name: 'United Kingdom', flag: '🇬🇧' },
-  { code: 'TR', name: 'Turkey', flag: '🇹🇷' },
-  { code: 'PL', name: 'Poland', flag: '🇵🇱' },
-  { code: 'FI', name: 'Finland', flag: '🇫🇮' },
-  { code: 'SG', name: 'Singapore', flag: '🇸🇬' },
-  { code: 'JP', name: 'Japan', flag: '🇯🇵' },
-];
 
 export function FilteringSettings() {
   const { settings, updateSettings, addLog } = useAppStore();
@@ -33,7 +22,19 @@ export function FilteringSettings() {
   const [newName, setNewName] = useState('');
   const [newFlag, setNewFlag] = useState('');
 
-  const availableCountries = [...DEFAULT_COUNTRIES, ...settings.customCountries];
+  /**
+   * Get all ~250 countries localized via i18n-iso-countries (no hardcode).
+   * Replaces the old DEFAULT_COUNTRIES constant (10 hardcoded countries).
+   */
+  const isoCountries = useMemo(() => {
+    return getAllCountries(i18n.language).map(({ code, name }) => ({
+      code,
+      name,
+      flag: code,
+    }));
+  }, []);
+
+  const availableCountries = [...isoCountries, ...settings.customCountries];
 
   const hasAllowed = settings.allowedCountries.length > 0;
   const hasBlocked = settings.blockedCountries.length > 0;

@@ -81,16 +81,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // initialize_app fires independently — if it fails, the app still
+    // loads profiles/settings and shows the UI (limited GeoIP without DB).
+    // Backend logs initialize_app errors via tracing::error! — no frontend
+    // duplicate needed.
+    void invoke('initialize_app');
+
     void Promise.all([
       loadProfiles(),
       loadSettings(),
-      invoke('initialize_app').catch(() => {
-        addLog(
-          'Background initialization failed (offline?) — app will work without GeoIP',
-          'warning',
-          'system',
-        );
-      }),
     ]).then(async () => {
       setIsInitialized(true);
       await fetchRealIp();

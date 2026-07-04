@@ -675,8 +675,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       }
     } catch (e: unknown) {
       set({ status: 'error', _isConnecting: false });
-      // Лог: dev-сообщение (англ., без [object Object])
-      get().addLog(`Connection error: ${getErrorMessage(e)}`, 'error', 'system');
+      // Backend already logged the error via tracing::error!
       // Тост: локализованное сообщение
       // Для RustError (processNotReachable и др.) — перевод по коду.
       // Для прочих — connectionFailedDesc.
@@ -766,11 +765,12 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     // switches to an alternative outbound. Passes exact server ID (no index guessing).
     const unlistenFailover = await listen<string>('failover-occurred', (event) => {
       const newServerId = event.payload;
-      const { servers, activeServer, addLog, fetchExitIp } = get();
+      const { servers, activeServer, fetchExitIp } = get();
       if (activeServer?.id !== newServerId) {
         const newServer = servers.find((s) => s.id === newServerId);
         if (newServer) {
-          addLog(`Seamless failover: Switched to ${newServer.name}`, 'success', 'system');
+          // Backend already logged the failover via tracing::info!
+          // ("Seamless failover detected: {current_tag} -> {now_tag}")
           set({ activeServer: newServer });
           void fetchExitIp();
         }
@@ -787,3 +787,89 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     };
   },
 }));
+
+import { getCountryName } from './lib/countryNames';
+
+/**
+ * Get display name for a server, with localized country name.
+ *
+ * Всегда использует getCountryName(flag, locale) для локализации,
+ * даже когда countryName пришёл с бэкенда (ipinfo Lite / MaxMind City).
+ * countryName используется как fallback, если flag отсутствует.
+ * Города не локализуются — MaxMind отдаёт их по-английски.
+ *
+ * @param server — server profile (любой объект с countryName/flag/etc.)
+ * @param locale — current i18next language ('en' | 'ru')
+ * @returns display name: 'Country, City' | 'Country' | original_name | 'host:port'
+ */
+export function getServerDisplayName(
+  server: {
+    countryName?: string | null;
+    cityName?: string | null;
+    flag?: string | null;
+    name?: string;
+    server?: string;
+    port?: number;
+  } | null | undefined,
+  locale = 'en',
+): string {
+  if (!server) return '';
+  // 1. Если есть flag (country_code) — локализуем через i18n-iso-countries
+  //    Всегда, даже если countryName пришёл с бэкенда.
+  if (server.flag && server.flag.length > 0) {
+    const countryName = getCountryName(server.flag, locale);
+    if (server.cityName && server.cityName.length > 0) {
+      return `${countryName}, ${server.cityName}`;
+    }
+    return countryName;
+  }
+  // 2. Fallback на countryName с бэкенда (без локализации, только English)
+  if (server.countryName && server.countryName.length > 0) {
+    if (server.cityName && server.cityName.length > 0) {
+      return `${server.countryName}, ${server.cityName}`;
+    }
+    return server.countryName;
+  }
+  // 3. Fallback на name (display_name из бэкенда или original_name)
+  if (server.name && server.name.length > 0) {
+    return server.name;
+  }
+  // 4. Последний fallback — host:port
+  return `${server.server ?? ''}:${String(server.port ?? '')}`;
+}
+
+/**
+ * Get display name for exit IP info (when connected through proxy).
+ * Аналогично getServerDisplayName — всегда локализует через flag.
+ */
+export function getExitIpDisplayName(
+  exitIp: {
+    server?: string | null;
+    country_name?: string | null;
+    city_name?: string | null;
+    flag?: string | null;
+  } | null | undefined,
+  locale = 'en',
+): string {
+  if (!exitIp) return '';
+  // 1. flag доступен — локализуем через i18n-iso-countries
+  if (exitIp.flag && exitIp.flag.length > 0) {
+    const countryName = getCountryName(exitIp.flag, locale);
+    if (exitIp.city_name && exitIp.city_name.length > 0) {
+      return `${countryName}, ${exitIp.city_name}`;
+    }
+    return countryName;
+  }
+  // 2. Fallback на country_name с бэкенда (English)
+  if (exitIp.country_name && exitIp.country_name.length > 0) {
+    if (exitIp.city_name && exitIp.city_name.length > 0) {
+      return `${exitIp.country_name}, ${exitIp.city_name}`;
+    }
+    return exitIp.country_name;
+  }
+  // 3. Fallback на server IP
+  if (exitIp.server && exitIp.server.length > 0) {
+    return exitIp.server;
+  }
+  return '';
+}

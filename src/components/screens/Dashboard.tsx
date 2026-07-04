@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Check, ChevronDown, Gauge, Globe, Plus, Power, Server } from 'lucide-react';
 import { toast } from 'sonner';
-import { useAppStore } from '@/store.ts';
+import { getExitIpDisplayName, getServerDisplayName, useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
+import { i18n } from '@/i18n.ts';
 import { SegmentedControl } from '../SegmentedControl';
 import { hasFlag } from 'country-flag-icons';
 import 'country-flag-icons/3x2/flags.css';
@@ -29,11 +30,6 @@ function formatProtocol(protocol: string): string {
     wireguard: 'WireGuard',
   };
   return map[protocol] ?? protocol.charAt(0).toUpperCase() + protocol.slice(1);
-}
-
-/** Get city name; prefer exit city when available. */
-function serverCity(srv: { cityName?: string; exitCityName?: string }): string {
-  return srv.exitCityName ?? srv.cityName ?? '';
 }
 
 export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => void }) {
@@ -248,9 +244,17 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                       <div className="flex flex-col items-start overflow-hidden min-w-0 flex-1">
                         <div className="flex items-center gap-1.5 w-full">
                           <span className="text-sm font-medium leading-tight truncate">
-                            {activeServer?.exitCountryName ??
-                              activeServer?.countryName ??
-                              activeServer?.name}
+                            {getServerDisplayName(
+                              {
+                                countryName:
+                                  activeServer?.exitCountryName ?? activeServer?.countryName,
+                                flag: activeServer?.exitFlag ?? activeServer?.flag,
+                                name: activeServer?.name,
+                                server: activeServer?.server,
+                                port: activeServer?.port,
+                              },
+                              i18n.language,
+                            )}
                           </span>
                           {activeServer?.behindCdn && (
                             <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono shrink-0">
@@ -258,11 +262,6 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                             </span>
                           )}
                         </div>
-                        {activeServer && serverCity(activeServer) ? (
-                          <span className="text-[11px] text-zinc-500 leading-tight truncate w-full text-left">
-                            {serverCity(activeServer)}
-                          </span>
-                        ) : null}
                       </div>
                     </div>
 
@@ -345,9 +344,17 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                   <div className="flex flex-col items-start overflow-hidden min-w-0 flex-1">
                                     <div className="flex items-center gap-1.5 w-full">
                                       <span className="text-sm font-medium leading-tight truncate">
-                                        {server.exitCountryName ??
-                                          server.countryName ??
-                                          server.name}
+                                        {getServerDisplayName(
+                                          {
+                                            countryName:
+                                              server.exitCountryName ?? server.countryName,
+                                            flag: server.exitFlag ?? server.flag,
+                                            name: server.name,
+                                            server: server.server,
+                                            port: server.port,
+                                          },
+                                          i18n.language,
+                                        )}
                                       </span>
                                       {server.behindCdn && (
                                         <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded font-mono shrink-0">
@@ -355,11 +362,6 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                         </span>
                                       )}
                                     </div>
-                                    {serverCity(server) ? (
-                                      <span className="text-[11px] text-zinc-500 leading-tight truncate w-full text-left">
-                                        {serverCity(server)}
-                                      </span>
-                                    ) : null}
                                   </div>
                                 </div>
                                 <div className="flex items-center gap-2 shrink-0 pl-2">
@@ -534,13 +536,17 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                               <FlagDisplay code={activeServer.flag} className="text-xs shrink-0" />
                             )}
                             <span className="truncate">
-                              {activeServer.countryName ?? activeServer.flag}
+                              {getServerDisplayName(
+                                {
+                                  countryName: activeServer.countryName,
+                                  flag: activeServer.flag,
+                                  name: activeServer.name,
+                                  server: activeServer.server,
+                                  port: activeServer.port,
+                                },
+                                i18n.language,
+                              )}
                             </span>
-                            {activeServer.cityName && (
-                              <span className="text-zinc-500 shrink-0">
-                                ({activeServer.cityName})
-                              </span>
-                            )}
                             {activeServer.behindCdn && (
                               <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded shrink-0 font-mono">
                                 CDN
@@ -553,13 +559,15 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                   <FlagDisplay code={exitIp.flag} className="text-xs shrink-0" />
                                 )}
                                 <span className="truncate">
-                                  {exitIp.country_name || exitIp.flag}
+                                  {getExitIpDisplayName(
+                                    {
+                                      country_name: exitIp.country_name,
+                                      flag: exitIp.flag,
+                                      server: exitIp.server,
+                                    },
+                                    i18n.language,
+                                  )}
                                 </span>
-                                {exitIp.city_name && (
-                                  <span className="text-zinc-500 shrink-0">
-                                    ({exitIp.city_name})
-                                  </span>
-                                )}
                               </>
                             )}
                           </div>
@@ -592,10 +600,16 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                           {realIp.flag && (
                             <FlagDisplay code={realIp.flag} className="text-xs shrink-0" />
                           )}
-                          <span className="truncate">{realIp.country_name || realIp.flag}</span>
-                          {realIp.city_name && (
-                            <span className="text-zinc-500 shrink-0">({realIp.city_name})</span>
-                          )}
+                          <span className="truncate">
+                            {getExitIpDisplayName(
+                              {
+                                country_name: realIp.country_name,
+                                flag: realIp.flag,
+                                server: realIp.server,
+                              },
+                              i18n.language,
+                            )}
+                          </span>
                         </div>
                         <span className="text-[11px] text-zinc-500 font-mono mt-0.5">
                           {realIp.server}

@@ -172,6 +172,7 @@ pub(crate) fn ipinfo_lite_extract(v: &serde_json::Value) -> (Option<String>, Opt
 #[derive(Clone)]
 struct IpGuideCacheEntry {
     country_code: String,
+    #[allow(dead_code)]
     country_name: String,
     #[allow(dead_code)]
     asn: Option<u32>,
@@ -240,7 +241,7 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
                     log::debug!("GeoIP: ip.guide cache hit for {}", ip);
                     return Some(GeoIpResult {
                         country_code: entry.country_code.clone(),
-                        country_name: entry.country_name.clone(),
+                        country_name: String::new(),
                         city: String::new(),
                     });
                 }
@@ -347,10 +348,9 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
         return None;
     }
 
-    let country_name = country_code_to_name(&country_code);
-
     log::info!(
-        "GeoIP: country resolved via ip.guide for {} → {} (ASN {} {})",
+        "GeoIP: country resolved via ip.guide for {} → {} (ASN {} {}). \
+         country_name will be filled by frontend via i18n-iso-countries.",
         ip, country_code,
         asn_num.map(|n| n.to_string()).unwrap_or_else(|| "?".to_string()),
         as_name.as_deref().unwrap_or("?")
@@ -359,7 +359,7 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
     // Cache the result
     let entry = IpGuideCacheEntry {
         country_code: country_code.clone(),
-        country_name: country_name.clone(),
+        country_name: String::new(),
         asn: asn_num,
         as_name: as_name.clone(),
         fetched_at: SystemTime::now(),
@@ -371,29 +371,9 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
 
     Some(GeoIpResult {
         country_code,
-        country_name,
+        country_name: String::new(),
         city: String::new(),
     })
-}
-
-/// Convert ISO 3166-1 alpha-2 country code to name.
-fn country_code_to_name(cc: &str) -> String {
-    match cc {
-        "US" => "United States", "GB" => "United Kingdom", "DE" => "Germany",
-        "FR" => "France", "NL" => "Netherlands", "JP" => "Japan",
-        "SG" => "Singapore", "CA" => "Canada", "AU" => "Australia",
-        "RU" => "Russia", "UA" => "Ukraine", "PL" => "Poland",
-        "SE" => "Sweden", "CH" => "Switzerland", "FI" => "Finland",
-        "NO" => "Norway", "DK" => "Denmark", "ES" => "Spain",
-        "IT" => "Italy", "CZ" => "Czech Republic", "RO" => "Romania",
-        "BG" => "Bulgaria", "TR" => "Turkey", "IN" => "India",
-        "CN" => "China", "HK" => "Hong Kong", "KR" => "South Korea",
-        "TW" => "Taiwan", "AE" => "United Arab Emirates", "BR" => "Brazil",
-        "MX" => "Mexico", "AR" => "Argentina", "ZA" => "South Africa",
-        "ID" => "Indonesia", "TH" => "Thailand", "VN" => "Vietnam",
-        "MY" => "Malaysia", "PH" => "Philippines", "KZ" => "Kazakhstan",
-        "IL" => "Israel", "IR" => "Iran", _ => cc,
-    }.to_string()
 }
 
 // ── MaxMind City DB ────────────────────────────────────────────────────────
