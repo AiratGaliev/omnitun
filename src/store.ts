@@ -157,6 +157,9 @@ interface ProxyStore {
   _isConnecting: boolean;
   /** Set of profile IDs currently being refreshed (dedup guard). */
   _refreshingIds: string[];
+  /** Last ipinfoToken that was saved to disk. Guards against re-downloading the
+   *  GeoIP DB on every settings save — only downloads when the token changes. */
+  _lastIpinfoToken: string;
 }
 
 const defaultServers: Server[] = [];
@@ -322,6 +325,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   _isReconnecting: false,
   _isConnecting: false,
   _refreshingIds: [],
+  _lastIpinfoToken: '',
   settings: {
     acceptTerms: false,
     routingMode: 'system-proxy',
@@ -503,20 +507,26 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
 
   saveSettings: async () => {
     try {
-      const { settings } = get();
+      const { settings, _lastIpinfoToken } = get();
+      const tokenChanged = settings.ipinfoToken !== _lastIpinfoToken;
+
       // Показываем toast ДО loadProfiles, чтобы пользователь сразу видел
       // обратную связь. loadProfiles может быть медленным (много профилей,
       // фильтрация по настройкам), и без этого шага toast о загрузке БД
       // появляется с заметной задержкой после клика Save.
       let downloadToastId: string | number | undefined;
-      if (settings.ipinfoToken) {
+      const tokenWasRemoved = _lastIpinfoToken && !settings.ipinfoToken;
+      if (tokenChanged && settings.ipinfoToken) {
         downloadToastId = toast.loading(i18n.t('ipinfoDownloading'));
       }
 
       await invoke('update_settings', { newSettings: settings });
       await get().loadProfiles();
 
-      if (settings.ipinfoToken && downloadToastId) {
+      // Token was removed by the user — notify that GeoIP updates are stopped
+      if (tokenWasRemoved) {
+        toast.info(i18n.t('ipinfoTokenRemoved'), { duration: 5000 });
+      } else if (tokenChanged && settings.ipinfoToken && downloadToastId) {
         try {
           const result = await invoke<string>('download_ipinfo_db');
           if (result === 'downloaded') {
@@ -530,6 +540,9 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
           });
         }
       }
+
+      // Update the guard so subsequent saves don't re-download
+      set({ _lastIpinfoToken: settings.ipinfoToken });
     } catch (e: unknown) {
       // Backend already logged the error via tracing::error!
       toast.error(localizeError(e, 'settingsSaveFailed'));

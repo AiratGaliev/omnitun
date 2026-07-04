@@ -87,10 +87,7 @@ export default function App() {
     // duplicate needed.
     void invoke('initialize_app');
 
-    void Promise.all([
-      loadProfiles(),
-      loadSettings(),
-    ]).then(async () => {
+    void Promise.all([loadProfiles(), loadSettings()]).then(async () => {
       setIsInitialized(true);
       await fetchRealIp();
     });

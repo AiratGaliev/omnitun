@@ -111,6 +111,7 @@
   "enabled": "enabled",
   "disabled": "disabled",
   "emptyList": "No countries selected.",
+  "searchCountry": "Search country by code or name...",
   "countryAdded": "Country added",
   "protocolRules": "Protocol Filtering Rules",
   "protocolRulesDesc": "Control which connection protocols are allowed or blocked.",
@@ -212,5 +213,6 @@
   "ipinfoStep2": "Log in and navigate to your API dashboard",
   "ipinfoStep3": "Copy your personal API token from the dashboard",
   "ipinfoStep4": "Paste it above — the app will download the GeoIP database automatically",
-  "ipinfoWhy": "The token is used only to download and periodically update the ipinfo_lite.mmdb database. Your token stays on-device and is never sent anywhere."
+  "ipinfoWhy": "The token is used only to download and periodically update the ipinfo_lite.mmdb database. Your token stays on-device and is never sent anywhere.",
+  "ipinfoTokenRemoved": "IPinfo token removed. GeoIP database will no longer be updated."
 }

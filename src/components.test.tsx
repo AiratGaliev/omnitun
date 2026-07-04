@@ -34,6 +34,7 @@ vi.mock('@tauri-apps/plugin-shell', () => ({}));
 vi.mock('@/hooks/useTranslation', () => ({
   useTranslation: () => ({
     t: (key: string) => key,
+    lang: 'en',
     language: 'en',
     setLanguage: vi.fn(),
   }),
@@ -336,6 +337,7 @@ describe('Full App Rendering', () => {
       status: 'disconnected',
       servers: [],
       activeServer: null,
+      settings: { ...useAppStore.getState().settings },
     });
   });
 
