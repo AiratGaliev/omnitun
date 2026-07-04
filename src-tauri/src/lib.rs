@@ -1387,6 +1387,36 @@ pub fn run() {
             };
             app.manage(profile_state);
 
+            // ── WebView2 suspension helpers ────────────────────────────────
+            // When the window is hidden to tray, we suspend the WebView2
+            // process to free CPU (scripts, animations, rendering). On restore
+            // we resume it. This is a UI-thread operation: with_webview runs
+            // the closure on the main thread where the COM controller lives.
+            #[cfg(target_os = "windows")]
+            fn resume_webview_window(app: &tauri::AppHandle) {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.with_webview(|platform| {
+                        let controller = platform.controller();
+                        let _ = unsafe { controller.SetIsVisible(true) };
+                    });
+                }
+            }
+
+            #[cfg(target_os = "windows")]
+            fn suspend_webview_window(app: &tauri::AppHandle) {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.with_webview(|platform| {
+                        let controller = platform.controller();
+                        let _ = unsafe { controller.SetIsVisible(false) };
+                    });
+                }
+            }
+
+            #[cfg(not(target_os = "windows"))]
+            fn resume_webview_window(_app: &tauri::AppHandle) {}
+            #[cfg(not(target_os = "windows"))]
+            fn suspend_webview_window(_app: &tauri::AppHandle) {}
+
             // ── System tray ────────────────────────────────────────────────
             let show = MenuItem::with_id(app, "show", "Show OmniTun", true, None::<&str>)?;
             let toggle = MenuItem::with_id(app, "toggle_proxy", "Connect", true, None::<&str>)?;
@@ -1410,6 +1440,8 @@ pub fn run() {
                     match event.id().as_ref() {
                         "show" => {
                             if let Some(window) = app.get_webview_window("main") {
+                                // Resume WebView2 before showing the window
+                                resume_webview_window(app);
                                 let _ = window.show();
                                 let _ = window.set_focus();
                             }
@@ -1441,6 +1473,8 @@ pub fn run() {
                     } = event
                     {
                         if let Some(window) = tray.app_handle().get_webview_window("main") {
+                            // Resume WebView2 before showing the window
+                            resume_webview_window(tray.app_handle());
                             let _ = window.show();
                             let _ = window.set_focus();
                         }
@@ -1484,6 +1518,8 @@ pub fn run() {
                             false
                         };
                         if minimize {
+                            // Suspend WebView2 before hiding the window
+                            suspend_webview_window(&app_handle);
                             let _ = app_handle.get_webview_window("main").map(|w| w.hide());
                             api.prevent_close();
                         } else {

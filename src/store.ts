@@ -552,7 +552,9 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   loadSettings: async () => {
     try {
       const result = await invoke<Settings>('get_settings');
-      set({ settings: result });
+      if (result) {
+        set({ settings: result });
+      }
     } catch (e) {
       get().addLog(`Failed to load settings: ${getErrorMessage(e)}`, 'error', 'settings');
       set({ settingsVersion: get().settingsVersion });

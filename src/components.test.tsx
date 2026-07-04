@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useAppStore } from './store';
 import { Dashboard } from './components/screens/Dashboard';
 import { Profiles } from './components/screens/Profiles';
@@ -17,6 +17,7 @@ import { ConfirmDialog } from './components/ConfirmDialog';
 import { SegmentedControl } from './components/SegmentedControl';
 import { SettingItem } from './components/settings/SettingItem';
 import App from './App';
+import type { Settings } from './types';
 
 const mockInvoke = vi.hoisted(() => vi.fn<(...args: unknown[]) => unknown>());
 
@@ -330,13 +331,21 @@ describe('SettingItem', () => {
 
 describe('Full App Rendering', () => {
   beforeEach(() => {
-    mockInvoke.mockResolvedValue(undefined);
+    mockInvoke.mockImplementation((cmd: unknown) => {
+      if (cmd === 'get_settings') {
+        return Promise.resolve({
+          ...useAppStore.getState().settings,
+        } as Settings);
+      }
+      return Promise.resolve(undefined);
+    });
     useAppStore.setState({
+      status: 'disconnected',
+      activeServer: null,
+      servers: [],
+      profiles: [],
       hasAcceptedTerms: true,
       hasOnboarded: true,
-      status: 'disconnected',
-      servers: [],
-      activeServer: null,
       settings: { ...useAppStore.getState().settings },
     });
   });
