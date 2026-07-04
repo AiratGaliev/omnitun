@@ -6,7 +6,6 @@ import { toast } from 'sonner';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import type { Profile, RefreshProgress } from '@/types.ts';
 import {isRustError} from '@/types.ts';
-import {getErrorMessage} from '@/lib/errors.ts';
 import type { TranslationKey } from '@/i18n.ts';
 import * as z from 'zod';
 import { AddProfileOptions } from '../AddProfileOptions';
@@ -46,11 +45,7 @@ export function Profiles() {
         toast.success(t('profileDeleted'));
       })
       .catch((err: unknown) => {
-        useAppStore.getState().addLog(
-            `Delete failed: ${getErrorMessage(err)}`,
-            'error',
-            'subscription',
-        );
+        // Backend already logged the error via tracing
         if (isRustError(err)) {
           toast.error(t(err.code, {defaultValue: err.message}));
         } else {
@@ -66,11 +61,7 @@ export function Profiles() {
         toast.success(`${t('profileStr')}${profile.name}${t('profileUpdated')}`);
       })
       .catch((err: unknown) => {
-        useAppStore.getState().addLog(
-            `Refresh failed: ${getErrorMessage(err)}`,
-            'error',
-            'subscription',
-        );
+        // Backend already logged the error via tracing
         if (isRustError(err)) {
           toast.error(t(err.code, {defaultValue: err.message}));
         } else {

@@ -58,7 +58,6 @@ export function Terms() {
         <button
           onClick={() => {
             updateSettings({ acceptTerms: true });
-            addLog('Terms of service accepted', 'success', 'system');
             void useAppStore.getState().saveSettings();
           }}
           className="w-full bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold rounded-2xl py-4 flex items-center justify-center gap-3 transition-all active:scale-[0.98] shadow-[0_0_30px_rgba(16,185,129,0.25)]"

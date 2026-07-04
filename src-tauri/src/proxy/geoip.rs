@@ -236,17 +236,100 @@ pub fn set_cdn_ranges(ranges: Vec<(IpAddr, u8)>) {
     let _ = CDN_RANGES.set(ranges);
 }
 
+/// Cleanup stale tmp files from previous sessions.
+///
+/// If the app crashed during `parse_srs_file`, the tmp file
+/// `omnitun-cdn-srs-{uuid}.json` stays in %TEMP%. Over months of
+/// operation, hundreds of files can accumulate.
+///
+/// This function removes files with the `omnitun-cdn-srs-` prefix
+/// that are older than 1 hour. The 1-hour threshold ensures we never
+/// delete a file currently being written by a parallel `parse_srs_file`
+/// call (sing-box decompile takes <1 second).
+///
+/// Call this at app startup, before `ensure_downloaded`.
+///
+/// 🚫 ANTI-REGRESSION: не удаляй эту функцию "потому что tmp-файлы и так
+/// чистятся при выходе". При панике/краше файлы остаются. Эта функция —
+/// защита от накопления.
+pub fn cleanup_stale_tmp_files() {
+    let tmp_dir = std::env::temp_dir();
+    let cutoff = SystemTime::now() - Duration::from_secs(3600); // 1 hour
+    let mut cleaned = 0u32;
+    if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("omnitun-cdn-srs-") && name.ends_with(".json") {
+                    if let Ok(meta) = entry.metadata() {
+                        if let Ok(mtime) = meta.modified() {
+                            if mtime < cutoff {
+                                let _ = std::fs::remove_file(entry.path());
+                                cleaned += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if cleaned > 0 {
+        log::info!("Cleaned up {} stale CDN tmp file(s) from previous sessions", cleaned);
+    }
+}
+
 /// Parse a .srs file: call `sing-box rule-set decompile` on the raw file
 /// to convert to JSON, then extract ip_cidr entries.
+///
+/// # Concurrency
+///
+/// This function is **thread-safe** and may be called concurrently from
+/// multiple tasks (e.g. `ensure_downloaded` and the lazy-init path in
+/// `profile::mod`). Each call uses a unique temporary output file to
+/// avoid races between parallel `sing-box` invocations.
+///
+/// # Errors
+///
+/// Returns `Err(String)` with a human-readable diagnostic if:
+///   - `sing-box` binary is not set (`SINGBOX_BIN`);
+///   - `sing-box` fails to start (rare; usually means binary missing);
+///   - `sing-box` exits with non-zero status (stderr included);
+///   - `sing-box` exits successfully but did not create the output file
+///     (defensive check — this is what previously caused `os error 2`);
+///   - the output file cannot be read (permissions, race with another
+///     process, antivirus lock on Windows);
+///   - the output is not valid JSON;
+///   - the JSON structure does not match the expected `rules[].ip_cidr`
+///     layout.
+///
+/// On any error path the temporary file is best-effort cleaned up.
 pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
     let sb = SINGBOX_BIN
         .get()
         .ok_or_else(|| "sing-box binary not set".to_string())?;
 
+    // ── 1. Unique tmp file per call ───────────────────────────────────
+    // Previously this function used a hardcoded "cdn_srs_tmp.json" name,
+    // which caused a race condition when called concurrently from
+    // `ensure_downloaded` and `profile::mod::lazy_init_cdn_ranges`:
+    // one call would `remove_file` the output while another was still
+    // reading it, producing "os error 2" (file not found).
+    //
+    // Using uuid-based unique names eliminates the race entirely without
+    // needing a global Mutex (which would serialise all .srs parsing
+    // and defeat the purpose of parallel CDN-range loading).
     let tmp_dir = std::env::temp_dir();
-    let tmp_json = tmp_dir.join("cdn_srs_tmp.json");
+    let tmp_uuid = uuid::Uuid::new_v4();
+    let tmp_name = format!("omnitun-cdn-srs-{tmp_uuid}.json");
+    let tmp_json = tmp_dir.join(&tmp_name);
 
-    let status = std::process::Command::new(sb)
+    log::debug!(
+        "parse_srs_file: decompiling {} → {}",
+        path.display(),
+        tmp_json.display()
+    );
+
+    // ── 2. Run sing-box ───────────────────────────────────────────────
+    let out = std::process::Command::new(sb)
         .args([
             "rule-set",
             "decompile",
@@ -255,25 +338,73 @@ pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
             &path.to_string_lossy(),
         ])
         .output()
-        .map_err(|e| format!("Failed to run sing-box: {e}"));
+        .map_err(|e| {
+            // Best-effort cleanup of the (probably empty) tmp file.
+            let _ = std::fs::remove_file(&tmp_json);
+            format!("Failed to run sing-box: {e}")
+        })?;
 
-    let out = status?;
     if !out.status.success() {
+        let _ = std::fs::remove_file(&tmp_json);
         return Err(format!(
-            "sing-box decompile failed: {}",
-            String::from_utf8_lossy(&out.stderr)
+            "sing-box decompile failed (exit {:?}): {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
 
-    // Read the output JSON file, then clean up
-    let json_text = std::fs::read_to_string(&tmp_json)
-        .map_err(|e| format!("Failed to read sing-box output JSON: {e}"));
-    let _ = std::fs::remove_file(&tmp_json);
-    let json_text = json_text?;
+    // ── 3. Defensive check: sing-box exited OK — did it actually create
+    //        the output file? On Windows, antivirus or filesystem
+    //        redirection can cause this. Without this check, the next
+    //        `read_to_string` would return a bare "os error 2" with no
+    //        context, which is exactly what the user saw in logs.
+    if !tmp_json.exists() {
+        // Include sing-box's stderr/stdout for diagnosis — sometimes
+        // sing-box reports a non-fatal warning to stderr but still
+        // exits 0 without producing output.
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        return Err(format!(
+            "sing-box exited successfully but did not create output file {}. \
+             stdout={}, stderr={}",
+            tmp_json.display(),
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
 
-    let json: serde_json::Value = serde_json::from_str(&json_text)
-        .map_err(|e| format!("Failed to parse sing-box output: {e}"))?;
+    // ── 4. Read & parse JSON ──────────────────────────────────────────
+    let json_text = match std::fs::read_to_string(&tmp_json) {
+        Ok(t) => t,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_json);
+            return Err(format!(
+                "Failed to read sing-box output JSON ({}): {e}. \
+                 If this persists, check antivirus exclusions for {}.",
+                tmp_json.display(),
+                std::env::temp_dir().display()
+            ));
+        }
+    };
 
+    // Cleanup: best-effort, log on failure (could indicate filesystem
+    // issues worth knowing about).
+    if let Err(e) = std::fs::remove_file(&tmp_json) {
+        log::warn!(
+            "Failed to clean up tmp file {}: {e} (non-fatal — file will be \
+             removed at next OS temp cleanup)",
+            tmp_json.display()
+        );
+    }
+
+    let json: serde_json::Value = serde_json::from_str(&json_text).map_err(|e| {
+        format!(
+            "Failed to parse sing-box output as JSON: {e}. First 200 bytes: {:?}",
+            json_text.chars().take(200).collect::<String>()
+        )
+    })?;
+
+    // ── 5. Extract ip_cidr entries ────────────────────────────────────
     let mut ranges = Vec::new();
     if let Some(rules) = json["rules"].as_array() {
         for rule in rules {
@@ -1293,5 +1424,238 @@ mod tests {
     async fn test_resolve_hostname_empty() {
         let result = resolve_hostname("").await;
         assert!(result.is_none());
+    }
+
+    // ── parse_srs_file ─────────────────────────────────────────────────
+
+    /// Locate the sing-box binary: check SINGBOX_BIN env var first,
+    /// then PATH.
+    fn find_singbox() -> Option<std::path::PathBuf> {
+        if let Some(p) = SINGBOX_BIN.get() {
+            return Some(p.clone());
+        }
+        // Try via PATH / `where sing-box` on Windows
+        std::process::Command::new("sing-box")
+            .arg("--version")
+            .output()
+            .ok()
+            .map(|_| "sing-box".into())
+    }
+
+    /// Make a .srs fixture from a JSON rule-set by invoking
+    /// `sing-box rule-set compile`. Returns the path to the .srs file.
+    /// Requires sing-box to be on PATH.
+    fn make_test_srs(cidrs: &[&str]) -> Option<std::path::PathBuf> {
+        let sb = find_singbox()?;
+
+        let json = serde_json::json!({
+            "version": 3,
+            "rules": [{ "ip_cidr": cidrs }]
+        });
+
+        let tmp_dir = std::env::temp_dir();
+        let in_name = format!("omnitun-cdn-test-{}.json", uuid::Uuid::new_v4());
+        let in_path = tmp_dir.join(&in_name);
+        let out_path = in_path.with_extension("srs");
+
+        std::fs::write(&in_path, json.to_string()).ok()?;
+
+        let status = std::process::Command::new(&sb)
+            .args([
+                "rule-set",
+                "compile",
+                "-o",
+                &out_path.to_string_lossy(),
+                &in_path.to_string_lossy(),
+            ])
+            .output()
+            .ok()?;
+
+        // Clean up input
+        let _ = std::fs::remove_file(&in_path);
+
+        if !status.status.success() {
+            return None;
+        }
+
+        Some(out_path)
+    }
+
+    #[test]
+    fn test_parse_srs_file_missing_binary() {
+        // Only run if SINGBOX_BIN is NOT already set.
+        if SINGBOX_BIN.get().is_some() {
+            eprintln!("Skipping test: SINGBOX_BIN already set");
+            return;
+        }
+        let result = parse_srs_file(std::path::Path::new("nonexistent.srs"));
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("sing-box binary not set"),
+            "should report missing binary"
+        );
+    }
+
+    #[test]
+    fn test_parse_srs_file_missing_input() {
+        let sb = match find_singbox() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: sing-box not found");
+                return;
+            }
+        };
+        // Ensure SINGBOX_BIN is set so parse_srs_file doesn't bail early
+        let _ = SINGBOX_BIN.set(sb);
+
+        let result = parse_srs_file(std::path::Path::new(
+            "/nonexistent/path/file.srs",
+        ));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("sing-box decompile failed")
+                || err.contains("did not create output file"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_srs_file_returns_cidrs() {
+        let sb = match find_singbox() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: sing-box not found");
+                return;
+            }
+        };
+        let _ = SINGBOX_BIN.set(sb);
+
+        let srs = match make_test_srs(&["10.0.0.0/8", "192.168.0.0/16"]) {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: could not create .srs fixture");
+                return;
+            }
+        };
+
+        let result = parse_srs_file(&srs).expect("parse_srs_file should succeed");
+        assert!(result.len() >= 2, "expected >=2 CIDRs, got {}", result.len());
+
+        let has_v4_10 = result.iter().any(|(ip, _)| ip.to_string() == "10.0.0.0");
+        let has_v4_192 = result.iter().any(|(ip, _)| ip.to_string() == "192.168.0.0");
+        assert!(has_v4_10, "missing 10.0.0.0/8");
+        assert!(has_v4_192, "missing 192.168.0.0/16");
+
+        let _ = std::fs::remove_file(&srs);
+    }
+
+    /// Regression test for the original race condition bug:
+    /// parallel calls to parse_srs_file must NOT race on the tmp output file.
+    #[test]
+    fn test_parse_srs_file_concurrent_no_race() {
+        let sb = match find_singbox() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: sing-box not found");
+                return;
+            }
+        };
+        let _ = SINGBOX_BIN.set(sb);
+
+        let srs1 = match make_test_srs(&["10.0.0.0/8", "11.0.0.0/8"]) {
+            Some(p) => p,
+            None => return,
+        };
+        let srs2 = match make_test_srs(&["172.16.0.0/12", "172.32.0.0/16"]) {
+            Some(p) => p,
+            None => {
+                let _ = std::fs::remove_file(&srs1);
+                return;
+            }
+        };
+
+        let srs1 = std::sync::Arc::new(srs1);
+        let srs2 = std::sync::Arc::new(srs2);
+        let results = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let srs = if i % 2 == 0 {
+                srs1.clone()
+            } else {
+                srs2.clone()
+            };
+            let results = results.clone();
+            handles.push(std::thread::spawn(move || {
+                let r = parse_srs_file(&srs);
+                results.lock().unwrap().push((i, r.is_ok()));
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        let results = results.lock().unwrap();
+        let failures: Vec<_> = results.iter().filter(|(_, ok)| !*ok).collect();
+        assert!(
+            failures.is_empty(),
+            "race regression: {} of {} parallel calls failed: {:?}",
+            failures.len(),
+            results.len(),
+            failures
+        );
+
+        let _ = std::fs::remove_file(&*srs1);
+        let _ = std::fs::remove_file(&*srs2);
+    }
+
+    /// Verify tmp file cleanup after successful parse_srs_file call.
+    #[test]
+    fn test_parse_srs_file_cleans_up_tmp() {
+        let sb = match find_singbox() {
+            Some(p) => p,
+            None => {
+                eprintln!("Skipping test: sing-box not found");
+                return;
+            }
+        };
+        let _ = SINGBOX_BIN.set(sb);
+
+        let srs = match make_test_srs(&["10.0.0.0/8"]) {
+            Some(p) => p,
+            None => return,
+        };
+
+        let tmp_dir = std::env::temp_dir();
+        let before = std::fs::read_dir(&tmp_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with("omnitun-cdn-srs-"))
+                    .unwrap_or(false)
+            })
+            .count();
+
+        let _ = parse_srs_file(&srs);
+
+        let after = std::fs::read_dir(&tmp_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with("omnitun-cdn-srs-"))
+                    .unwrap_or(false)
+            })
+            .count();
+
+        assert_eq!(before, after);
+
+        let _ = std::fs::remove_file(&srs);
     }
 }

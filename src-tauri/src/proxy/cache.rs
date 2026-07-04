@@ -358,6 +358,31 @@ impl ServerCache {
         // CDN servers must never store exit IP data in the cache.
         let mut result = result;
         if result.behind_cdn {
+            // 🚫 ANTI-REGRESSION: логируем нарушение ПЕРЕД занулением.
+            // PositiveResult — это результат test_single_server. Если здесь
+            // есть exit-данные при behind_cdn=true, значит test_single_server
+            // отдал неконсистентный результат. Это REGRESSION фикса B3.
+            // Не удалять этот блок "потому что exit и так зануляется ниже".
+            let has_exit = result.exit_ip.is_some()
+                || result.exit_flag.is_some()
+                || result.exit_country.is_some()
+                || result.exit_city.is_some();
+            if has_exit {
+                tracing::error!(
+                    target: "cdn-invariant",
+                    "[BUG][I-CDN-1] INVARIANT VIOLATION in update_positive: \
+                     server {} got PositiveResult with behind_cdn=true AND exit data \
+                     (exit_ip={:?} exit_flag={:?} exit_country={:?} exit_city={:?}). \
+                     This is a REGRESSION of fix B3 in test_single_server — \
+                     behind_cdn should NOT be true with non-empty exit data. \
+                     Clearing exit fields defensively.",
+                    server_id,
+                    result.exit_ip,
+                    result.exit_flag,
+                    result.exit_country,
+                    result.exit_city,
+                );
+            }
             result.exit_ip = None;
             result.exit_flag = None;
             result.exit_country = None;
@@ -595,6 +620,10 @@ impl ServerCache {
                 }
                 // CDN servers must not retain outlet IP data — clear it
                 if s.behind_cdn {
+                    // 🚫 ANTI-REGRESSION: логируем нарушение ПЕРЕД занулением.
+                    // Если s уже имел exit-данные, это означает, что кеш содержит
+                    // неконсистентное состояние. См. doc-comment assert_no_cdn_exit_data.
+                    s.assert_no_cdn_exit_data("batch_test::cache_hit");
                     s.exit_server = None;
                     s.exit_flag = None;
                     s.exit_country_name = None;
@@ -622,6 +651,11 @@ impl ServerCache {
                     ),
                 );
                 let mut s = server.clone();
+                // 🚫 ANTI-REGRESSION: проверяем инварианту ПЕРЕД занулением.
+                // server тут приходит из process_servers — если process_servers
+                // отработал корректно, exit-данных быть не должно. Если есть —
+                // это регрессия в process_servers.
+                s.assert_no_cdn_exit_data("batch_test::cdn_skip");
                 s.exit_server = None;
                 s.exit_flag = None;
                 s.exit_country_name = None;
@@ -685,6 +719,12 @@ impl ServerCache {
                         s.behind_cdn = positive.behind_cdn;
                         // CDN servers must not retain outlet IP
                         if s.behind_cdn {
+                            // 🚫 ANTI-REGRESSION: логируем нарушение ПЕРЕД занулением.
+                            // positive здесь — результат test_single_server. Если
+                            // positive.behind_cdn=true и при этом s имел старые
+                            // exit-данные (не-CDN кеш), это означает, что сервер
+                            // только что был переклассифицирован в CDN. Логируем.
+                            s.assert_no_cdn_exit_data("batch_test::batch_result");
                             s.exit_server = None;
                             s.exit_flag = None;
                             s.exit_country_name = None;

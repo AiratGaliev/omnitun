@@ -382,11 +382,6 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       servers: [...state.servers, ...profile.servers],
       activeServer: newActive,
     }));
-    get().addLog(
-      `Profile "${data.name}" added (${String(profile.servers.length)} server(s))`,
-      'success',
-      'subscription',
-    );
   },
 
   updateProfile: (id, data) => {
@@ -415,7 +410,6 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       servers: state.servers.filter((s) => !removedIds.has(s.id)),
       activeServer: newActive,
     }));
-    get().addLog('Profile removed', 'success', 'subscription');
   },
 
   refreshProfile: async (id) => {
@@ -455,11 +449,6 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
           activeServer: activeStillValid ? newActiveServer : (allServers[0] ?? null),
         };
       });
-      get().addLog(
-        `Profile "${updated.name}" refreshed (${String(updated.servers.length)} server(s))`,
-        'success',
-        'subscription',
-      );
     } catch (e) {
       // Backend already logged the error via tracing
       // Reset lastUpdated so timer doesn't retry every ~55s.
@@ -511,39 +500,39 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   saveSettings: async () => {
     try {
       const { settings } = get();
+      // Показываем toast ДО loadProfiles, чтобы пользователь сразу видел
+      // обратную связь. loadProfiles может быть медленным (много профилей,
+      // фильтрация по настройкам), и без этого шага toast о загрузке БД
+      // появляется с заметной задержкой после клика Save.
+      let downloadToastId: string | number | undefined;
+      if (settings.ipinfoToken) {
+        downloadToastId = toast.loading(i18n.t('ipinfoDownloading'));
+      }
+
       await invoke('update_settings', { newSettings: settings });
       await get().loadProfiles();
 
-      if (settings.ipinfoToken) {
-        const toastId = toast.loading(i18n.t('ipinfoDownloading'));
+      if (settings.ipinfoToken && downloadToastId) {
         try {
           const result = await invoke<string>('download_ipinfo_db');
           if (result === 'downloaded') {
-            toast.success(i18n.t('ipinfoDownloaded'), { id: toastId });
+            toast.success(i18n.t('ipinfoDownloaded'), { id: downloadToastId });
           } else {
-            toast.info(i18n.t('ipinfoCached'), { id: toastId });
+            toast.info(i18n.t('ipinfoCached'), { id: downloadToastId });
           }
         } catch (e) {
-          toast.error(`${i18n.t('ipinfoDownloadFailed')}: ${getErrorMessage(e)}`, { id: toastId });
+          toast.error(`${i18n.t('ipinfoDownloadFailed')}: ${getErrorMessage(e)}`, { id: downloadToastId });
         }
       }
-    } catch (e) {
-      get().addLog(
-          `Failed to save settings: ${getErrorMessage(e)}`,
-          'error',
-          'settings',
-      );
-      toast.error('Failed to save settings');
+    } catch (e: unknown) {
+      // Backend already logged the error via tracing::error!
+      toast.error(localizeError(e, 'settingsSaveFailed'));
     }
   },
 
   loadSettings: async () => {
     try {
       const result = await invoke<Settings>('get_settings');
-      const rawMode = (result as { routingMode: string }).routingMode;
-      if (rawMode === 'proxy') {
-        (result as { routingMode: string }).routingMode = 'system-proxy';
-      }
       set({ settings: result });
     } catch (e) {
       get().addLog(

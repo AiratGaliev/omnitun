@@ -590,8 +590,8 @@ describe('store — settings management', () => {
     // Backend handles error logging via tracing — frontend silently fails
   });
 
-  it('loadSettings migrates old proxy mode', async () => {
-    mockInvoke.mockResolvedValueOnce({ routingMode: 'proxy' });
+  it('loadSettings stores backend-normalised routing mode', async () => {
+    mockInvoke.mockResolvedValueOnce({ routingMode: 'system-proxy' });
     await useAppStore.getState().loadSettings();
     expect(useAppStore.getState().settings.routingMode).toBe('system-proxy');
   });

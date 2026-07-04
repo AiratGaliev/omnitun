@@ -73,7 +73,7 @@ impl ProfileManager {
 
     /// Run GeoIP enrichment on all servers missing country/city fields.
     /// This fixes data from old profiles.json that only had flag set.
-    pub async fn enrich_loaded(&mut self) {
+    pub fn enrich_loaded(&mut self) {
         if !crate::proxy::geoip::is_ready() {
             return;
         }
@@ -84,19 +84,16 @@ impl ProfileManager {
             for server in &mut profile.servers {
                 // CDN servers must never retain exit IP data.
                 if server.behind_cdn {
+                    // 🚫 ANTI-REGRESSION: используем централизованный helper.
+                    // Раньше тут был inline log::error! с ручным форматированием.
+                    // Теперь вызываем assert_no_cdn_exit_data — это гарантирует
+                    // единый формат сообщения и structured target "cdn-invariant".
+                    server.assert_no_cdn_exit_data("enrich_loaded::at_startup");
                     if server.exit_server.is_some()
                         || server.exit_flag.is_some()
                         || server.exit_country_name.is_some()
                         || server.exit_city_name.is_some()
                     {
-                        log::error!(
-                            "[BUG] CDN server {} ({}:{}) has stale exit data — enriching_loaded is cleaning it up. \
-                             exit_server={:?} exit_flag={:?} exit_country={:?} exit_city={:?}. \
-                             This indicates a bug in the server update pipeline.",
-                            server.id, server.server, server.port,
-                            server.exit_server, server.exit_flag,
-                            server.exit_country_name, server.exit_city_name,
-                        );
                         server.exit_server = None;
                         server.exit_flag = None;
                         server.exit_country_name = None;
@@ -109,7 +106,9 @@ impl ProfileManager {
                 if server.country_name.is_some() && server.city_name.is_some() {
                     continue;
                 }
-                if let Some(info) = crate::proxy::geoip::resolve_hostname(&server.server).await {
+                // server.server is guaranteed to be an IP here (refresh pipeline
+                // replaces hostnames with IPs before saving). Direct sync lookup.
+                if let Some(info) = crate::proxy::geoip::resolve(&server.server) {
                     server.flag = Some(info.country_code.clone());
                     server.country_name = Some(info.country_name.clone());
                     if !info.city.is_empty() {
@@ -363,7 +362,12 @@ impl ProfileManager {
             .collect();
         servers = process_servers(app, servers, id).await;
         // Restore preserved exit data if batch test didn't update it.
+        // WARNING: for CDN servers, do NOT restore — process_servers explicitly
+        // cleared exit data (invariant I-CDN-1: behind_cdn ⇒ exit_* = None).
         for server in &mut servers {
+            if server.behind_cdn {
+                continue;
+            }
             if server.exit_server.is_none() {
                 if let Some(saved) = old_exit.get(&server.id) {
                     server.exit_server = saved.0.clone();
@@ -553,11 +557,14 @@ pub async fn process_servers(
     // 1b. Fast keyword pre-check for serverless domains (workers.dev, pages.dev).
     //     Full CDN detection via ASN happens during batch latency test.
     for s in &mut unique {
-        s.behind_cdn = crate::proxy::is_cdn_server(s).await;
+        s.behind_cdn = s.behind_cdn || crate::proxy::is_cdn_server(s).await;
         if s.behind_cdn {
             // Clear stale exit IP data from previous batch tests — CDN servers
             // must never retain exit data (their exit node is dynamic/unstable).
-            let had_exit = s.exit_server.is_some();
+            // 🚫 ANTI-REGRESSION: обязательно логируем нарушение через
+            // assert_no_cdn_exit_data ПЕРЕД занулением. Не удалять вызов,
+            // даже если кажется, что "всё и так чисто". См. doc-comment метода.
+            s.assert_no_cdn_exit_data("process_servers::keyword_match");
             s.exit_server = None;
             s.exit_flag = None;
             s.exit_country_name = None;
@@ -568,13 +575,10 @@ pub async fn process_servers(
                 s.display_name(),
                 s.server,
             );
-            if had_exit {
-                tracing::warn!(
-                    target: "subscription",
-                    "[BUG] CDN server {} had stale exit IP data (cleared) — previous batch test stored exit data for a CDN server",
-                    s.id,
-                );
-            }
+            // Примечание: раньше здесь был warn! "[BUG] CDN server had stale exit IP data".
+            // Теперь логирование делает assert_no_cdn_exit_data (на уровне error!,
+            // с structured target "cdn-invariant"). Уровень повышен с warn! до error!,
+            // потому что нарушение инварианты — это всегда баг, не предупреждение.
         }
     }
 
@@ -704,7 +708,26 @@ pub async fn process_servers(
 
                 // GeoIP enrichment: set flag + country/city fields + display name
                 // (subscription names often contain garbled emoji, components separate)
-                if let Some(info) = crate::proxy::geoip::resolve_hostname(&server.server).await {
+                // Use the already-resolved entry_ip first; fall back to server.server
+                // if it's parseable as an IP literal (same pattern as CDN detection below).
+                let geoip_ip = entry_ip
+                    .as_deref()
+                    .or_else(|| {
+                        server
+                            .server
+                            .parse::<std::net::IpAddr>()
+                            .ok()
+                            .map(|_| &*server.server)
+                    });
+                let geoip_info = if let Some(ip) = geoip_ip {
+                    // Already have an IP — synchronous lookup, no duplicate DNS.
+                    crate::proxy::geoip::resolve(ip)
+                } else {
+                    // Last resort: server.server is a hostname and DNS didn't resolve.
+                    // Let resolve_hostname try the DNS itself.
+                    crate::proxy::geoip::resolve_hostname(&server.server).await
+                };
+                if let Some(info) = geoip_info {
                     server.flag = Some(info.country_code.clone());
                     server.country_name = Some(info.country_name.clone());
                     if !info.city.is_empty() {
@@ -713,8 +736,9 @@ pub async fn process_servers(
                 } else if server.flag.is_none() {
                     tracing::warn!(
                         target: "subscription",
-                        "GeoIP: country not resolved for {} — IP not in GeoIP database",
+                        "GeoIP: country not resolved — host={}, ip={} — IP not in GeoIP database",
                         server.server,
+                        geoip_ip.unwrap_or("<none>"),
                     );
                 }
                 // If GeoIP fails, keep flag from emoji extraction or leave unset
@@ -734,6 +758,14 @@ pub async fn process_servers(
                         let cdn_ranges_count = crate::proxy::geoip::cdn_ranges_count();
                         if crate::proxy::geoip::is_cdn_entry_ip(rip) {
                             server.behind_cdn = true;
+                            // 🚫 ANTI-REGRESSION: логируем нарушение инварианты
+                            // ПЕРЕД занулением. Если сервер уже имел exit-данные
+                            // (старые), это означает, что раньше он был не-CDN,
+                            // а теперь классифицируется как CDN — нужно явно
+                            // зафиксировать этот переход в логах.
+                            server.assert_no_cdn_exit_data(
+                                "process_servers::entry_ip_match",
+                            );
                             // CDN servers must not retain stale exit data
                             server.exit_server = None;
                             server.exit_flag = None;

@@ -130,6 +130,7 @@
   "deleteFailed": "Failed to delete profile",
   "autoRefreshFailed": "Auto-refresh failed",
   "connectionFailedDesc": "Check your configuration and try again",
+  "settingsSaveFailed": "Failed to save settings",
   "statusError": "Error",
   "addFailed": "Failed to add subscription. Check the URL and try again.",
   "serverSingular": "server",

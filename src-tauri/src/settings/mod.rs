@@ -69,6 +69,17 @@ impl Default for AppSettings {
     }
 }
 
+impl AppSettings {
+    /// Normalise old/migrated values to current schema.
+    /// Called on load and before save so the frontend never has to.
+    pub fn normalize(&mut self) {
+        // Old `"proxy"` was renamed to `"system-proxy"`.
+        if self.routing_mode == "proxy" {
+            self.routing_mode = "system-proxy".to_string();
+        }
+    }
+}
+
 pub struct SettingsManager {
     file_path: PathBuf,
 }
@@ -81,11 +92,13 @@ impl SettingsManager {
     }
 
     pub fn load(&self) -> Result<AppSettings, String> {
-        match fs::read_to_string(&self.file_path) {
+        let mut settings = match fs::read_to_string(&self.file_path) {
             Ok(json) => serde_json::from_str(&json).map_err(|e| e.to_string()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AppSettings::default()),
             Err(e) => Err(e.to_string()),
-        }
+        }?;
+        settings.normalize();
+        Ok(settings)
     }
 
     pub fn save(&self, settings: &AppSettings) -> Result<(), String> {
@@ -126,7 +139,7 @@ mod tests {
         assert!(result.is_ok(), "expected Ok for missing file, got Err");
         let settings = result.unwrap();
         assert_eq!(settings.routing_mode, "system-proxy");
-        assert_eq!(settings.proxy_port, 1080);
+        assert_eq!(settings.proxy_port, 5050);
         assert!(settings.bypass_ru);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -193,11 +206,11 @@ mod tests {
         let s = AppSettings::default();
         assert!(!s.accept_terms);
         assert_eq!(s.routing_mode, "system-proxy");
-        assert_eq!(s.proxy_port, 1080);
+        assert_eq!(s.proxy_port, 5050);
         assert!(s.bypass_ru);
         assert!(s.start_with_windows);
         assert!(s.auto_connect_fastest);
-        assert!(!s.kill_switch);
+        assert!(s.kill_switch);
         assert!(s.allow_lan);
         assert!(!s.custom_dns);
         assert_eq!(s.dns_address, "1.1.1.1");

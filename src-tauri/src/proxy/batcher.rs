@@ -607,25 +607,36 @@ async fn test_single_server(
     }
 
     // 2. Outlet IP + CDN bug detection.
-    let mut behind_cdn = server.behind_cdn;
     let mut outlet_ip = None;
     let mut diagnostic_warning = None;
 
-    if !behind_cdn {
-        // Fetch outlet IP only if server is NOT marked as CDN
+    if !server.behind_cdn {
+        // Fetch outlet IP only if server is NOT marked as CDN.
+        // behind_cdn is finalized at the process_servers stage via entry-IP
+        // + keyword checks; we do NOT override it here.
         let fetched = fetch_outlet_ip_through_port(&client).await;
 
         if let Some(ref ip) = fetched {
+            outlet_ip = Some(ip.clone());
+
+            // Canary: outlet IP in CDN ranges despite non-CDN entry.
+            // Possible legitimate reasons: WARP upstream, cloud hosting that
+            // overlaps with CDN ranges, ISP that uses CDN-as-backbone.
+            // Possible bug: process_servers entry-IP classification was wrong.
+            // We observe but do NOT mutate behind_cdn here.
             if crate::proxy::geoip::is_cdn_entry_ip(ip) {
-                // BUG DETECTED: server wasn't marked CDN, but its outlet IP belongs to a CDN!
-                behind_cdn = true;
                 diagnostic_warning = Some(format!(
-                    "[BUG] Server {} was checked for outlet IP ({}), but it belongs to a CDN! Marked as CDN and cleared outlet IP.",
-                    server.id, ip
+                    "[BUG] Server {} ({}:{}, name={:?}) — outlet IP {} is in CDN ranges \
+                     although entry IP was NOT marked CDN. Keeping outlet IP and \
+                     behind_cdn=false (outlet is egress, not entry). If this fires \
+                     repeatedly for the same server, investigate CDN list coverage \
+                     or process_servers entry-IP classification.",
+                    server.id,
+                    server.server,
+                    server.port,
+                    server.original_name,
+                    ip,
                 ));
-                // outlet_ip stays None — CDN servers have no meaningful exit IP
-            } else {
-                outlet_ip = Some(ip.clone());
             }
         }
     }
@@ -637,11 +648,41 @@ async fn test_single_server(
         None
     };
 
+    // 🚫 ANTI-REGRESSION: финальная проверка инварианты перед возвратом.
+    // Если server.behind_cdn=true, то outlet_ip обязан быть None.
+    // После фикса B3 это всегда так, но проверка — гарантия от будущих
+    // регрессий. Не удалять эту проверку "потому что B3 фиксит это".
+    if server.behind_cdn && outlet_ip.is_some() {
+        tracing::error!(
+            target: "cdn-invariant",
+            "[BUG][I-CDN-1] INVARIANT VIOLATION in test_single_server (post-result): \
+             server {} ({}:{}) — behind_cdn=true AND outlet_ip={:?}. \
+             This is a REGRESSION of fix B3. Returning outlet_ip=None defensively.",
+            server.id,
+            server.server,
+            server.port,
+            outlet_ip,
+        );
+        outlet_ip = None;
+    }
+    if server.behind_cdn && exit_geoip.is_some() {
+        tracing::error!(
+            target: "cdn-invariant",
+            "[BUG][I-CDN-1] INVARIANT VIOLATION in test_single_server (post-result): \
+             server {} ({}:{}) — behind_cdn=true AND exit_geoip={:?}. \
+             This is a REGRESSION. Returning exit fields as None defensively.",
+            server.id,
+            server.server,
+            server.port,
+            exit_geoip,
+        );
+    }
+
     Ok(ServerTestResult {
         server_id: server.id.clone(),
         ping_ms,
         outlet_ip,
-        behind_cdn,
+        behind_cdn: server.behind_cdn,
         exit_flag: exit_geoip.as_ref().map(|g| g.country_code.clone()),
         exit_country: exit_geoip.as_ref().map(|g| g.country_name.clone()),
         exit_city: exit_geoip.as_ref().and_then(|g| {

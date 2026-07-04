@@ -130,6 +130,7 @@
   "deleteFailed": "Не удалось удалить профиль",
   "autoRefreshFailed": "Автообновление не удалось",
   "connectionFailedDesc": "Проверьте конфигурацию и попробуйте снова",
+  "settingsSaveFailed": "Не удалось сохранить настройки",
   "statusError": "Ошибка",
   "addFailed": "Не удалось добавить подписку. Проверьте URL и попробуйте снова.",
   "serverSingular": "сервер",

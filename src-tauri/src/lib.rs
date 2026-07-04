@@ -205,6 +205,23 @@ async fn start_proxy(
                             .any(|p| p.servers.iter().any(|s| s.id == profile.id && s.behind_cdn))
                     };
                     if is_cdn {
+                        // 🚫 ANTI-REGRESSION: проверяем инварианту активного сервера.
+                        // Это единственная точка в runtime (между refresh-циклами),
+                        // где мы можем поймать нарушение. Если CDN-сервер имеет exit,
+                        // это означает, что баг произошёл где-то между enrich_loaded
+                        // и стартом прокси. Без этой проверки баг может существовать
+                        // часами, пока не сработает enrich_loaded при следующем старте.
+                        {
+                            let pm_check = profile_state.manager.lock().await;
+                            for p in pm_check.list() {
+                                for s in &p.servers {
+                                    if s.id == profile.id {
+                                        s.assert_no_cdn_exit_data("start_proxy::active_server");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         log(
                             &app,
                             &logger,
@@ -231,7 +248,7 @@ async fn start_proxy(
                             );
                         }
                     } else {
-                        let mut cb = reqwest::Client::builder().timeout(Duration::from_secs(5));
+                        let mut cb = reqwest::Client::builder().timeout(Duration::from_secs(10));
                         // In proxy modes traffic goes through the mixed inbound — route through proxy
                         if let Ok(proxy) =
                             reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}"))
@@ -248,8 +265,8 @@ async fn start_proxy(
                                             let ip = text.trim().to_string();
                                             if !ip.is_empty()
                                                 && ip
-                                                    .chars()
-                                                    .all(|c| c.is_ascii_digit() || c == '.')
+                                                    .parse::<std::net::IpAddr>()
+                                                    .is_ok()
                                             {
                                                 got_response = true;
 
@@ -257,19 +274,14 @@ async fn start_proxy(
                                                     log(
                                                         &app,
                                                         &logger,
-                                                        LogLevel::Warning,
+                                                        LogLevel::Info,
                                                         LogSource::Proxy,
-                                                        format!("[BUG] start_proxy: Server {} was checked for outlet IP ({}), but it belongs to a CDN!", profile.id, ip)
-                                                    );
-                                                    let _ = app.emit(
-                                                        "exit-ip-changed",
-                                                        ExitIpInfo {
-                                                            server: String::new(),
-                                                            flag: String::new(),
-                                                            country_name: String::new(),
-                                                            city_name: String::new(),
-                                                            proxy_tag: String::new(),
-                                                        },
+                                                        format!(
+                                                            "Proxy verified (exit IP: {ip}) — outlet is in CDN ranges but \
+                                                             entry IP was not CDN-marked. Keeping exit IP (outlet is egress, \
+                                                             not entry). Server {} ({}:{}).",
+                                                            profile.id, profile.server, profile.port
+                                                        )
                                                     );
                                                 } else {
                                                     log(
@@ -279,17 +291,17 @@ async fn start_proxy(
                                                         LogSource::Proxy,
                                                         format!("Proxy verified (exit IP: {ip})"),
                                                     );
-                                                    let _ = app.emit(
-                                                        "exit-ip-changed",
-                                                        ExitIpInfo {
-                                                            server: ip.clone(),
-                                                            flag: String::new(),
-                                                            country_name: String::new(),
-                                                            city_name: String::new(),
-                                                            proxy_tag: String::new(),
-                                                        },
-                                                    );
                                                 }
+                                                let _ = app.emit(
+                                                    "exit-ip-changed",
+                                                    ExitIpInfo {
+                                                        server: ip.clone(),
+                                                        flag: String::new(),
+                                                        country_name: String::new(),
+                                                        city_name: String::new(),
+                                                        proxy_tag: String::new(),
+                                                    },
+                                                );
                                                 break;
                                             }
                                         }
@@ -324,7 +336,7 @@ async fn start_proxy(
                                             tokio::time::sleep(Duration::from_secs(2)).await;
                                             // Re-verify exit IP through the new server
                                             let mut cb = reqwest::Client::builder()
-                                                .timeout(Duration::from_secs(5));
+                                                .timeout(Duration::from_secs(10));
                                             if let Ok(proxy) = reqwest::Proxy::all(format!(
                                                 "http://127.0.0.1:{proxy_port}"
                                             )) {
@@ -337,16 +349,33 @@ async fn start_proxy(
                                                             if let Ok(text) = resp.text().await {
                                                                 let ip = text.trim().to_string();
                                                                 if !ip.is_empty()
-                                                                    && ip.chars().all(|c| {
-                                                                        c.is_ascii_digit()
-                                                                            || c == '.'
-                                                                    })
+                                                                    && ip.parse::<std::net::IpAddr>().is_ok()
                                                                 {
                                                                     if crate::proxy::geoip::is_cdn_entry_ip(&ip) {
-                                                                        tracing::warn!(target: "proxy", "[BUG] start_proxy (fallback): Server {} was checked for outlet IP ({}), but it belongs to a CDN!", all_servers[idx].id, ip);
+                                                                        tracing::info!(
+                                                                            target: "proxy",
+                                                                            "Proxy verified (exit IP: {ip}) via {tag} — outlet is in CDN ranges \
+                                                                             but entry IP was not CDN-marked. Keeping exit IP (outlet is egress, \
+                                                                             not entry). Server {} ({}:{}).",
+                                                                            all_servers[idx].id,
+                                                                            all_servers[idx].server,
+                                                                            all_servers[idx].port
+                                                                        );
                                                                     } else {
                                                                         tracing::info!(target: "proxy", "Proxy verified (exit IP: {ip}) via {tag}");
                                                                     }
+                                                                    // U2: Эмитим exit-ip-changed в fallback-ветке,
+                                                                    // чтобы UI получил exit IP при переключении.
+                                                                    let _ = app.emit(
+                                                                        "exit-ip-changed",
+                                                                        ExitIpInfo {
+                                                                            server: ip.clone(),
+                                                                            flag: String::new(),
+                                                                            country_name: String::new(),
+                                                                            city_name: String::new(),
+                                                                            proxy_tag: tag.clone(),
+                                                                        },
+                                                                    );
                                                                     switched = true;
                                                                     break;
                                                                 }
@@ -1117,7 +1146,8 @@ async fn refresh_subscription(
 
 #[tauri::command]
 async fn get_settings(state: tauri::State<'_, Mutex<AppSettings>>) -> Result<AppSettings, String> {
-    let settings = state.lock().await;
+    let mut settings = state.lock().await;
+    settings.normalize();
     Ok(settings.clone())
 }
 
@@ -1134,6 +1164,8 @@ async fn update_settings(
     if new_settings.proxy_port == 0 {
         return Err("Invalid proxy port. Must be between 1 and 65535.".into());
     }
+    // Normalise old/migrated values
+    new_settings.normalize();
     // Clamp auto-update interval: 1 min minimum, 1 week max (10080 minutes)
     if new_settings.auto_update_interval < 1 {
         new_settings.auto_update_interval = 1;
@@ -1618,9 +1650,14 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
                 .iter()
                 .any(|p| p.servers.iter().any(|s| s.id == *active_id && s.behind_cdn));
             if is_cdn {
-                tracing::warn!(
+                // Ожидаемое поведение: фронтенд вызывает outlet_ip после
+                // старта прокси к CDN-серверу. Early CDN check корректно
+                // возвращает пустой ExitIpInfo. Это не баг — логируем как
+                // INFO с префиксом [CDN], а не [BUG].
+                tracing::info!(
                     target: "system",
-                    "[BUG] outlet_ip called for CDN server {} — outlet IP is meaningless for CDN",
+                    "[CDN] outlet_ip called for CDN server {} — returning empty \
+                     (outlet IP is meaningless for CDN)",
                     active_id,
                 );
                 return Ok(ExitIpInfo {
@@ -1692,10 +1729,17 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
         return Err("Could not determine external IP".into());
     }
 
+    // Аномалия-детектор: outlet IP в CDN-диапазонах при не-CDN entry.
+    // Это наблюдение, а не баг — возможные причины: WARP upstream,
+    // хостинг у облачного провайдера в .srs-списке, ISP-пересечение.
+    // Логируем как INFO, exit-данные корректны и сохраняются ниже.
     if crate::proxy::geoip::is_cdn_entry_ip(&ip) {
-        tracing::error!(
+        tracing::info!(
             target: "system",
-            "[BUG] outlet_ip: Fetched outlet IP {ip} belongs to a CDN, but active server was not marked as CDN!",
+            "outlet_ip: Fetched outlet IP {ip} is in CDN ranges, but active server was not marked \
+             as CDN. Keeping exit IP (outlet is egress, not entry). If this fires repeatedly for \
+             the same server, investigate CDN list coverage or process_servers entry-IP \
+             classification.",
         );
     }
 
@@ -1748,6 +1792,13 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
                     if server.id == *server_id {
                         // CDN servers have unstable outlet IPs — skip save
                         if server.behind_cdn {
+                            // 🚫 ANTI-REGRESSION: если мы тут, значит Tauri-команда
+                            // outlet_ip отдала IP, но активный сервер — CDN. Это
+                            // означает, что либо outlet_ip получил IP для CDN-сервера
+                            // (что не должно происходить — см. early CDN check в
+                            // outlet_ip), либо в профиле CDN-сервер уже имел exit.
+                            // Логируем для диагностики.
+                            server.assert_no_cdn_exit_data("outlet_ip::save_skip");
                             saved = true;
                             break;
                         }
@@ -2217,12 +2268,14 @@ async fn initialize_app(
         .map(|s| s.try_lock().ok().map(|g| g.ipinfo_token.clone()))
         .flatten()
         .unwrap_or_default();
+    // U7: Cleanup stale tmp files from previous sessions before downloading.
+    crate::proxy::geoip::cleanup_stale_tmp_files();
     crate::proxy::geoip::ensure_downloaded(&geo_dir, &ipinfo_token).await?;
 
     // 3. Enrich loaded profiles with GeoIP data (fix corrupted names)
     if let Some(profile_state) = app.try_state::<ProfileState>() {
         let mut pm = profile_state.manager.lock().await;
-        pm.enrich_loaded().await;
+        pm.enrich_loaded();
 
         // 3a. Prune cache: remove entries not seen in any profile for >30 days.
         //     This prevents the cache from accumulating orphaned entries from
@@ -2281,6 +2334,76 @@ async fn initialize_app(
         LogSource::System,
         "App initialized".into(),
     );
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 🚫 ANTI-REGRESSION: Periodic invariant checker
+    // ═══════════════════════════════════════════════════════════════════
+    // Запускает фоновую задачу, которая раз в 60 секунд проверяет ВСЕ
+    // серверы во ВСЕХ профилях на нарушение I-CDN-1.
+    //
+    // ПОЧЕМУ ЭТО НАДО:
+    //   - enrich_loaded проверяет только при старте приложения.
+    //   - process_servers проверяет только при refresh.
+    //   - Между этими событиями (минуты/часы) CDN-сервер может получить
+    //     exit-данные из-за бага в кеше или runtime-операции.
+    //   - Без periodic checker баг будет невидим до следующего refresh.
+    //
+    // 🚫 НЕ УДАЛЯЙ эту задачу "потому что другие проверки и так ловят".
+    // 🚫 НЕ ПОВЫШАЙ интервал "потому что 60 секунд — это слишком часто".
+    // 🚫 НЕ "ОПТИМИЗИРУЙ" через condvar/event — простой polling проще и надёжнее.
+    //
+    // См. doc-comment ServerProfile::assert_no_cdn_exit_data для regression history.
+    let app_checker = app.clone();
+    tokio::spawn(async move {
+        // Стартовая задержка 30 секунд — чтобы не пересекаться с enrich_loaded.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        loop {
+            if let Some(profile_state) = app_checker.try_state::<ProfileState>() {
+                let pm = profile_state.manager.lock().await;
+                let mut total_violations = 0u32;
+                let mut total_servers = 0u32;
+                let mut total_cdn = 0u32;
+                for profile in pm.list() {
+                    for server in &profile.servers {
+                        total_servers += 1;
+                        if server.behind_cdn {
+                            total_cdn += 1;
+                            server.assert_no_cdn_exit_data("periodic_checker");
+                            if server.exit_server.is_some()
+                                || server.exit_flag.is_some()
+                                || server.exit_country_name.is_some()
+                                || server.exit_city_name.is_some()
+                            {
+                                total_violations += 1;
+                            }
+                        }
+                    }
+                }
+                drop(pm);
+                if total_violations > 0 {
+                    tracing::error!(
+                        target: "cdn-invariant",
+                        "[BUG][I-CDN-1] Periodic checker found {} violations \
+                         across {} servers ({} CDN). See previous [BUG][I-CDN-1] \
+                         log entries for details. Run with RUST_LOG=cdn-invariant=trace \
+                         to see all checks.",
+                        total_violations,
+                        total_servers,
+                        total_cdn,
+                    );
+                } else {
+                    tracing::trace!(
+                        target: "cdn-invariant",
+                        "Periodic checker OK: {} servers checked, {} CDN, 0 violations.",
+                        total_servers,
+                        total_cdn,
+                    );
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+    });
+
     Ok(())
 }
 

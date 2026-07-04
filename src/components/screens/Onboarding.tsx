@@ -68,7 +68,6 @@ export function Onboarding() {
       <AddProfileOptions
         onAdd={(url, name) => handleConnectImpl(url, name)}
         onProfileAdded={() => completeOnboarding()}
-        onProfileError={() => addLog('Failed to add profile during onboarding', 'error', 'system')}
         horizontal={true}
       />
 

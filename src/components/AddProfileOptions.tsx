@@ -6,7 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { readText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTranslation } from '@/hooks/useTranslation';
 import type { RustSubscriptionProfile } from '@/store';
-import {mapRustProfile, useAppStore} from '@/store';
+import {useAppStore} from '@/store';
 import {isRustError} from '@/types';
 import {getErrorMessage} from '@/lib/errors';
 import * as z from 'zod';
@@ -128,18 +128,10 @@ export function AddProfileOptions({
       const rawName = file.name.replace(/\.[^.]+$/, '');
       const existingNames = new Set(useAppStore.getState().profiles.map((p) => p.name));
       const name = uniqueName(rawName, existingNames);
-      const result = await invoke<RustSubscriptionProfile>('import_subscription_content', {
+      await invoke<RustSubscriptionProfile>('import_subscription_content', {
         name,
         content: text,
       });
-      const mapped = mapRustProfile(result);
-      useAppStore
-        .getState()
-        .addLog(
-          `Imported "${name}" (${String(mapped.servers.length)} server(s))`,
-          'success',
-          'subscription',
-        );
     } catch (err) {
       const msg = getErrorMessage(err);
 

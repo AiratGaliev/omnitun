@@ -98,12 +98,6 @@ export default function App() {
     ]).then(async () => {
       setIsInitialized(true);
       await fetchRealIp();
-      const { profiles: loadedProfiles, settings: loadedSettings } = useAppStore.getState();
-      addLog(
-        `App initialized: ${String(loadedProfiles.length)} profile(s), language: ${loadedSettings.language}`,
-        'info',
-        'system',
-      );
     });
   }, [loadProfiles, loadSettings, addLog, fetchRealIp]);
 
