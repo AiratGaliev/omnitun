@@ -5,7 +5,7 @@ import { Edit2, Globe2, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import type { Profile, RefreshProgress } from '@/types.ts';
-import {isRustError} from '@/types.ts';
+import { isRustError } from '@/types.ts';
 import type { TranslationKey } from '@/i18n.ts';
 import * as z from 'zod';
 import { AddProfileOptions } from '../AddProfileOptions';
@@ -47,7 +47,7 @@ export function Profiles() {
       .catch((err: unknown) => {
         // Backend already logged the error via tracing
         if (isRustError(err)) {
-          toast.error(t(err.code, {defaultValue: err.message}));
+          toast.error(t(err.code, { defaultValue: err.message }));
         } else {
           toast.error(t('deleteFailed'));
         }
@@ -63,7 +63,7 @@ export function Profiles() {
       .catch((err: unknown) => {
         // Backend already logged the error via tracing
         if (isRustError(err)) {
-          toast.error(t(err.code, {defaultValue: err.message}));
+          toast.error(t(err.code, { defaultValue: err.message }));
         } else {
           toast.error(t('refreshFailed'));
         }
@@ -141,10 +141,7 @@ interface ProfileItemProps {
   readonly progress: RefreshProgress | null;
   readonly updateProfile: (id: string, data: Partial<Profile>) => void;
   readonly handleRefresh: (profile: Profile) => void;
-  readonly t: (
-      key: TranslationKey | (string & {}),
-      options?: Record<string, unknown>,
-  ) => string;
+  readonly t: (key: TranslationKey | (string & {}), options?: Record<string, unknown>) => string;
   readonly editingId: string | null;
   readonly setEditingId: (id: string | null) => void;
   readonly handleDelete: (id: string, name: string) => void;
@@ -259,9 +256,9 @@ function ProfileItem({
                     <span className="text-xs font-medium text-emerald-400 flex items-center gap-1.5">
                       <Loader2 size={12} className="animate-spin" />
                       {progress.phase === 'testing'
-                        ? `${t('testingServers')}: ${progress.tested}/${progress.total} (${Math.round((progress.tested / Math.max(1, progress.total)) * 100)}%)`
+                        ? `${t('testingServers')}: ${String(progress.tested)}/${String(progress.total)} (${String(Math.round((progress.tested / Math.max(1, progress.total)) * 100))}%)`
                         : progress.phase === 'tcp_ping'
-                          ? `TCP Ping: ${progress.tested}/${progress.total} (${Math.round((progress.tested / Math.max(1, progress.total)) * 100)}%)`
+                          ? `TCP Ping: ${String(progress.tested)}/${String(progress.total)} (${String(Math.round((progress.tested / Math.max(1, progress.total)) * 100))}%)`
                           : progress.phase === 'singbox_starting'
                             ? t('startingSingbox')
                             : progress.phase === 'acquiring_ports'
@@ -284,7 +281,7 @@ function ProfileItem({
                         className="h-full bg-gradient-to-r from-emerald-500 to-emerald-400 rounded-full"
                         initial={{ width: 0 }}
                         animate={{
-                          width: `${Math.min(100, (progress.tested / progress.total) * 100)}%`,
+                          width: `${String(Math.min(100, (progress.tested / progress.total) * 100))}%`,
                         }}
                         transition={{ duration: 0.3 }}
                       />

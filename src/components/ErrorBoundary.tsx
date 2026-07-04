@@ -24,11 +24,7 @@ export class ErrorBoundary extends Component<Props, State> {
   public componentDidCatch(error: Error, _errorInfo: ErrorInfo) {
     // Use store directly — safe even during render crashes since getState()
     // does not trigger React reconciliation.
-    useAppStore.getState().addLog(
-      `[UI] Render error: ${error.message}`,
-      'warning',
-      'system',
-    );
+    useAppStore.getState().addLog(`[UI] Render error: ${error.message}`, 'warning', 'system');
   }
 
   public render() {
@@ -44,7 +40,9 @@ export class ErrorBoundary extends Component<Props, State> {
             {this.state.error?.message}
           </div>
           <button
-            onClick={() => window.location.reload()}
+            onClick={() => {
+              globalThis.location.reload();
+            }}
             className="bg-emerald-500 text-zinc-950 px-6 py-3 rounded-xl font-bold hover:bg-emerald-400 transition-colors"
           >
             Reload Application

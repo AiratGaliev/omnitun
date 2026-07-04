@@ -199,11 +199,11 @@ export interface RustError {
  */
 export function isRustError(err: unknown): err is RustError {
   return (
-      typeof err === 'object' &&
-      err !== null &&
-      'code' in err &&
-      'message' in err &&
-      typeof (err as { code: unknown }).code === 'string' &&
-      typeof (err as { message: unknown }).message === 'string'
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    'message' in err &&
+    typeof (err as { code: unknown }).code === 'string' &&
+    typeof (err as { message: unknown }).message === 'string'
   );
 }

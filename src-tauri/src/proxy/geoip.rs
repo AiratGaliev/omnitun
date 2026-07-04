@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime};
 
+use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+
 /// Lazily-initialized MaxMind GeoLite2 City reader.
 static CITY_READER: OnceLock<maxminddb::Reader<Vec<u8>>> = OnceLock::new();
 /// Lazily-initialized MaxMind GeoLite2 ASN reader.
@@ -88,29 +90,310 @@ pub struct GeoIpResult {
     pub city: String,
 }
 
-// ── ipinfo.io Lite record ──────────────────────────────────────────────────
+// ── ipinfo.io Lite record (гибкий парсинг через serde_json::Value) ─────────
+//
+// Реальный mmdb от ipinfo.io может иметь EITHER:
+//   - Плоскую структуру: { country, country_code, asn, as_name, as_type }
+//   - Вложенную структуру: { country, country_code, ASN: { asn, name, type, ... } }
+//
+// Старый struct IpinfoLiteRecord ожидал плоскую структуру и не парсил
+// вложенную. Из-за этого asn/as_name ВСЕГДА были None, даже когда данные
+// в БД были. Решение: использовать serde_json::Value и извлекать поля
+// динамически через helper ipinfo_lite_extract().
+//
+// Helper ниже принимает serde_json::Value (результат lookup) и возвращает
+// все доступные поля как Option<String>.
 
-/// Data record inside `ipinfo_lite.mmdb`.
+/// Извлечь поля из ipinfo Lite записи (поддерживает плоский и вложенный формат).
 ///
-/// Fields (from ipinfo.io docs):
-/// - `country`       — full country name e.g. "United Kingdom"
-/// - `country_code`  — ISO 3166-2 code e.g. "GB"
-/// - `asn`           — AS number string e.g. "AS13335"
-/// - `as_name`       — AS organisation name
-/// - `as_type`       — "hosting", "isp", "education", "business", "government"
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct IpinfoLiteRecord {
-    #[serde(default)]
-    country: Option<String>,
-    #[serde(default)]
-    country_code: Option<String>,
-    #[serde(default)]
-    asn: Option<String>,
-    #[serde(default, alias = "as_name")]
+/// Возвращает (country, country_code, asn, as_name, as_type).
+/// Любое поле может быть None, если его нет в mmdb.
+pub(crate) fn ipinfo_lite_extract(v: &serde_json::Value) -> (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>) {
+    let country = v.get("country").and_then(|x| x.as_str()).map(|s| s.to_string());
+    let country_code = v.get("country_code").and_then(|x| x.as_str()).map(|s| s.to_string());
+
+    // ASN может быть плоским полем или вложенным объектом "ASN"
+    // Плоский: { asn: "AS13335", as_name: "Cloudflare", as_type: "hosting" }
+    // Вложенный: { ASN: { asn: "AS13335", name: "Cloudflare", type: "hosting", domain: "...", route: "..." } }
+    let asn_obj = v.get("ASN").or_else(|| v.get("asn_obj"));
+    let (asn, as_name, as_type) = if let Some(obj) = asn_obj {
+        let asn = obj.get("asn").and_then(|x| x.as_str()).map(|s| s.to_string());
+        let as_name = obj.get("name")
+            .or_else(|| obj.get("as_name"))
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        let as_type = obj.get("type")
+            .or_else(|| obj.get("as_type"))
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        (asn, as_name, as_type)
+    } else {
+        // Плоский формат
+        let asn = v.get("asn").and_then(|x| x.as_str()).map(|s| s.to_string());
+        let as_name = v.get("as_name")
+            .or_else(|| v.get("name"))
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        let as_type = v.get("as_type")
+            .or_else(|| v.get("type"))
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        (asn, as_name, as_type)
+    };
+
+    (country, country_code, asn, as_name, as_type)
+}
+
+// ── ip.guide fallback (network) ────────────────────────────────────────────
+//
+// Сетевой fallback для IP, по которым ipinfo Lite + MaxMind City + MaxMind ASN
+// не дали страну. Используется https://ip.guide/{ip} — бесплатный REST API
+// без API key, возвращает JSON с RIR-based country (из ARIN/RIPE/APNIC whois).
+//
+// Это ЕДИНСТВЕННЫЙ источник country для anycast IP (Cloudflare 1.1.1.1,
+// Google 8.8.8.8, Oracle 8.x.x.x) — у них нет geography в MaxMind City,
+// потому что anycast не имеет одной страны. RIR whois знает ASN registration
+// country, что и возвращает ip.guide.
+//
+// Ограничения:
+//   - Кеш: TTL 1 час
+//   - Rate-limit: max 10 запросов за refresh-цикл
+//   - Concurrency: max 3 параллельно
+//   - Таймаут: 5 сек на запрос
+//   - НЕ для private/mock IP
+//   - НЕ для CDN-серверов (behind_cdn=true)
+//
+// 🚫 ANTI-REGRESSION: не удаляй кеш и rate-limit. Без них 50-server refresh
+// отправит 50 запросов за 5 секунд → бан от ip.guide.
+// 🚫 ANTI-REGRESSION: не добавляй hardcoded ASN→country map. Данные
+// уже есть в RIR whois (через ip.guide). Хардкод устаревает и врёт.
+
+/// Cache entry for ip.guide results.
+#[derive(Clone)]
+struct IpGuideCacheEntry {
+    country_code: String,
+    country_name: String,
+    #[allow(dead_code)]
+    asn: Option<u32>,
+    #[allow(dead_code)]
     as_name: Option<String>,
-    #[serde(default)]
-    as_type: Option<String>,
+    fetched_at: SystemTime,
+}
+
+/// TTL for ip.guide cache entries.
+const IPGUIDE_CACHE_TTL: Duration = Duration::from_secs(3600); // 1 hour
+
+/// Max requests per refresh-cycle.
+const IPGUIDE_MAX_REQUESTS_PER_CYCLE: usize = 10;
+
+/// Max concurrent requests to ip.guide.
+static IPGUIDE_SEMAPHORE: Semaphore = Semaphore::const_new(3);
+
+/// In-memory cache: IP → cache entry.
+static IPGUIDE_CACHE: OnceLock<AsyncMutex<std::collections::HashMap<String, IpGuideCacheEntry>>> = OnceLock::new();
+
+/// Rate-limit counter (resets per refresh-cycle).
+static IPGUIDE_REQUESTS_THIS_CYCLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Get or init the ip.guide cache.
+fn ipguide_cache() -> &'static AsyncMutex<std::collections::HashMap<String, IpGuideCacheEntry>> {
+    IPGUIDE_CACHE.get_or_init(|| AsyncMutex::new(std::collections::HashMap::new()))
+}
+
+/// Reset the per-cycle rate-limit counter.
+pub fn reset_ipguide_rate_limit() {
+    IPGUIDE_REQUESTS_THIS_CYCLE.store(0, std::sync::atomic::Ordering::Relaxed);
+    log::debug!("GeoIP: ip.guide rate-limit counter reset for new refresh cycle");
+}
+
+/// Check if an IP is private/mock (skip ip.guide for these).
+fn is_private_or_mock_ip(ip: &str) -> bool {
+    if let Ok(addr) = ip.parse::<IpAddr>() {
+        match addr {
+            IpAddr::V4(v4) => {
+                v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local()
+            }
+        }
+    } else {
+        true
+    }
+}
+
+/// Fetch country from https://ip.guide/{ip}.
+///
+/// Returns Some(GeoIpResult) on success, None on failure.
+/// Logs INFO on success (with source stated), WARN on failure.
+pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
+    if is_private_or_mock_ip(ip) {
+        return None;
+    }
+
+    // Check cache first
+    {
+        let cache = ipguide_cache().lock().await;
+        if let Some(entry) = cache.get(ip) {
+            if let Ok(age) = SystemTime::now().duration_since(entry.fetched_at) {
+                if age < IPGUIDE_CACHE_TTL {
+                    log::debug!("GeoIP: ip.guide cache hit for {}", ip);
+                    return Some(GeoIpResult {
+                        country_code: entry.country_code.clone(),
+                        country_name: entry.country_name.clone(),
+                        city: String::new(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Rate-limit check
+    let current = IPGUIDE_REQUESTS_THIS_CYCLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if current >= IPGUIDE_MAX_REQUESTS_PER_CYCLE {
+        log::warn!(
+            "GeoIP: ip.guide rate limit exceeded (max {}/cycle), skipping {}",
+            IPGUIDE_MAX_REQUESTS_PER_CYCLE, ip
+        );
+        return None;
+    }
+
+    // Concurrency limit
+    let _permit = match IPGUIDE_SEMAPHORE.acquire().await {
+        Ok(p) => p,
+        Err(_) => {
+            log::warn!("GeoIP: ip.guide semaphore closed for {}", ip);
+            return None;
+        }
+    };
+
+    // HTTP GET with timeout
+    let url = format!("https://ip.guide/{}", ip);
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .user_agent("omnitun/1.0")
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("GeoIP: ip.guide client build failed for {}: {}", ip, e);
+            return None;
+        }
+    };
+
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("GeoIP: ip.guide request failed for {}: {}", ip, e);
+            return None;
+        }
+    };
+
+    if !resp.status().is_success() {
+        log::warn!("GeoIP: ip.guide returned HTTP {} for {}", resp.status(), ip);
+        return None;
+    }
+
+    let body = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("GeoIP: ip.guide body read failed for {}: {}", ip, e);
+            return None;
+        }
+    };
+
+    // Parse JSON. ip.guide format:
+    // { "ip": "...", "network": { "autonomous_system": { "asn": N, "name": "...", "country": "US", "rir": "ARIN" } }, ... }
+    // Prefer network.autonomous_system.country (RIR-based) over location.country (geo-based)
+    let json: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("GeoIP: ip.guide JSON parse failed for {}: {}. Body: {}",
+                       ip, e, &body[..body.len().min(200)]);
+            return None;
+        }
+    };
+
+    let (country_code, asn_num, as_name) = {
+        let asn_obj = json.get("network").and_then(|n| n.get("autonomous_system"));
+        let cc = asn_obj
+            .and_then(|a| a.get("country"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        let asn = asn_obj
+            .and_then(|a| a.get("asn"))
+            .and_then(|a| a.as_u64())
+            .map(|n| n as u32);
+        let name = asn_obj
+            .and_then(|a| a.get("name"))
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string());
+        (cc.to_string(), asn, name)
+    };
+
+    // Fallback to location.country if ASN country is empty
+    let country_code = if country_code.is_empty() {
+        json.get("location")
+            .and_then(|l| l.get("country"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string()
+    } else {
+        country_code
+    };
+
+    if country_code.is_empty() {
+        log::warn!("GeoIP: ip.guide returned no country for {}", ip);
+        return None;
+    }
+
+    let country_name = country_code_to_name(&country_code);
+
+    log::info!(
+        "GeoIP: country resolved via ip.guide for {} → {} (ASN {} {})",
+        ip, country_code,
+        asn_num.map(|n| n.to_string()).unwrap_or_else(|| "?".to_string()),
+        as_name.as_deref().unwrap_or("?")
+    );
+
+    // Cache the result
+    let entry = IpGuideCacheEntry {
+        country_code: country_code.clone(),
+        country_name: country_name.clone(),
+        asn: asn_num,
+        as_name: as_name.clone(),
+        fetched_at: SystemTime::now(),
+    };
+    {
+        let mut cache = ipguide_cache().lock().await;
+        cache.insert(ip.to_string(), entry);
+    }
+
+    Some(GeoIpResult {
+        country_code,
+        country_name,
+        city: String::new(),
+    })
+}
+
+/// Convert ISO 3166-1 alpha-2 country code to name.
+fn country_code_to_name(cc: &str) -> String {
+    match cc {
+        "US" => "United States", "GB" => "United Kingdom", "DE" => "Germany",
+        "FR" => "France", "NL" => "Netherlands", "JP" => "Japan",
+        "SG" => "Singapore", "CA" => "Canada", "AU" => "Australia",
+        "RU" => "Russia", "UA" => "Ukraine", "PL" => "Poland",
+        "SE" => "Sweden", "CH" => "Switzerland", "FI" => "Finland",
+        "NO" => "Norway", "DK" => "Denmark", "ES" => "Spain",
+        "IT" => "Italy", "CZ" => "Czech Republic", "RO" => "Romania",
+        "BG" => "Bulgaria", "TR" => "Turkey", "IN" => "India",
+        "CN" => "China", "HK" => "Hong Kong", "KR" => "South Korea",
+        "TW" => "Taiwan", "AE" => "United Arab Emirates", "BR" => "Brazil",
+        "MX" => "Mexico", "AR" => "Argentina", "ZA" => "South Africa",
+        "ID" => "Indonesia", "TH" => "Thailand", "VN" => "Vietnam",
+        "MY" => "Malaysia", "PH" => "Philippines", "KZ" => "Kazakhstan",
+        "IL" => "Israel", "IR" => "Iran", _ => cc,
+    }.to_string()
 }
 
 // ── MaxMind City DB ────────────────────────────────────────────────────────
@@ -544,9 +827,10 @@ fn mock_lookup(ip: &str) -> Option<GeoIpResult> {
 ///
 /// Merges data from multiple sources:
 ///   1. Mock IPs (test Docker servers) — short-circuit
-///   2. ipinfo.io Lite — country_code + country_name (more up-to-date)
+///   2. ipinfo.io Lite — country_code + country_name (через serde_json::Value, гибкий парсинг)
 ///   3. MaxMind GeoLite2 City — city + fallback country
-///   4. None
+///   4. MaxMind GeoLite2 ASN — диагностическое логирование (не inference)
+///   5. None
 ///
 /// Returns None when no database is loaded, the input is a hostname,
 /// or the IP is not found in any loaded database.
@@ -557,22 +841,41 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
 
     let addr: IpAddr = ip.parse().ok()?;
 
-    // Try ipinfo Lite first for country (updated more frequently).
+    // ── 1. ipinfo Lite (через serde_json::Value, гибкий парсинг) ──────
+    // Раньше использовался IpinfoLiteRecord с плоскими полями, но реальный
+    // mmdb может иметь вложенную структуру ASN. Это приводило к тому, что
+    // asn/as_name всегда были None. Теперь парсим через Value.
     let mut country_code = String::new();
     let mut country_name = String::new();
+    let mut ipinfo_asn: Option<String> = None;
+    let mut ipinfo_as_name: Option<String> = None;
     if let Some(reader) = IPINFO_LITE_READER.get() {
-        if let Ok(rec) = reader.lookup::<IpinfoLiteRecord>(addr) {
-            if let Some(ref cc) = rec.country_code {
-                if !cc.is_empty() {
-                    country_code = cc.clone();
-                    country_name = rec.country.clone().unwrap_or_default();
+        if let Ok(value) = reader.lookup::<serde_json::Value>(addr) {
+            let (country, cc, asn, as_name, _as_type) = ipinfo_lite_extract(&value);
+            ipinfo_asn = asn.clone();
+            ipinfo_as_name = as_name.clone();
+            if let Some(ref cc_str) = cc {
+                if !cc_str.is_empty() {
+                    country_code = cc_str.clone();
+                    country_name = country.unwrap_or_default();
                 }
             }
         }
     }
 
-    // Always try MaxMind City for city enrichment (ipinfo Lite has none)
-    // and fallback country when ipinfo didn't have the IP.
+    // Диагностическое логирование: если ipinfo Lite вернул запись с ASN,
+    // но без country_code — это anycast IP или специальный случай.
+    if country_code.is_empty() {
+        if let Some(ref asn) = ipinfo_asn {
+            log::debug!(
+                "GeoIP: ipinfo Lite has ASN for {} but no country_code (anycast?): \
+                 asn={}, as_name={:?}",
+                ip, asn, ipinfo_as_name
+            );
+        }
+    }
+
+    // ── 2. MaxMind City (city enrichment + fallback country) ───────────
     let mut city = String::new();
     if let Some(reader) = CITY_READER.get() {
         if let Ok(entry) = reader.lookup::<maxminddb::geoip2::City>(addr) {
@@ -583,7 +886,7 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
                 .and_then(|n| n.get("en").map(|s| s.to_string()))
                 .unwrap_or_default();
 
-            // Only use MaxMind country if ipinfo didn't provide one
+            // Fallback country: только если ipinfo Lite не дал
             if country_code.is_empty() {
                 country_code = entry
                     .country
@@ -601,7 +904,39 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
         }
     }
 
+    // ── 3. MaxMind ASN (диагностическое логирование, не inference) ────
+    // ASN_READER загружен, но раньше не использовался. Теперь логируем
+    // ASN+org на DEBUG, если country не найдена.
+    if country_code.is_empty() {
+        if let Some(reader) = ASN_READER.get() {
+            if let Ok(entry) = reader.lookup::<maxminddb::geoip2::Asn>(addr) {
+                let asn_num = entry.autonomous_system_number;
+                let asn_org = entry.autonomous_system_organization;
+                if asn_num.is_some() || asn_org.is_some() {
+                    log::debug!(
+                        "GeoIP: MaxMind ASN has data for {} (no country in City): \
+                         asn={:?}, org={:?}. Will try ip.guide fallback.",
+                        ip, asn_num, asn_org
+                    );
+                }
+            }
+        }
+    }
+
     if country_code.is_empty() && city.is_empty() {
+        return None;
+    }
+
+    // Edge case: если есть city но нет country — всё равно возвращаем None,
+    // чтобы resolve_hostname мог вызвать ip.guide fallback.
+    // City без country для non-anycast IP крайне маловероятен (MaxMind City
+    // почти всегда содержит country для IP с city), а для anycast IP
+    // ip.guide — единственный источник country.
+    if country_code.is_empty() && !city.is_empty() {
+        log::debug!(
+            "GeoIP: MaxMind City has city ({}) for {} but no country — will try ip.guide",
+            city, ip
+        );
         return None;
     }
 
@@ -613,9 +948,15 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
 }
 
 /// Try to resolve a hostname to an IP address, then do GeoIP lookup.
+/// Falls back to ip.guide network API if local GeoIP databases don't have the IP.
 pub async fn resolve_hostname(host: &str) -> Option<GeoIpResult> {
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return resolve(&ip.to_string());
+        // Сначала пробуем sync resolve (ipinfo Lite + City + ASN logging).
+        if let Some(result) = resolve(&ip.to_string()) {
+            return Some(result);
+        }
+        // Fallback: ip.guide (сеть, с кешем и rate-limit).
+        return resolve_via_ip_guide(&ip.to_string()).await;
     }
 
     let addr_str = format!("{host}:0");
@@ -623,7 +964,12 @@ pub async fn resolve_hostname(host: &str) -> Option<GeoIpResult> {
     match result {
         Ok(mut addrs) => {
             if let Some(addr) = addrs.next() {
-                resolve(&addr.ip().to_string())
+                let ip_str = addr.ip().to_string();
+                if let Some(result) = resolve(&ip_str) {
+                    Some(result)
+                } else {
+                    resolve_via_ip_guide(&ip_str).await
+                }
             } else {
                 None
             }
@@ -1340,22 +1686,23 @@ mod tests {
         assert!(!is_ready());
     }
 
-    // ── ipinfo Lite record parsing ────────────────────────────────────
+    // ── ipinfo Lite record (ipinfo_lite_extract helper) ─────────────────
 
     #[test]
-    fn test_ipinfo_lite_record_defaults() {
-        // An empty JSON object should deserialize with all fields as None
-        let json = r#"{}"#;
-        let rec: IpinfoLiteRecord = serde_json::from_str(json).unwrap();
-        assert!(rec.country.is_none());
-        assert!(rec.country_code.is_none());
-        assert!(rec.asn.is_none());
-        assert!(rec.as_name.is_none());
-        assert!(rec.as_type.is_none());
+    fn test_ipinfo_lite_extract_defaults() {
+        // An empty JSON object should return all fields as None
+        let v: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
+        let (country, cc, asn, as_name, as_type) = super::ipinfo_lite_extract(&v);
+        assert!(country.is_none());
+        assert!(cc.is_none());
+        assert!(asn.is_none());
+        assert!(as_name.is_none());
+        assert!(as_type.is_none());
     }
 
     #[test]
-    fn test_ipinfo_lite_record_full() {
+    fn test_ipinfo_lite_extract_flat() {
+        // Плоский формат (традиционная структура ipinfo Lite)
         let json = r#"{
             "country": "United Kingdom",
             "country_code": "GB",
@@ -1363,12 +1710,36 @@ mod tests {
             "as_name": "Cloudflare Inc.",
             "as_type": "hosting"
         }"#;
-        let rec: IpinfoLiteRecord = serde_json::from_str(json).unwrap();
-        assert_eq!(rec.country.as_deref(), Some("United Kingdom"));
-        assert_eq!(rec.country_code.as_deref(), Some("GB"));
-        assert_eq!(rec.asn.as_deref(), Some("AS13335"));
-        assert_eq!(rec.as_name.as_deref(), Some("Cloudflare Inc."));
-        assert_eq!(rec.as_type.as_deref(), Some("hosting"));
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let (country, cc, asn, as_name, as_type) = super::ipinfo_lite_extract(&v);
+        assert_eq!(country.as_deref(), Some("United Kingdom"));
+        assert_eq!(cc.as_deref(), Some("GB"));
+        assert_eq!(asn.as_deref(), Some("AS13335"));
+        assert_eq!(as_name.as_deref(), Some("Cloudflare Inc."));
+        assert_eq!(as_type.as_deref(), Some("hosting"));
+    }
+
+    #[test]
+    fn test_ipinfo_lite_extract_nested() {
+        // Вложенный формат (ASN как объект, как может быть в реальном mmdb)
+        let json = r#"{
+            "country": "Germany",
+            "country_code": "DE",
+            "ASN": {
+                "asn": "AS24940",
+                "name": "Hetzner Online GmbH",
+                "type": "hosting",
+                "domain": "hetzner.com",
+                "route": "5.9.0.0/16"
+            }
+        }"#;
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let (country, cc, asn, as_name, as_type) = super::ipinfo_lite_extract(&v);
+        assert_eq!(country.as_deref(), Some("Germany"));
+        assert_eq!(cc.as_deref(), Some("DE"));
+        assert_eq!(asn.as_deref(), Some("AS24940"));
+        assert_eq!(as_name.as_deref(), Some("Hetzner Online GmbH"));
+        assert_eq!(as_type.as_deref(), Some("hosting"));
     }
 
     // ── is_cdn_ip / init_cdn_ranges ────────────────────────────────────

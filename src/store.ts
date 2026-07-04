@@ -31,7 +31,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { i18n } from './i18n';
-import {getErrorMessage, localizeError} from './lib/errors';
+import { getErrorMessage, localizeError } from './lib/errors';
 import type {
   ConnectionInfo,
   ConnectionStatus,
@@ -288,7 +288,10 @@ async function getBestServer(
   currentActiveId?: string,
 ): Promise<Server | null> {
   if (!autoSelect || servers.length === 0) {
-    return servers.find((s) => s.id === currentActiveId) ?? servers[0] ?? null;
+    const matched = servers.find((s) => s.id === currentActiveId);
+    if (matched) return matched;
+    if (servers.length > 0) return servers[0];
+    return null;
   }
   const best = await invoke<RustServerProfile | null>('pick_replacement_server', {
     current_server_id: '',
@@ -521,7 +524,9 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
             toast.info(i18n.t('ipinfoCached'), { id: downloadToastId });
           }
         } catch (e) {
-          toast.error(`${i18n.t('ipinfoDownloadFailed')}: ${getErrorMessage(e)}`, { id: downloadToastId });
+          toast.error(`${i18n.t('ipinfoDownloadFailed')}: ${getErrorMessage(e)}`, {
+            id: downloadToastId,
+          });
         }
       }
     } catch (e: unknown) {
@@ -535,11 +540,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       const result = await invoke<Settings>('get_settings');
       set({ settings: result });
     } catch (e) {
-      get().addLog(
-        `Failed to load settings: ${getErrorMessage(e)}`,
-        'error',
-        'settings',
-      );
+      get().addLog(`Failed to load settings: ${getErrorMessage(e)}`, 'error', 'settings');
       set({ settingsVersion: get().settingsVersion });
     }
   },

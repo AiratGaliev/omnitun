@@ -55,18 +55,14 @@ export default function App() {
         }
       })
       .catch((e: unknown) => {
-        addLog(
-          `initListener failed: ${getErrorMessage(e)}`,
-          'warning',
-          'system',
-        );
+        addLog(`initListener failed: ${getErrorMessage(e)}`, 'warning', 'system');
       });
 
     return () => {
       isMounted = false;
       unlisten?.();
     };
-  }, [initListener]);
+  }, [initListener, addLog]);
 
   // Listen for tray toggle event (system tray "Connect" button)
   useEffect(() => {
@@ -74,13 +70,13 @@ export default function App() {
       void useAppStore.getState().toggleConnection();
     });
     return () => {
-      unlistenPromise.then((fn) => fn()).catch(() => {
-        useAppStore.getState().addLog(
-          'Failed to clean up tray listener',
-          'warning',
-          'system',
-        );
-      });
+      unlistenPromise
+        .then((fn) => {
+          fn();
+        })
+        .catch(() => {
+          useAppStore.getState().addLog('Failed to clean up tray listener', 'warning', 'system');
+        });
     };
   }, []);
 
@@ -122,7 +118,7 @@ export default function App() {
           updatedCount++;
           refreshProfile(p.id).catch((err: unknown) => {
             if (isRustError(err)) {
-              toast.error(t(err.code, {defaultValue: err.message}));
+              toast.error(t(err.code, { defaultValue: err.message }));
             } else {
               toast.error(t('autoRefreshFailed'));
             }
@@ -142,7 +138,7 @@ export default function App() {
       clearTimeout(initialTimer);
       clearInterval(timer);
     };
-  }, [isInitialized, settings.autoUpdateInterval]);
+  }, [isInitialized, settings.autoUpdateInterval, t]);
 
   return (
     <div className="w-full h-screen bg-zinc-950 text-zinc-100 font-sans flex overflow-hidden relative selection:bg-emerald-500/30">

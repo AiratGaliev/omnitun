@@ -6,9 +6,9 @@ import { invoke } from '@tauri-apps/api/core';
 import { readText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTranslation } from '@/hooks/useTranslation';
 import type { RustSubscriptionProfile } from '@/store';
-import {useAppStore} from '@/store';
-import {isRustError} from '@/types';
-import {getErrorMessage} from '@/lib/errors';
+import { useAppStore } from '@/store';
+import { isRustError } from '@/types';
+import { getErrorMessage } from '@/lib/errors';
 import * as z from 'zod';
 
 const manualSchema = z.object({
@@ -28,10 +28,10 @@ function extractDomain(url: string): string {
 function uniqueName(desired: string, existing: ReadonlySet<string>): string {
   if (!existing.has(desired)) return desired;
   let counter = 1;
-  while (existing.has(`${desired} ${counter}`)) {
+  while (existing.has(`${desired} ${String(counter)}`)) {
     counter++;
   }
-  return `${desired} ${counter}`;
+  return `${desired} ${String(counter)}`;
 }
 
 interface AddProfileOptionsProps {
@@ -67,7 +67,7 @@ export function AddProfileOptions({
           // Структурированная ошибка из Rust: код → i18n-ключ напрямую.
           // Если перевода нет — i18next вернёт err.message (англ. dev-текст).
           if (isRustError(err)) {
-            return t(err.code, {defaultValue: err.message});
+            return t(err.code, { defaultValue: err.message });
           }
 
           // Легаси-ошибки (String) и прочее — общий fallback.
@@ -116,7 +116,7 @@ export function AddProfileOptions({
     } catch (err) {
       const msg = getErrorMessage(err);
       useAppStore.getState().addLog(`Clipboard error: ${msg}`, 'error', 'subscription');
-      toast.error(t('clipboardErrMsg'), {description: msg, duration: 4000});
+      toast.error(t('clipboardErrMsg'), { description: msg, duration: 4000 });
     }
   };
 
@@ -143,7 +143,7 @@ export function AddProfileOptions({
 
       // Тост: локализованное сообщение
       if (isRustError(err)) {
-        toast.error(t(err.code, {defaultValue: err.message}));
+        toast.error(t(err.code, { defaultValue: err.message }));
       } else {
         toast.error(msg);
       }

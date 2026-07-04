@@ -15,10 +15,8 @@ import type { TranslationKey } from '@/i18n';
 export function useTranslation() {
   const { t, i18n } = useI18nTranslation();
   return {
-    t: (
-        key: TranslationKey | (string & {}),
-        options?: Record<string, unknown>,
-    ): string => t(key, options),
+    t: (key: TranslationKey | (string & {}), options?: Record<string, unknown>): string =>
+      t(key, options),
     lang: i18n.language,
   };
 }

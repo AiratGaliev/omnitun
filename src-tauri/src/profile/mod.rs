@@ -360,7 +360,14 @@ impl ProfileManager {
                 )
             })
             .collect();
+        // Сброс rate-limit счётчика ip.guide для нового refresh-цикла.
+        // Вызываем ДО process_servers, чтобы ограничение действовало
+        // на текущий цикл GeoIP enrichment.
+        // 🚫 ANTI-REGRESSION: не удаляй этот вызов.
+        crate::proxy::geoip::reset_ipguide_rate_limit();
+
         servers = process_servers(app, servers, id).await;
+
         // Restore preserved exit data if batch test didn't update it.
         // WARNING: for CDN servers, do NOT restore — process_servers explicitly
         // cleared exit data (invariant I-CDN-1: behind_cdn ⇒ exit_* = None).
@@ -720,8 +727,9 @@ pub async fn process_servers(
                             .map(|_| &*server.server)
                     });
                 let geoip_info = if let Some(ip) = geoip_ip {
-                    // Already have an IP — synchronous lookup, no duplicate DNS.
-                    crate::proxy::geoip::resolve(ip)
+                    // Already have an IP — resolve_hostname first tries sync resolve(),
+                    // then falls back to ip.guide network API.
+                    crate::proxy::geoip::resolve_hostname(ip).await
                 } else {
                     // Last resort: server.server is a hostname and DNS didn't resolve.
                     // Let resolve_hostname try the DNS itself.

@@ -87,7 +87,7 @@ export function NetworkSettings() {
               }}
               placeholder="1.1.1.1"
               className={`w-full max-w-62.5 bg-zinc-950/50 border ${
-                settings.customDns && !settings.dnsAddress
+                settings.dnsAddress.length === 0
                   ? 'border-amber-500/30 focus:border-amber-500/50 focus:ring-amber-500/30'
                   : 'border-white/10 focus:border-emerald-500/50 focus:ring-emerald-500/30'
               } rounded-xl px-4 py-2.5 text-sm font-mono text-zinc-300 focus:outline-none focus:ring-2 shadow-inner transition-all`}

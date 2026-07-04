@@ -7,9 +7,9 @@
 // i18next's `defaultValue` option to fall back to the English dev message
 // from Rust when no translation exists — no manual string comparison needed.
 
-import {isRustError} from '@/types';
-import {i18n} from '@/i18n';
-import type {TranslationKey} from '@/i18n';
+import { isRustError } from '@/types';
+import { i18n } from '@/i18n';
+import type { TranslationKey } from '@/i18n';
 
 /**
  * Extracts a developer-facing message (English) from any error.
@@ -53,13 +53,10 @@ export function getErrorMessage(err: unknown): string {
  *   // In store.ts (non-React):
  *   toast.error(localizeError(e, 'connectionFailedDesc'));
  */
-export function localizeError(
-    err: unknown,
-    fallbackKey: TranslationKey = 'addFailed',
-): string {
+export function localizeError(err: unknown, fallbackKey: TranslationKey = 'addFailed'): string {
   if (isRustError(err)) {
     // i18n.t accepts any string. If key is missing, returns defaultValue.
-    return i18n.t(err.code, {defaultValue: err.message});
+    return i18n.t(err.code, { defaultValue: err.message });
   }
   return i18n.t(fallbackKey);
 }

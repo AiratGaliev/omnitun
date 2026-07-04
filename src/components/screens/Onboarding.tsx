@@ -67,7 +67,9 @@ export function Onboarding() {
 
       <AddProfileOptions
         onAdd={(url, name) => handleConnectImpl(url, name)}
-        onProfileAdded={() => completeOnboarding()}
+        onProfileAdded={() => {
+          completeOnboarding();
+        }}
         horizontal={true}
       />
 

@@ -422,23 +422,21 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                             ? t('systemProxyModeDesc')
                             : t('proxyModeDesc')}
                         </p>
-                        {(settings.routingMode === 'system-proxy' ||
-                          settings.routingMode === 'local-proxy') && (
-                          <motion.div className="flex items-center justify-between gap-3 mt-2 bg-zinc-900/80 w-[150px] mx-auto rounded-xl border border-white/10 p-1.5 px-4 transition-all shadow-inner focus-within:ring-2 focus-within:ring-emerald-500/30 focus-within:border-emerald-500/50">
-                            <span className="text-[10px] text-zinc-500 font-semibold tracking-wide uppercase">
-                              {t('proxyPort')}
-                            </span>
-                            <input
-                              type="number"
-                              value={settings.proxyPort || 1080}
-                              onChange={(e) => {
-                                updateSettings({ proxyPort: Number(e.target.value) });
-                              }}
-                              disabled={isConnected || isConnecting}
-                              className="bg-transparent text-xs tracking-widest text-emerald-400 w-12 focus:outline-none font-mono text-right disabled:opacity-50"
-                            />
-                          </motion.div>
-                        )}
+                        {/* Proxy port is always shown — both routing modes use a proxy port */}
+                        <motion.div className="flex items-center justify-between gap-3 mt-2 bg-zinc-900/80 w-[150px] mx-auto rounded-xl border border-white/10 p-1.5 px-4 transition-all shadow-inner focus-within:ring-2 focus-within:ring-emerald-500/30 focus-within:border-emerald-500/50">
+                          <span className="text-[10px] text-zinc-500 font-semibold tracking-wide uppercase">
+                            {t('proxyPort')}
+                          </span>
+                          <input
+                            type="number"
+                            value={settings.proxyPort || 1080}
+                            onChange={(e) => {
+                              updateSettings({ proxyPort: Number(e.target.value) });
+                            }}
+                            disabled={isConnected || isConnecting}
+                            className="bg-transparent text-xs tracking-widest text-emerald-400 w-12 focus:outline-none font-mono text-right disabled:opacity-50"
+                          />
+                        </motion.div>
                       </motion.div>
                     </AnimatePresence>
                   </div>
@@ -555,7 +553,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                   <FlagDisplay code={exitIp.flag} className="text-xs shrink-0" />
                                 )}
                                 <span className="truncate">
-                                  {exitIp.country_name ?? exitIp.flag}
+                                  {exitIp.country_name || exitIp.flag}
                                 </span>
                                 {exitIp.city_name && (
                                   <span className="text-zinc-500 shrink-0">
@@ -594,7 +592,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                           {realIp.flag && (
                             <FlagDisplay code={realIp.flag} className="text-xs shrink-0" />
                           )}
-                          <span className="truncate">{realIp.country_name ?? realIp.flag}</span>
+                          <span className="truncate">{realIp.country_name || realIp.flag}</span>
                           {realIp.city_name && (
                             <span className="text-zinc-500 shrink-0">({realIp.city_name})</span>
                           )}

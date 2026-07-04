@@ -142,7 +142,7 @@ export function Logs() {
               >
                 {SOURCE_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value} className="bg-zinc-900 text-zinc-300">
-                    {t(opt.labelKey as unknown as Parameters<typeof t>[0])}
+                    {t(opt.labelKey)}
                   </option>
                 ))}
               </select>
