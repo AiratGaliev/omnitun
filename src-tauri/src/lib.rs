@@ -775,6 +775,49 @@ async fn stop_proxy(
 
     log_stop(LogLevel::Info, "[stop_proxy] sing-box killed".into());
 
+    // Step 3b: Reset Windows system proxy (sing-box was killed, can't clean up itself)
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("reg")
+            .args([
+                "add",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+                "/v",
+                "ProxyEnable",
+                "/t",
+                "REG_DWORD",
+                "/d",
+                "0",
+                "/f",
+            ])
+            .output();
+        let _ = std::process::Command::new("reg")
+            .args([
+                "delete",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+                "/v",
+                "ProxyServer",
+                "/f",
+            ])
+            .output();
+        let _ = std::process::Command::new("reg")
+            .args([
+                "delete",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+                "/v",
+                "AutoConfigURL",
+                "/f",
+            ])
+            .output();
+        let _ = std::process::Command::new("netsh")
+            .args(["winhttp", "reset", "proxy"])
+            .output();
+        log_stop(
+            LogLevel::Info,
+            "[stop_proxy] step 3b: Windows system proxy disabled".into(),
+        );
+    }
+
     // Step 4: Best-effort manager cleanup.
     if let Ok(mgr) = state.manager.try_lock() {
         mgr.clear_pid();

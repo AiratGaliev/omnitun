@@ -411,11 +411,14 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                       updateSettings({ routingMode: val });
                       addLog(`Routing mode changed to ${val}`, 'info', 'settings');
 
-                      // Auto-reconnect with new mode when connected
                       if (status === 'connected') {
+                        // Connected: seamless stop + start with new mode
                         void seamlessReconnect(
                           val === 'system-proxy' ? t('systemProxyMode') : t('proxyMode'),
                         );
+                      } else if (status === 'error') {
+                        // Error state: restart proxy with new mode
+                        void toggleConnection();
                       }
                     }}
                     disabled={isConnecting}

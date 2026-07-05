@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import {
+  Globe,
   Home,
   Info,
   List,
@@ -11,6 +12,7 @@ import {
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useTranslation } from '../hooks/useTranslation';
+import { useAppStore } from '../store';
 
 interface NavigationProps {
   readonly activeTab: 'home' | 'profiles' | 'settings' | 'logs' | 'about';
@@ -20,6 +22,7 @@ interface NavigationProps {
 export function Navigation({ activeTab, onChange }: NavigationProps) {
   const { t } = useTranslation();
   const [isExpanded, setIsExpanded] = useState(false);
+  const isConnected = useAppStore((state) => state.status === 'connected');
 
   const tabs = [
     { id: 'home', icon: Home, label: t('navHome') },
@@ -111,7 +114,15 @@ export function Navigation({ activeTab, onChange }: NavigationProps) {
       <div
         className={`mt-auto mb-2 flex items-center h-8 ${isExpanded ? 'px-8 justify-start gap-4' : 'justify-center w-full'}`}
       >
-        <div className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.8)] shrink-0 animate-pulse" />
+        <Globe
+          size={14}
+          className={`shrink-0 ${
+            isConnected
+              ? 'text-emerald-500 animate-pulse'
+              : 'text-zinc-600'
+          }`}
+          style={isConnected ? { filter: 'drop-shadow(0 0 8px rgba(16,185,129,0.6))' } : undefined}
+        />
         <AnimatePresence>
           {isExpanded && (
             <motion.span
