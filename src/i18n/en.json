@@ -218,5 +218,6 @@
   "speedBps": "B/s",
   "speedKbps": "KB/s",
   "speedMbps": "MB/s",
-  "speedGbps": "GB/s"
+  "speedGbps": "GB/s",
+  "reconnectingTo": "Reconnecting to {{name}}..."
 }

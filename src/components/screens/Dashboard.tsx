@@ -166,7 +166,16 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     if (freshStatus === 'disconnected') {
       toast(t('protectionDisabled'));
     } else if (freshStatus === 'connected') {
-      toast.success(`${t('connectedTo')}${freshActiveServer?.name ?? ''}`, {
+      toast.success(`${t('connectedTo')}${getServerDisplayName(
+        {
+          countryName: freshActiveServer?.countryName,
+          flag: freshActiveServer?.flag,
+          name: freshActiveServer?.name,
+          server: freshActiveServer?.server,
+          port: freshActiveServer?.port,
+        },
+        i18n.language,
+      ) ?? ''}`, {
         description: t('trafficProtected'),
       });
     }
@@ -241,7 +250,8 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                       <div className="flex items-center gap-1 shrink-0 h-7">
                         {activeServer?.exitFlag &&
                         activeServer.flag &&
-                        activeServer.exitServer !== activeServer.server ? (
+                        activeServer.exitServer !== activeServer.server &&
+                        activeServer.exitFlag !== activeServer.flag ? (
                           <div className="flex items-center gap-0.5 text-lg text-zinc-500">
                             <FlagDisplay code={activeServer.flag} className="text-xs" />
                             <span>→</span>
@@ -317,16 +327,27 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                               <button
                                 key={server.id}
                                 onClick={() => {
+                                  const localizedName = getServerDisplayName(
+                                    {
+                                      countryName: server.exitCountryName ?? server.countryName,
+                                      flag: server.exitFlag ?? server.flag,
+                                      name: server.name,
+                                      server: server.server,
+                                      port: server.port,
+                                    },
+                                    i18n.language,
+                                  );
+
                                   setActiveServer(server);
                                   setIsServerDropdownOpen(false);
                                   addLog(`Server changed to ${server.name}`, 'info', 'system');
 
                                   // Auto-reconnect if already connected
                                   if (status === 'connected') {
-                                    void seamlessReconnect(`Reconnecting to ${server.name}...`);
+                                    void seamlessReconnect(t('reconnectingTo', { name: localizedName }));
                                   } else {
                                     toast.success(
-                                      `${t('serverStr')}${server.name}${t('selectedStr')}`,
+                                      `${t('serverStr')}${localizedName}${t('selectedStr')}`,
                                     );
                                   }
                                 }}
@@ -341,7 +362,8 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                   <div className="flex items-center gap-1 shrink-0 h-7">
                                     {server.exitFlag &&
                                     server.flag &&
-                                    server.exitServer !== server.server ? (
+                                    server.exitServer !== server.server &&
+                                    server.exitFlag !== server.flag ? (
                                       <div className="flex items-center gap-0.5 text-lg text-zinc-500">
                                         <FlagDisplay code={server.flag} className="text-xs" />
                                         <span>→</span>
@@ -548,30 +570,13 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                         <div className="flex flex-col items-center bg-zinc-900/30 border border-white/5 rounded-xl px-4 py-2 shadow-inner w-full">
                           {/* Row 1: country info */}
                           <div className="flex items-center gap-1.5 text-xs text-zinc-300 font-medium min-w-0 w-full justify-center">
-                            <Globe size={12} className="text-emerald-500 shrink-0" />
-                            {activeServer.flag && (
-                              <FlagDisplay code={activeServer.flag} className="text-xs shrink-0" />
-                            )}
-                            <span className="truncate">
-                              {getServerDisplayName(
-                                {
-                                  countryName: activeServer.countryName,
-                                  flag: activeServer.flag,
-                                  name: activeServer.name,
-                                  server: activeServer.server,
-                                  port: activeServer.port,
-                                },
-                                i18n.language,
-                              )}
-                            </span>
-                            {activeServer.behindCdn && (
-                              <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded shrink-0 font-mono">
-                                CDN
-                              </span>
-                            )}
-                            {!activeServer.behindCdn && (exitIp ?? activeServer.exitServer) && (
+                            {!activeServer.behindCdn &&
+                            activeServer.exitFlag &&
+                            activeServer.exitFlag === activeServer.flag &&
+                            (exitIp ?? activeServer.exitServer) ? (
+                              // Same entry/exit country — show exit data directly
                               <>
-                                <span className="text-zinc-600 shrink-0">→</span>
+                                <Globe size={12} className="text-emerald-500 shrink-0" />
                                 {(exitIp?.flag ?? activeServer.exitFlag) && (
                                   <FlagDisplay
                                     code={exitIp?.flag ?? activeServer.exitFlag}
@@ -589,22 +594,79 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                   )}
                                 </span>
                               </>
+                            ) : (
+                              // Different countries or no exit — show entry
+                              <>
+                                <Globe size={12} className="text-emerald-500 shrink-0" />
+                                {activeServer.flag && (
+                                  <FlagDisplay code={activeServer.flag} className="text-xs shrink-0" />
+                                )}
+                                <span className="truncate">
+                                  {getServerDisplayName(
+                                    {
+                                      countryName: activeServer.countryName,
+                                      flag: activeServer.flag,
+                                      name: activeServer.name,
+                                      server: activeServer.server,
+                                      port: activeServer.port,
+                                    },
+                                    i18n.language,
+                                  )}
+                                </span>
+                                {activeServer.behindCdn && (
+                                  <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 py-0.5 rounded shrink-0 font-mono">
+                                    CDN
+                                  </span>
+                                )}
+                                {!activeServer.behindCdn && (exitIp ?? activeServer.exitServer) && (
+                                  <>
+                                    <span className="text-zinc-600 shrink-0">→</span>
+                                    {(exitIp?.flag ?? activeServer.exitFlag) && (
+                                      <FlagDisplay
+                                        code={exitIp?.flag ?? activeServer.exitFlag}
+                                        className="text-xs shrink-0"
+                                      />
+                                    )}
+                                    <span className="truncate">
+                                      {getExitIpDisplayName(
+                                        exitIp ?? {
+                                          server: activeServer.exitServer,
+                                          flag: activeServer.exitFlag,
+                                          country_name: activeServer.exitCountryName,
+                                        },
+                                        i18n.language,
+                                      )}
+                                    </span>
+                                  </>
+                                )}
+                              </>
                             )}
                           </div>
                           {/* Row 2: IP addresses */}
                           <div className="flex items-center gap-1.5 text-[11px] text-zinc-500 font-mono min-w-0 w-full justify-center mt-0.5">
-                            <span className="truncate">{activeServer.server}</span>
                             {!activeServer.behindCdn &&
-                              (exitIp ?? activeServer.exitServer) &&
-                              (exitIp?.server ?? activeServer.exitServer) !==
-                                activeServer.server && (
-                                <>
-                                  <span className="text-zinc-700 shrink-0">·</span>
-                                  <span className="truncate">
-                                    {exitIp?.server ?? activeServer.exitServer}
-                                  </span>
-                                </>
-                              )}
+                            activeServer.exitFlag &&
+                            activeServer.exitFlag === activeServer.flag &&
+                            (exitIp ?? activeServer.exitServer) ? (
+                              <span className="truncate">
+                                {exitIp?.server ?? activeServer.exitServer}
+                              </span>
+                            ) : (
+                              <>
+                                <span className="truncate">{activeServer.server}</span>
+                                {!activeServer.behindCdn &&
+                                  (exitIp ?? activeServer.exitServer) &&
+                                  (exitIp?.server ?? activeServer.exitServer) !==
+                                    activeServer.server && (
+                                    <>
+                                      <span className="text-zinc-700 shrink-0">·</span>
+                                      <span className="truncate">
+                                        {exitIp?.server ?? activeServer.exitServer}
+                                      </span>
+                                    </>
+                                  )}
+                              </>
+                            )}
                           </div>
                         </div>
                       )}

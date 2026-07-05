@@ -218,5 +218,6 @@
   "speedBps": "Б/с",
   "speedKbps": "КБ/с",
   "speedMbps": "МБ/с",
-  "speedGbps": "ГБ/с"
+  "speedGbps": "ГБ/с",
+  "reconnectingTo": "Переподключаемся к {{name}}..."
 }

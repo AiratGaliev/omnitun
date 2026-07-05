@@ -1105,7 +1105,8 @@ async fn get_subscriptions(
     state: tauri::State<'_, ProfileState>,
     settings_state: tauri::State<'_, Mutex<AppSettings>>,
 ) -> Result<Vec<SubscriptionProfile>, String> {
-    let mgr = state.manager.lock().await;
+    let mut mgr = state.manager.lock().await;
+    mgr.deduplicate_profiles();
     let settings = settings_state.lock().await;
     let mut profiles = mgr.list().to_vec();
     for profile in &mut profiles {
@@ -1909,6 +1910,7 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
                     break;
                 }
             }
+            pm.deduplicate_profiles();
             if saved {
                 if let Err(e) = pm.save() {
                     tracing::warn!(target: "settings", "save failed: {e}");
@@ -2361,6 +2363,7 @@ async fn initialize_app(
     if let Some(profile_state) = app.try_state::<ProfileState>() {
         let mut pm = profile_state.manager.lock().await;
         pm.enrich_loaded();
+        pm.deduplicate_profiles();
 
         // 3a. Prune cache: remove entries not seen in any profile for >30 days.
         //     This prevents the cache from accumulating orphaned entries from

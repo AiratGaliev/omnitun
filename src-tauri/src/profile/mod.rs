@@ -127,6 +127,40 @@ impl ProfileManager {
         );
     }
 
+    /// Deduplicate servers by (exit_server || server) + protocol, keep lowest ping.
+    /// Runs in-place — no disk I/O.
+    pub fn deduplicate_profiles(&mut self) {
+        for profile in &mut self.profiles {
+            let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut deduped: Vec<ServerProfile> = Vec::new();
+            let mut dup_count = 0usize;
+            for s in profile.servers.drain(..) {
+                let ip = s.exit_server.as_deref().unwrap_or(&s.server);
+                let key = format!("{ip}:{}", s.protocol);
+                match seen.get(&key) {
+                    None => {
+                        seen.insert(key, deduped.len());
+                        deduped.push(s);
+                    }
+                    Some(&idx) => {
+                        dup_count += 1;
+                        if s.ping_ms < deduped[idx].ping_ms {
+                            deduped[idx] = s;
+                        }
+                    }
+                }
+            }
+            if dup_count > 0 {
+                tracing::info!(
+                    target: "subscription",
+                    "Deduplicated {dup_count} server(s) by exit IP + protocol in profile '{}'",
+                    profile.name,
+                );
+            }
+            profile.servers = deduped;
+        }
+    }
+
     pub fn save(&self) -> Result<(), ProxyError> {
         let json = serde_json::to_string_pretty(&self.profiles)
             .map_err(|e| ProxyError::subscription(
@@ -421,6 +455,7 @@ impl ProfileManager {
             self.profiles[idx].traffic_expiry = expiry;
         }
 
+        self.deduplicate_profiles();
         let profile = self.profiles[idx].clone();
         self.save()?;
         Ok(profile)
