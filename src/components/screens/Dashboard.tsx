@@ -164,7 +164,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     const freshStatus = useAppStore.getState().status;
     const freshActiveServer = useAppStore.getState().activeServer;
     if (freshStatus === 'disconnected') {
-      toast(t('protectionDisabled'));
+      toast(t('protectionDisabled'), { id: 'protection-disabled' });
     } else if (freshStatus === 'connected') {
       toast.success(`${t('connectedTo')}${getServerDisplayName(
         {
@@ -184,6 +184,8 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
 
   const isConnected = status === 'connected';
   const isConnecting = status === 'connecting' || status === 'disconnecting';
+  const isButtonDisabled = status === 'disconnecting';
+  const isCancellable = status === 'connecting';
 
   const sparklinePath = (): string => {
     const data = sparklineData;
@@ -443,7 +445,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                         void toggleConnection();
                       }
                     }}
-                    disabled={isConnecting}
+                    disabled={false}
                     layoutId="modeIndicatorDashboard"
                   />
 
@@ -507,11 +509,12 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                   whileHover={{ scale: 1.03 }}
                   whileTap={{ scale: 0.95 }}
                   onClick={() => void handleToggleConnection()}
-                  disabled={isConnecting}
+                  disabled={isButtonDisabled}
                   className={`relative z-10 w-44 h-44 rounded-full flex flex-col items-center justify-center transition-all duration-500 group
                     ${isConnected ? 'bg-linear-to-b from-zinc-800 to-zinc-900 border-2 border-emerald-500/80 shadow-[0_0_50px_-10px_rgba(16,185,129,0.4)]' : 'bg-linear-to-b from-zinc-800 to-zinc-900 border-2 border-white/5 shadow-2xl hover:border-white/10'}
                     ${isConnecting ? 'animate-pulse border-blue-500/80 shadow-[0_0_40px_-10px_rgba(59,130,246,0.4)]' : ''}
                     ${status === 'error' ? 'border-red-500/80 shadow-[0_0_40px_-10px_rgba(239,68,68,0.4)]' : ''}
+                    ${isCancellable ? 'cursor-pointer hover:border-blue-400/60' : ''}
                   `}
                 >
                   <div
@@ -549,6 +552,11 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                               ? t('connecting')
                               : t('disconnected')}
                       </span>
+                      {isCancellable && (
+                        <span className="text-[8px] text-zinc-500 transition-colors duration-300 relative z-10 mt-1">
+                          {t('clickToCancel')}
+                        </span>
+                      )}
                     </>
                   )}
                 </motion.button>

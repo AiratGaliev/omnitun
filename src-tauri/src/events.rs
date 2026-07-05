@@ -55,6 +55,29 @@ pub fn emit_refresh_progress(app_handle: &AppHandle, progress: RefreshProgress) 
     }
 }
 
+// ── Proxy connection progress ───────────────────────────────────────
+
+/// Granular progress of start_proxy. Emitted as `proxy-progress` event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyProgress {
+    /// Machine-readable phase identifier (for potential UI logic).
+    pub phase: String,
+    /// Human-readable message (already localized by the backend;
+    /// the frontend can display it directly or use the phase key
+    /// for i18n lookup).
+    pub message: String,
+}
+
+pub fn emit_proxy_progress(app_handle: &AppHandle, phase: &str, message: impl Into<String>) {
+    let progress = ProxyProgress {
+        phase: phase.to_string(),
+        message: message.into(),
+    };
+    if let Err(e) = app_handle.emit("proxy-progress", progress) {
+        tracing::warn!(target: "system", "emit proxy-progress failed: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

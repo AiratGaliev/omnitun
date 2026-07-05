@@ -28,6 +28,10 @@ pub(crate) static PROXY_PID: AtomicU32 = AtomicU32::new(0);
 pub(crate) static LAST_PROFILE: std::sync::Mutex<Option<LastConnection>> =
     std::sync::Mutex::new(None);
 
+/// Cancellation flag for the in-flight `start_proxy` call.
+/// Set by `cancel_connect` / `stop_proxy`, checked in `wait_for_proxy_ready`.
+pub(crate) static CONNECTION_CANCELLING: AtomicBool = AtomicBool::new(false);
+
 /// ID of the currently active (connected) server, for exit IP enrichment.
 pub(crate) static ACTIVE_SERVER_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 

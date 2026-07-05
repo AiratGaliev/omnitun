@@ -22,6 +22,7 @@
   "connecting": "Подключение...",
   "disconnecting": "Отключение...",
   "disconnected": "Отключено",
+  "clickToCancel": "Нажмите для отмены",
   "activeSession": "Время сеанса",
   "connectToMonitor": "Подключитесь для отображения",
   "protocolStatus": "Статус протокола",

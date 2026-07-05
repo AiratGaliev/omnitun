@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 /// Get proxy port to route subscription fetch through the active proxy.
 /// Returns None — when connected, traffic goes through the proxy's port,
 /// so direct fetch works and avoids double-proxy issues.
-fn proxy_port(app: &AppHandle) -> Option<u16> {
+pub(crate) fn proxy_port(app: &AppHandle) -> Option<u16> {
     use crate::settings::AppSettings;
 
     // Proxy / system-proxy / local-proxy modes: use the proxy port
@@ -450,6 +450,60 @@ impl ProfileManager {
             proxy_port(app),
         )
         .await;
+        if let Some((used, total, expiry)) = traffic {
+            self.profiles[idx].traffic_used = Some(used);
+            self.profiles[idx].traffic_total = Some(total);
+            self.profiles[idx].traffic_expiry = expiry;
+        }
+
+        self.deduplicate_profiles();
+        let profile = self.profiles[idx].clone();
+        self.save()?;
+        Ok(profile)
+    }
+
+    /// Phase 3 of lock-splitting refresh: commit new servers under write lock.
+    ///
+    /// Called AFTER all long operations (HTTP fetch, process_servers, traffic
+    /// fetch) are complete. The write lock is held for <50 ms.
+    ///
+    /// Re-validates that the profile still exists (it might have been removed
+    /// during Phase 2). If removed, returns SubscriptionNotFound.
+    pub async fn commit_refresh(
+        &mut self,
+        app: &tauri::AppHandle,
+        id: &str,
+        servers: Vec<ServerProfile>,
+        traffic: Option<(u64, u64, Option<String>)>,
+    ) -> Result<SubscriptionProfile, ProxyError> {
+        let idx = self
+            .profiles
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| {
+                ProxyError::subscription(
+                    ErrorCode::SubscriptionNotFound,
+                    "Profile removed during refresh",
+                )
+            })?;
+
+        self.profiles[idx].servers = servers;
+        self.profiles[idx].updated_at = chrono::Utc::now().to_rfc3339();
+
+        // Notify cache: pass ALL current server IDs so stale entries are removed.
+        if let Some(cache) =
+            app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
+        {
+            let all_active_ids: std::collections::HashSet<String> = self
+                .profiles
+                .iter()
+                .flat_map(|p| p.servers.iter().map(|s| s.id.clone()))
+                .collect();
+            cache.handle_subscription_refresh(&all_active_ids).await;
+            cache.save_to_disk().await;
+        }
+
+        // Apply traffic info
         if let Some((used, total, expiry)) = traffic {
             self.profiles[idx].traffic_used = Some(used);
             self.profiles[idx].traffic_total = Some(total);

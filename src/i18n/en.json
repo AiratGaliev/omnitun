@@ -22,6 +22,7 @@
   "connecting": "Connecting...",
   "disconnecting": "Disconnecting...",
   "disconnected": "Disconnected",
+  "clickToCancel": "Click to cancel",
   "activeSession": "Active Session",
   "connectToMonitor": "Connect to monitor",
   "protocolStatus": "Protocol Status",

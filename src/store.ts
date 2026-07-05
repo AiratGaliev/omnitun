@@ -135,6 +135,13 @@ interface ProxyStore {
   loadProfiles: () => Promise<void>;
   updateSettings: (settings: Partial<Settings>) => void;
   saveSettings: () => Promise<void>;
+  /**
+   * Persist settings ONLY — no loadProfiles(), no ipinfo download.
+   * Use on the hot path of toggleConnection so that a concurrent
+   * refresh_subscription or ipinfo download cannot block
+   * invoke('start_proxy').
+   */
+  saveSettingsPersistOnly: () => Promise<void>;
   loadSettings: () => Promise<void>;
   addLog: (message: string, level?: LogEntry['level'], source?: LogSource) => void;
   appendLog: (entry: LogEntry) => void;
@@ -145,6 +152,8 @@ interface ProxyStore {
   toggleConnection: () => Promise<void>;
   initListener: () => Promise<() => void>;
   exitIp: ExitIpInfo | null;
+  /** Current proxy connection phase (null when idle). */
+  proxyProgress: { phase: string; message: string } | null;
   fetchExitIp: () => Promise<void>;
   realIp: RealIpInfo | null;
   fetchRealIp: () => Promise<void>;
@@ -319,6 +328,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   logs: [],
   settingsVersion: 0,
   exitIp: null,
+  proxyProgress: null,
   realIp: null,
   speedTestResult: null,
   connections: [],
@@ -549,6 +559,29 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     }
   },
 
+  // ─────────────────────────────────────────────────────────────────────
+  // saveSettingsPersistOnly: minimum-overhead settings persistence.
+  //
+  // Used by toggleConnection() so the connect button is not blocked by
+  // a concurrent refresh_subscription (ProfileManager mutex) or ipinfo
+  // DB download (10-30 s HTTP).
+  //
+  // Does NOT call loadProfiles() and does NOT trigger ipinfo DB
+  // download. Both are deferred / optional.
+  // ─────────────────────────────────────────────────────────────────────
+  saveSettingsPersistOnly: async () => {
+    try {
+      const { settings } = get();
+      await invoke('update_settings', { newSettings: settings });
+      // Remember the ipinfo token guard so a subsequent full
+      // saveSettings() call doesn't re-download.
+      set({ _lastIpinfoToken: settings.ipinfoToken });
+    } catch (e: unknown) {
+      toast.error(localizeError(e, 'settingsSaveFailed'));
+      throw e;
+    }
+  },
+
   loadSettings: async () => {
     try {
       const result = await invoke<Settings | null>('get_settings');
@@ -665,7 +698,27 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
   toggleConnection: async () => {
     const { status, activeServer, servers, settings, _isReconnecting, _isConnecting } = get();
 
-    if (_isReconnecting || _isConnecting) {
+    // ── Cancel an in-progress connection ───────────────────────────
+    if (_isConnecting || status === 'connecting') {
+      set({ status: 'disconnecting', _isConnecting: false });
+      try {
+        await invoke('cancel_connect');
+      } catch (e: unknown) {
+        // Backend may already have transitioned; treat as best-effort.
+        get().addLog(
+          `Cancel connect failed: ${getErrorMessage(e)}`,
+          'warning',
+          'system',
+        );
+      }
+      set({ proxyProgress: null });
+      set({ status: 'disconnected' });
+      return;
+    }
+
+    // Don't allow toggling during seamless routing-mode reconnect
+    // (separate code path in Dashboard.tsx seamlessReconnect).
+    if (_isReconnecting) {
       return;
     }
 
@@ -674,8 +727,9 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
         set({ _isConnecting: true });
         set({ status: 'connecting' });
 
-        // Persist settings before connecting (routingMode, proxyPort from Dashboard)
-        await get().saveSettings();
+        // Persist settings before connecting; use lightweight variant
+        // to avoid blocking on a concurrent refresh or ipinfo download.
+        await get().saveSettingsPersistOnly();
 
         const profile = toRustServerProfile(activeServer, 'Default');
         const altServers: ReturnType<typeof toRustServerProfile>[] =
@@ -715,11 +769,29 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
           }));
           void get().saveSettings();
         }
+
+        // Deferred, non-blocking: refresh the server list so any filter
+        // changes the user just made eventually propagate. Wrapped so a
+        // failure here can never affect the connection result.
+        void get().loadProfiles().catch(() => {
+          /* swallow — loadProfiles will retry on the next 60 s timer */
+        });
       } else {
         set({ status: 'disconnecting', _isConnecting: false });
         await invoke('stop_proxy');
       }
     } catch (e: unknown) {
+      // If the user cancelled while start_proxy was in-flight, suppress
+      // the error — the cancel_connect already set status to 'disconnected'.
+      // Avoid any set() call — status is already correct, a redundant set
+      // would trigger a Zustand re-render and cause visual flicker.
+      const cancelled =
+        get().status === 'disconnected' ||
+        get().status === 'disconnecting' ||
+        getErrorMessage(e).toLowerCase().includes('cancelled');
+      if (cancelled) {
+        return;
+      }
       set({ status: 'error', _isConnecting: false });
       // Backend already logged the error via tracing::error!
       // Тост: локализованное сообщение
@@ -807,6 +879,14 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       }));
     });
 
+    // Listen for proxy connection progress
+    const unlistenProxyProgress = await listen<{ phase: string; message: string }>(
+      'proxy-progress',
+      (event) => {
+        set({ proxyProgress: event.payload });
+      },
+    );
+
     // Listen for seamless failover — Rust watchdog emits this when sing-box
     // switches to an alternative outbound. Passes exact server ID (no index guessing).
     const unlistenFailover = await listen<string>('failover-occurred', (event) => {
@@ -829,6 +909,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
       unlistenTraffic();
       unlistenExitIp();
       unlistenRefresh();
+      unlistenProxyProgress();
       unlistenFailover();
     };
   },

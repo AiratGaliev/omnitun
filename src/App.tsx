@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Toaster, toast } from 'sonner';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Loader2, Shield } from 'lucide-react';
@@ -80,7 +80,15 @@ export default function App() {
     };
   }, []);
 
+  // Guard: ensure initialize_app is invoked only once per component lifecycle,
+  // even under React StrictMode (which double-invokes effects in dev) or if
+  // the effect dependencies change.
+  const initRef = useRef(false);
+
   useEffect(() => {
+    if (initRef.current) return;
+    initRef.current = true;
+
     // initialize_app fires independently — if it fails, the app still
     // loads profiles/settings and shows the UI (limited GeoIP without DB).
     // Backend logs initialize_app errors via tracing::error! — no frontend

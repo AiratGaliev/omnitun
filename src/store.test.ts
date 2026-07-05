@@ -15,26 +15,6 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helper: build a minimal get_subscriptions mock response from servers array
-// ─────────────────────────────────────────────────────────────────────────────
-function mockGetSubscriptions(servers: unknown[]): unknown[] {
-  return [
-    {
-      id: 'prof-mock',
-      name: 'Mock',
-      url: '',
-      servers: (servers as Record<string, unknown>[]).map((s) => ({
-        id: s.id,
-        protocol: s.protocol ?? 'vless',
-        server: s.server ?? '127.0.0.1',
-        port: s.port ?? 0,
-      })),
-      updated_at: new Date().toISOString(),
-    },
-  ];
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Mock Tauri listen
 // ─────────────────────────────────────────────────────────────────────────────
 const mockListenFns: { event: string; handler: (payload: unknown) => void }[] = [];
@@ -625,7 +605,6 @@ describe('store — toggleConnection', () => {
       realIp: { server: '1.2.3.4', flag: '', country_name: '', city_name: '' },
     });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
-    mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(1080); // start_proxy — returns actual port
     mockInvoke.mockResolvedValueOnce({
       server: '5.6.7.8',
@@ -664,7 +643,6 @@ describe('store — toggleConnection', () => {
       realIp: { server: '1.2.3.4', flag: '', country_name: '', city_name: '' },
     });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
-    mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(1080); // start_proxy — returns actual port
     mockInvoke.mockResolvedValueOnce({
       server: '5.6.7.8',
@@ -689,7 +667,6 @@ describe('store — toggleConnection', () => {
     });
     useAppStore.getState().updateSettings({ autoConnectFastest: false });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
-    mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockResolvedValueOnce(1080); // start_proxy — returns actual port
     mockInvoke.mockResolvedValueOnce({
       server: '5.6.7.8',
@@ -718,7 +695,6 @@ describe('store — toggleConnection', () => {
       realIp: { server: '1.2.3.4', flag: '', country_name: '', city_name: '' },
     });
     mockInvoke.mockResolvedValueOnce(undefined); // saveSettings — update_settings
-    mockInvoke.mockResolvedValueOnce(mockGetSubscriptions(useAppStore.getState().servers)); // saveSettings — get_subscriptions
     mockInvoke.mockRejectedValueOnce(new Error('timeout')); // start_proxy fails
 
     // Frontend swallows errors & shows toast — does not re-throw
