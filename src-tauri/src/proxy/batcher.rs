@@ -37,6 +37,8 @@ const BATCH_SIZE: usize = 50;
 const BATCH_TIMEOUT_MS: u64 = 300;
 
 /// Timeout for each individual server's test (latency + outlet IP).
+/// Used in tests only — production uses PER_URL_TIMEOUT_SECS.
+#[allow(dead_code)]
 const TEST_TIMEOUT_SECS: u64 = 8;
 
 /// Time to wait for sing-box to start before testing.
@@ -544,10 +546,14 @@ async fn process_batch(
 /// local ISP interception. Cloudflare anycast CDN = lowest global latency.
 const TEST_URLS: &[&str] = &[
     "https://cp.cloudflare.com/generate_204",
+    "https://www.gstatic.com/generate_204",
     "https://www.msftconnecttest.com/connecttest.txt",
     "https://detectportal.firefox.com/success.txt",
     "http://cp.cloudflare.com/generate_204",
 ];
+
+/// Per-URL timeout для test_single_server: 4s на URL × 5 URL × 2 попытки = 40s макс.
+const PER_URL_TIMEOUT_SECS: u64 = 4;
 
 /// Test a single server through its dedicated proxy port.
 /// Tries multiple test URLs with one retry on total failure.
@@ -561,11 +567,12 @@ async fn test_single_server(
         .map_err(|e| format!("Proxy build error: {e}"))?;
     let client = reqwest::Client::builder()
         .proxy(proxy)
-        .timeout(Duration::from_secs(TEST_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(PER_URL_TIMEOUT_SECS))
         .build()
         .map_err(|e| format!("Client build error: {e}"))?;
 
-    // 1. Latency test — try URLs in order with 1 retry
+    // 1. Latency test — try URLs in order with 1 retry.
+    //    На каждой попытке перебираем все URL, а не только первый.
     let mut last_err = "No test URL succeeded".to_string();
     let mut ping_ms = 0u64;
     let mut success = false;
@@ -575,10 +582,6 @@ async fn test_single_server(
             return Err("Cancelled".into());
         }
         for &url in TEST_URLS {
-            if attempt == 0 && url != TEST_URLS[0] {
-                // First attempt only tries primary URL; fallbacks on retry
-                break;
-            }
             if cancel.is_cancelled() {
                 return Err("Cancelled".into());
             }
@@ -590,15 +593,19 @@ async fn test_single_server(
                     break;
                 }
                 Ok(resp) => {
-                    last_err = format!("HTTP status {}", resp.status());
+                    last_err = format!("HTTP status {} for {}", resp.status(), url);
                 }
                 Err(e) => {
-                    last_err = format!("Request failed: {e}");
+                    last_err = format!("Request failed for {url}: {e}");
                 }
             }
         }
         if success {
             break;
+        }
+        // Небольшая пауза перед retry
+        if attempt == 0 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
 

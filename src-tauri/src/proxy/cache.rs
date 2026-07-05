@@ -541,11 +541,13 @@ impl ServerCache {
         &self,
         app: &AppHandle,
         servers: &[crate::proxy::ServerProfile],
-        _cancel: Option<tokio_util::sync::CancellationToken>,
+        cancel: Option<tokio_util::sync::CancellationToken>,
         profile_id: &str,
+        total_alive_servers: usize,
     ) -> Vec<crate::proxy::ServerProfile> {
         let logger = app.state::<std::sync::Mutex<Logger>>();
-        let total = servers.len();
+        let initial_cache_hits = total_alive_servers.saturating_sub(servers.len());
+        let total = total_alive_servers.max(servers.len());
         let mut cache_hits = 0usize;
         let mut cdn_skip_count = 0usize;
         let mut queued = 0usize;
@@ -636,9 +638,9 @@ impl ServerCache {
                 }
                 result_slots.push(Some(s));
             } else if server.behind_cdn {
-                // CDN servers can't be batch-tested reliably (Fastly rejects TLS on port 80).
-                // Keep TCP ping result as-is, but MUST clear stale exit data — CDN-routed
-                // servers don't have a meaningful exit node.
+                // CDN-серверы: пропускаем batch test — их exit IP динамический
+                // и нестабильный (CDN anycast, Workers, WARP). TCP Ping уже
+                // подтвердил базовую связность, чего достаточно для CDN-узлов.
                 cdn_skip_count += 1;
                 log(
                     app,
@@ -651,10 +653,7 @@ impl ServerCache {
                     ),
                 );
                 let mut s = server.clone();
-                // 🚫 ANTI-REGRESSION: проверяем инварианту ПЕРЕД занулением.
-                // server тут приходит из process_servers — если process_servers
-                // отработал корректно, exit-данных быть не должно. Если есть —
-                // это регрессия в process_servers.
+                // Инвариант I-CDN-1: behind_cdn => exit_* = None
                 s.assert_no_cdn_exit_data("batch_test::cdn_skip");
                 s.exit_server = None;
                 s.exit_flag = None;
@@ -696,7 +695,7 @@ impl ServerCache {
         let mut successful = 0usize;
 
         while let Some(res) = set.join_next().await {
-            if let Some(ref token) = _cancel {
+            if let Some(ref token) = cancel {
                 if token.is_cancelled() {
                     log(
                         app,
@@ -771,9 +770,9 @@ impl ServerCache {
                     crate::events::RefreshProgress {
                         profile_id: profile_id.to_string(),
                         total,
-                        tested: cache_hits + completed,
-                        cache_hits,
-                        successful: cache_hits + successful,
+                        tested: initial_cache_hits + cache_hits + completed,
+                        cache_hits: initial_cache_hits + cache_hits,
+                        successful: initial_cache_hits + cache_hits + cdn_skip_count + successful,
                         failed,
                         phase: "testing".into(),
                     },

@@ -175,7 +175,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
           port: freshActiveServer?.port,
         },
         i18n.language,
-      ) ?? ''}`, {
+      )}`, {
         description: t('trafficProtected'),
       });
     }

@@ -419,6 +419,18 @@ impl ProfileManager {
             }
         }
 
+        // Guard: обновляем profiles ДО вызова handle_subscription_refresh,
+        // чтобы новые server IDs попали в all_active_ids.
+        if servers.is_empty() {
+            return Err(ProxyError::subscription(
+                ErrorCode::SubscriptionNoServers,
+                "Refresh returned 0 servers — keeping existing servers",
+            ));
+        }
+
+        self.profiles[idx].servers = servers;
+        self.profiles[idx].updated_at = chrono::Utc::now().to_rfc3339();
+
         // Notify cache about subscription refresh: pass ALL current server IDs
         // so the cache can remove entries for deleted servers across all profiles,
         // not just the one being refreshed.
@@ -431,17 +443,6 @@ impl ProfileManager {
             cache.handle_subscription_refresh(&all_active_ids).await;
             cache.save_to_disk().await;
         }
-
-        // Guard: don't overwrite servers with empty list (e.g. content:// URLs)
-        if servers.is_empty() {
-            return Err(ProxyError::subscription(
-                ErrorCode::SubscriptionNoServers,
-                "Refresh returned 0 servers — keeping existing servers",
-            ));
-        }
-
-        self.profiles[idx].servers = servers;
-        self.profiles[idx].updated_at = chrono::Utc::now().to_rfc3339();
 
         // Refresh traffic info
         let traffic = crate::subscription::fetch_subscription_traffic(
@@ -696,7 +697,7 @@ pub async fn process_servers(
         }
     }
 
-    let semaphore = Arc::new(Semaphore::new(50));
+    let semaphore = Arc::new(Semaphore::new(25));
     let mut set = tokio::task::JoinSet::new();
 
     for mut server in unique {
@@ -729,7 +730,7 @@ pub async fn process_servers(
                 .map(|s| s.ip().to_string());
             // TCP connect with 3s timeout
             let reachable = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
+                std::time::Duration::from_secs(5),
                 tokio::net::TcpStream::connect(&addr),
             )
             .await
@@ -892,26 +893,41 @@ pub async fn process_servers(
 
     // 3b. IP-based dedup: after DNS resolution, multiple hostnames may resolve
     //     to the same IP. Keep the one with lowest ping.
+    //
+    //     Ключ дедупа — (IP, port, protocol, uuid, password): на одном IP
+    //     могут быть разные proxy-сервисы (порты, протоколы, аккаунты).
     let alive_before_ip_dedup = alive.len();
     if alive_before_ip_dedup > 0 {
         // Sort by ping ascending — lowest ping first
         alive.sort_by_key(|s| s.ping_ms.unwrap_or(u64::MAX));
-        let mut seen_ips = std::collections::HashSet::new();
-        alive.retain(|s| seen_ips.insert(s.server.clone()));
+        let mut seen_keys = std::collections::HashSet::new();
+        alive.retain(|s| {
+            let key = format!(
+                "{}|{}|{}|{}|{}",
+                s.server,
+                s.port,
+                s.protocol,
+                s.uuid.as_deref().unwrap_or(""),
+                s.password.as_deref().unwrap_or(""),
+            );
+            seen_keys.insert(key)
+        });
         let ip_dupes = alive_before_ip_dedup - alive.len();
         if ip_dupes > 0 {
             tracing::info!(
                 target: "subscription",
-                "Removed {ip_dupes} IP duplicate(s) — multiple domains resolve to the same IP",
+                "Removed {ip_dupes} full-duplicate(s) — same IP+port+protocol+creds (kept fastest)",
             );
         }
     }
 
-    let unreachable = unique_count - alive.len();
-    if unreachable > 0 {
+    // Считаем unreachable ДО IP-дедупа, чтобы IP-дубликаты не учитывались
+    // как недоступные серверы.
+    let tcp_failed = unique_count - alive_before_ip_dedup;
+    if tcp_failed > 0 {
         tracing::warn!(
             target: "subscription",
-            "Removed {unreachable} unreachable server(s)",
+            "Removed {tcp_failed} unreachable server(s) — TCP ping failed",
         );
     }
 
@@ -952,33 +968,38 @@ pub async fn process_servers(
         needs_batch_test = alive;
     }
 
-    let main_proxy_running =
-        crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
-
-    if !needs_batch_test.is_empty() && !main_proxy_running {
+    // Запускаем batch test всегда, когда есть серверы для тестирования.
+    // Batch test использует порты из PortPool (30000-35000),
+    // основной прокси — свой порт (~1080/5050), конфликта нет.
+    if !needs_batch_test.is_empty() {
         if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+            let main_proxy_running =
+                crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
+
             tracing::info!(
                 target: "cache",
-                "Starting batch test for {} NEW/UNKNOWN server(s)...",
+                "Starting batch test for {} NEW/UNKNOWN server(s){}...",
                 needs_batch_test.len(),
+                if main_proxy_running { " (main proxy running — separate ports)" } else { "" },
             );
 
             let cancel_token = app
                 .try_state::<Mutex<CancellationToken>>()
                 .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()).clone());
 
+            let total_alive_servers = ready_servers.len() + needs_batch_test.len();
             let mut updated = cache
-                .batch_test(app, &needs_batch_test, cancel_token, profile_id)
+                .batch_test(app, &needs_batch_test, cancel_token, profile_id, total_alive_servers)
                 .await;
             ready_servers.append(&mut updated);
+        } else {
+            tracing::warn!(
+                target: "cache",
+                "ServerCache state unavailable — {} server(s) added without batch test",
+                needs_batch_test.len(),
+            );
+            ready_servers.append(&mut needs_batch_test);
         }
-    } else if main_proxy_running && !needs_batch_test.is_empty() {
-        tracing::info!(
-            target: "cache",
-            "Batch test skipped for {} new servers — main proxy is running",
-            needs_batch_test.len(),
-        );
-        ready_servers.append(&mut needs_batch_test);
     }
 
     // Apply CDN node filter if user enabled it
