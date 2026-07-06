@@ -4,15 +4,21 @@ version = "0.1.0"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
+default-run = "omnitun"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = ["tauri"]
+tauri = []
+mcp-server = ["dep:rmcp", "dep:tokio-stream", "dep:dirs"]
 
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "omnitun_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "omnitun-mcp"
+path = "src/bin/mcp_server.rs"
+required-features = ["mcp-server"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -36,7 +42,7 @@ uuid = { version = "1", features = ["v4"] }
 log = "0.4"
 chrono = "0.4"
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "rt", "macros", "net", "time"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "net", "time", "signal"] }
 async-trait = "0.1"
 base64 = "0.22"
 anyhow = "1"
@@ -48,6 +54,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 tracing-log = "0.2"
+
+# MCP server (optional, enabled via --features mcp-server)
+rmcp = { version = "2.1.0", optional = true, features = ["server", "transport-io"] }
+tokio-stream = { version = "0.1", optional = true }
+dirs = { version = "5", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

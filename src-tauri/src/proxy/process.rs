@@ -251,6 +251,12 @@ impl ProcessManager {
         self.pid.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
+    /// Set the PID (used by MCP server).
+    pub fn set_pid(&self, pid: u32) {
+        *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(pid);
+        crate::proxy::PROXY_PID.store(pid, std::sync::atomic::Ordering::Release);
+    }
+
     /// Check if a PID is tracked (process may be stale — use status() for real liveness).
     #[allow(dead_code)]
     pub fn is_running(&self) -> bool {

@@ -1,10 +1,14 @@
 #![recursion_limit = "512"]
+pub mod core;
 pub mod events;
 pub mod logging;
 pub mod profile;
 pub mod proxy;
 pub(crate) mod settings;
 pub mod subscription;
+
+#[cfg(feature = "mcp-server")]
+pub mod mcp_server;
 
 use crate::events::emit_status;
 use crate::events::emit_traffic;
@@ -43,19 +47,19 @@ const IP_URLS: &[&str] = &[
 static INITIALIZED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-struct ProxyState {
-    manager: Arc<Mutex<ProxyManager>>,
+pub(crate) struct ProxyState {
+    pub(crate) manager: Arc<Mutex<ProxyManager>>,
 }
 
-struct ProfileState {
-    manager: Arc<Mutex<ProfileManager>>,
+pub(crate) struct ProfileState {
+    pub(crate) manager: Arc<Mutex<ProfileManager>>,
 }
 
 /// Separate cancellation token for the proxy lifecycle (watchdog,
 /// failover monitor, traffic stats). Decoupled from the refresh
 /// cancellation token so that `cancel_refresh` cannot accidentally
 /// kill proxy-side background tasks.
-struct ProxyCancelState(StdMutex<CancellationToken>);
+pub(crate) struct ProxyCancelState(pub(crate) StdMutex<CancellationToken>);
 
 use tokio_util::sync::CancellationToken;
 

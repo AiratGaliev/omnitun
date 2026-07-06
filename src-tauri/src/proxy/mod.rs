@@ -5,12 +5,12 @@ pub mod geoip;
 pub mod installer;
 pub mod persistence;
 pub mod port_pool;
-mod process;
+pub mod process;
 
 use crate::logging::{log, LogLevel, LogSource, Logger};
 use crate::settings::AppSettings;
 use installer::Installer;
-use process::ProcessManager;
+pub use process::ProcessManager;
 pub use process::{cleanup_stale_pid, remove_pid_file, set_pid_file_path, write_pid_file};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

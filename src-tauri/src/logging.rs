@@ -137,6 +137,49 @@ pub fn log(
     }
 }
 
+/// Log without requiring a Tauri AppHandle.
+/// Used by MCP server code.
+pub fn log_to_logger(
+    logger: &std::sync::Mutex<Logger>,
+    level: LogLevel,
+    source: LogSource,
+    message: String,
+) {
+    let target_str = match source {
+        LogSource::Proxy => "proxy",
+        LogSource::Subscription => "subscription",
+        LogSource::Cache => "cache",
+        LogSource::Installer => "installer",
+        LogSource::Process => "process",
+        LogSource::Settings => "settings",
+        LogSource::System => "system",
+    };
+    match level {
+        LogLevel::Error => {
+            tracing::error!(log_source = target_str, log_level = "error", "{message}")
+        }
+        LogLevel::Warning => {
+            tracing::warn!(log_source = target_str, log_level = "warning", "{message}")
+        }
+        LogLevel::Info => tracing::info!(log_source = target_str, log_level = "info", "{message}"),
+        LogLevel::Success => {
+            tracing::info!(log_source = target_str, log_level = "success", "{message}")
+        }
+    }
+
+    let entry = LogEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        timestamp: Utc::now().timestamp_millis(),
+        message,
+        level,
+        source,
+    };
+
+    if let Ok(mut l) = logger.lock() {
+        l.push(entry);
+    }
+}
+
 /// Same as `log()` but without the Tauri event emit.
 /// Now identical to `log()` since broadcast/Tauri emit is decoupled.
 #[allow(dead_code)]
