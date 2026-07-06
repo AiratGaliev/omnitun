@@ -29,10 +29,6 @@ fn schema(json: serde_json::Value) -> Arc<JsonMap> {
     }
 }
 
-fn empty_obj() -> Arc<JsonMap> {
-    Arc::default()
-}
-
 struct ServerState {
     process_mgr: ProcessManager,
     profile_mgr: super::profile::ProfileManager,

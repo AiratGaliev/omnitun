@@ -3,8 +3,8 @@
 //! Runs as a standalone process (no Tauri GUI).
 //! Communicates via stdio using the Model Context Protocol.
 //!
-//! Build: cargo build --features mcp-server --bin omnitun-mcp
-//! Run:   cargo run --features mcp-server --bin omnitun-mcp
+//! Build: cargo build --features mcp-server --bin mcp_server
+//! Run:   cargo run --features mcp-server --bin mcp_server
 
 fn main() {
     let data_dir = dirs_data_dir();

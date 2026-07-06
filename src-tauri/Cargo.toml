@@ -16,7 +16,7 @@ name = "omnitun_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "omnitun-mcp"
+name = "mcp_server"
 path = "src/bin/mcp_server.rs"
 required-features = ["mcp-server"]
 
