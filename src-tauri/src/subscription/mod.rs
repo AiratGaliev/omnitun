@@ -29,9 +29,54 @@ pub async fn fetch_subscription(
     url: &str,
     proxy_port: Option<u16>,
 ) -> Result<Vec<ServerProfile>, ProxyError> {
-    let fetcher = HttpFetcher::new(proxy_port);
-    let data = fetcher.fetch(url).await?;
-    parser::parse_subscription(&data)
+    // Collect all URLs to try: direct + mirrors for raw.githubusercontent.com
+    let urls: Vec<String> = if url.starts_with("https://raw.githubusercontent.com/") {
+        let mirrors = [
+            "https://ghproxy.net/https://raw.githubusercontent.com/",
+            "https://gh-proxy.com/https://raw.githubusercontent.com/",
+        ];
+        let mut all = vec![url.to_string()];
+        for prefix in &mirrors {
+            all.push(url.replacen("https://raw.githubusercontent.com/", prefix, 1));
+        }
+        all
+    } else {
+        vec![url.to_string()]
+    };
+
+    // Race all URLs concurrently — return first success
+    let mut set = tokio::task::JoinSet::new();
+    for u in &urls {
+        let url = u.clone();
+        set.spawn(async move {
+            let fetcher = HttpFetcher::new(proxy_port);
+            let result = fetcher.fetch(&url).await;
+            (url, result)
+        });
+    }
+
+    let mut last_err = None;
+    while let Some(res) = set.join_next().await {
+        match res {
+            Ok((_url, Ok(data))) => {
+                // Cancel remaining tasks — we have a winner
+                set.shutdown().await;
+                return parser::parse_subscription(&data);
+            }
+            Ok((url, Err(e))) => {
+                tracing::warn!(target: "subscription", "URL {url} failed: {e}");
+                last_err = Some(e);
+            }
+            Err(join_err) => {
+                tracing::warn!(target: "subscription", "Fetch task panicked: {join_err}");
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| ProxyError::subscription(
+        crate::proxy::ErrorCode::SubscriptionFetchFailed,
+        "All fetch URLs failed",
+    )))
 }
 
 /// Fetch subscription traffic usage via HEAD request.
