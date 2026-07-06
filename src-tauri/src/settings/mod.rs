@@ -30,7 +30,14 @@ pub struct AppSettings {
     /// When empty, ipinfo.io database is not downloaded/used.
     #[serde(default)]
     pub ipinfo_token: String,
+    /// Disable TLS certificate verification for proxy outbounds.
+    /// Required for many proxy servers with self-signed or mismatched SNI certs.
+    /// Default: true (backward compatible — insecure by default).
+    #[serde(default = "default_tls_insecure")]
+    pub tls_insecure: bool,
 }
+
+fn default_tls_insecure() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,6 +72,7 @@ impl Default for AppSettings {
             minimize_to_tray: false,
             block_cdn_nodes: false,
             ipinfo_token: String::new(),
+            tls_insecure: true,
         }
     }
 }

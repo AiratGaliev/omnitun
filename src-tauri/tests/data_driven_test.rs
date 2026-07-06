@@ -5,7 +5,6 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-
 fn app_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {

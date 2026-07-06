@@ -1,7 +1,7 @@
 use crate::proxy::{ErrorCode, ProxyError, ServerProfile};
 use crate::subscription::SubscriptionProfile;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
@@ -11,28 +11,28 @@ use tokio_util::sync::CancellationToken;
 /// Get proxy port to route subscription fetch through the active proxy.
 /// Returns None — when connected, traffic goes through the proxy's port,
 /// so direct fetch works and avoids double-proxy issues.
-pub(crate) fn proxy_port(app: &AppHandle) -> Option<u16> {
-    use crate::settings::AppSettings;
-
+pub(crate) fn proxy_port(app_settings: &crate::settings::AppSettings) -> Option<u16> {
     // Proxy / system-proxy / local-proxy modes: use the proxy port
     // so the fetch goes through the active outbound.
     if crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-        if let Some(state) = app.try_state::<tokio::sync::Mutex<AppSettings>>() {
-            if let Ok(guard) = state.try_lock() {
-                return Some(guard.proxy_port);
-            }
-        }
+        return Some(app_settings.proxy_port);
     }
 
     // Fallback: try the configured proxy port
-    if let Some(state) = app.try_state::<tokio::sync::Mutex<AppSettings>>() {
-        if let Ok(guard) = state.try_lock() {
-            if guard.proxy_port > 0 {
-                return Some(guard.proxy_port);
-            }
-        }
+    if app_settings.proxy_port > 0 {
+        return Some(app_settings.proxy_port);
     }
 
+    None
+}
+
+/// Tauri-aware wrapper: extracts AppSettings from AppHandle, then calls proxy_port.
+pub(crate) fn proxy_port_from_app(app: &AppHandle) -> Option<u16> {
+    if let Some(state) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
+        if let Ok(guard) = state.try_lock() {
+            return proxy_port(&guard);
+        }
+    }
     None
 }
 
@@ -206,10 +206,10 @@ impl ProfileManager {
 
         let mut servers = if clean_url.starts_with("http://") || clean_url.starts_with("https://") {
             // Try through existing proxy first, fall back to direct
-            match crate::subscription::fetch_subscription(&clean_url, proxy_port(app)).await {
+            match crate::subscription::fetch_subscription(&clean_url, proxy_port_from_app(app)).await {
                 Ok(s) => s,
                 Err(e) => {
-                    if proxy_port(app).is_some() {
+                    if proxy_port_from_app(app).is_some() {
                         tracing::error!(
                             target: "subscription",
                             "Proxy fetch failed, retrying direct: {e}",
@@ -233,7 +233,7 @@ impl ProfileManager {
 
         // Fetch subscription traffic info
         let (traffic_used, traffic_total, traffic_expiry) =
-            crate::subscription::fetch_subscription_traffic(&clean_url, proxy_port(app))
+            crate::subscription::fetch_subscription_traffic(&clean_url, proxy_port_from_app(app))
                 .await
                 .map(|(used, total, expiry)| (Some(used), Some(total), expiry))
                 .unwrap_or((None, None, None));
@@ -284,10 +284,10 @@ impl ProfileManager {
         let url = &self.profiles[idx].url;
         let fetch_result = match url {
             u if u.starts_with("http://") || u.starts_with("https://") => {
-                match crate::subscription::fetch_subscription(u, proxy_port(app)).await {
+                match crate::subscription::fetch_subscription(u, proxy_port_from_app(app)).await {
                     Ok(s) => Ok(s),
                     Err(e) => {
-                        if proxy_port(app).is_some() {
+                        if proxy_port_from_app(app).is_some() {
                             tracing::error!(
                                 target: "subscription",
                                 "Proxy fetch failed, retrying direct: {e}",
@@ -447,7 +447,7 @@ impl ProfileManager {
         // Refresh traffic info
         let traffic = crate::subscription::fetch_subscription_traffic(
             &self.profiles[idx].url,
-            proxy_port(app),
+            proxy_port_from_app(app),
         )
         .await;
         if let Some((used, total, expiry)) = traffic {
@@ -519,104 +519,132 @@ impl ProfileManager {
 
 /// Deduplicate servers, apply user filters, run TCP ping, enrich GeoIP flag.
 /// Logs each step (dedup count, testing, unreachable count, final count).
+///
+/// Tauri wrapper — extracts data_dir, settings, cache from AppHandle.
 pub async fn process_servers(
     app: &AppHandle,
     servers: Vec<ServerProfile>,
     profile_id: &str,
 ) -> Vec<ServerProfile> {
+    let data_dir = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(_) => return servers,
+    };
+    let settings = app
+        .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
+        .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
+        .unwrap_or_default();
+    let cache = app
+        .try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>();
+    let cache_ref = cache.as_ref().map(|c| c as _);
+    process_servers_inner(
+        &data_dir,
+        &settings,
+        servers,
+        profile_id,
+        cache_ref,
+        Some(app),
+    )
+    .await
+}
+
+/// Headless version — takes data_dir, settings, cache directly (no Tauri dependency).
+/// Used by MCP server and any non-Tauri contexts.
+pub async fn process_servers_inner(
+    data_dir: &Path,
+    settings: &crate::settings::AppSettings,
+    servers: Vec<ServerProfile>,
+    profile_id: &str,
+    cache: Option<&std::sync::Arc<crate::proxy::cache::ServerCache>>,
+    app_handle: Option<&tauri::AppHandle>,
+) -> Vec<ServerProfile> {
     let initial_count = servers.len();
 
     // Lazy-init GeoIP: load from disk or download synchronously (one-time cost)
-    let data_dir = app.path().app_data_dir().ok();
-    if let Some(ref dir) = data_dir {
-        let geo_dir = dir.join("geoip");
-        let city_path = geo_dir.join("GeoLite2-City.mmdb");
-        let asn_path = geo_dir.join("GeoLite2-ASN.mmdb");
+    let geo_dir = data_dir.join("geoip");
+    let city_path = geo_dir.join("GeoLite2-City.mmdb");
+    let asn_path = geo_dir.join("GeoLite2-ASN.mmdb");
 
-        if !crate::proxy::geoip::is_ready() {
-            if city_path.exists() {
-                let _ = crate::proxy::geoip::init_city(&city_path);
-            } else {
-                tracing::info!(
+    if !crate::proxy::geoip::is_ready() {
+        if city_path.exists() {
+            let _ = crate::proxy::geoip::init_city(&city_path);
+        } else {
+            tracing::info!(
+                target: "system",
+                "Downloading GeoIP databases (one-time)...",
+            );
+            match crate::proxy::geoip::ensure_downloaded(
+                &geo_dir,
+                &settings.ipinfo_token,
+            )
+            .await
+            {
+                Ok(_) => tracing::info!(
                     target: "system",
-                    "Downloading GeoIP databases (one-time)...",
-                );
-                match crate::proxy::geoip::ensure_downloaded(
-                    &geo_dir,
-                    &app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
-                        .map(|s| s.try_lock().ok().map(|g| g.ipinfo_token.clone()))
-                        .flatten()
-                        .unwrap_or_default(),
-                )
-                .await
-                {
-                    Ok(_) => tracing::info!(
-                        target: "system",
-                        "GeoIP databases ready",
-                    ),
-                    Err(e) => tracing::error!(
-                        target: "system",
-                        "GeoIP download failed (will retry): {e}",
-                    ),
-                }
+                    "GeoIP databases ready",
+                ),
+                Err(e) => tracing::error!(
+                    target: "system",
+                    "GeoIP download failed (will retry): {e}",
+                ),
             }
         }
+    }
 
-        // Always try to init ASN if the file exists — may have been downloaded
-        // on a previous run while is_ready() already returned true for City only.
-        if asn_path.exists() && !crate::proxy::geoip::is_asn_ready() {
-            let _ = crate::proxy::geoip::init_asn(&asn_path);
-        }
+    // Always try to init ASN if the file exists — may have been downloaded
+    // on a previous run while is_ready() already returned true for City only.
+    if asn_path.exists() && !crate::proxy::geoip::is_asn_ready() {
+        let _ = crate::proxy::geoip::init_asn(&asn_path);
+    }
 
-        // Always try to init ipinfo Lite if the file exists
-        let ipinfo_path = geo_dir.join("ipinfo_lite.mmdb");
-        if ipinfo_path.exists() && !crate::proxy::geoip::is_ipinfo_ready() {
-            let _ = crate::proxy::geoip::init_ipinfo(&ipinfo_path);
-        }
+    // Always try to init ipinfo Lite if the file exists
+    let ipinfo_path = geo_dir.join("ipinfo_lite.mmdb");
+    if ipinfo_path.exists() && !crate::proxy::geoip::is_ipinfo_ready() {
+        let _ = crate::proxy::geoip::init_ipinfo(&ipinfo_path);
+    }
 
-        // Always try to init CDN ranges from downloaded .srs files
-        if !crate::proxy::geoip::is_cdn_ready() {
-            let mut merged: Vec<(std::net::IpAddr, u8)> = Vec::new();
-            for name in &["cdn-only_singbox.srs", "merged.srs"] {
-                let path = geo_dir.join(name);
-                if !path.exists() {
-                    tracing::warn!(
-                        target: "system",
-                        "CDN .srs {name} not found at {:?}",
-                        path,
-                    );
-                    continue;
-                }
-                match crate::proxy::geoip::parse_srs_file(&path) {
-                    Ok(r) => {
-                        tracing::info!(
-                            target: "system",
-                            "CDN .srs {name}: {} CIDR entries (lazy)",
-                            r.len(),
-                        );
-                        merged.extend(r);
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            target: "system",
-                            "CDN .srs {name} parse failed: {e}",
-                        );
-                    }
-                }
-            }
-            if !merged.is_empty() {
-                tracing::info!(
-                    target: "system",
-                    "CDN ranges merged: {} total entries (lazy)",
-                    merged.len(),
-                );
-                crate::proxy::geoip::set_cdn_ranges(merged);
-            } else {
+    // Always try to init CDN ranges from downloaded .srs files
+    if !crate::proxy::geoip::is_cdn_ready() {
+        let mut merged: Vec<(std::net::IpAddr, u8)> = Vec::new();
+        for name in &["cdn-only_singbox.srs", "merged.srs"] {
+            let path = geo_dir.join(name);
+            if !path.exists() {
                 tracing::warn!(
                     target: "system",
-                    "CDN ranges empty — no .srs files loaded",
+                    "CDN .srs {name} not found at {:?}",
+                    path,
                 );
+                continue;
             }
+            match crate::proxy::geoip::parse_srs_file(&path) {
+                Ok(r) => {
+                    tracing::info!(
+                        target: "system",
+                        "CDN .srs {name}: {} CIDR entries (lazy)",
+                        r.len(),
+                    );
+                    merged.extend(r);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target: "system",
+                        "CDN .srs {name} parse failed: {e}",
+                    );
+                }
+            }
+        }
+        if !merged.is_empty() {
+            tracing::info!(
+                target: "system",
+                "CDN ranges merged: {} total entries (lazy)",
+                merged.len(),
+            );
+            crate::proxy::geoip::set_cdn_ranges(merged);
+        } else {
+            tracing::warn!(
+                target: "system",
+                "CDN ranges empty — no .srs files loaded",
+            );
         }
     }
 
@@ -680,45 +708,42 @@ pub async fn process_servers(
     }
 
     // 2. Apply user filters (country, protocol) from settings
-    if let Some(settings) = app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>() {
-        let settings_guard = settings.lock().await;
-        let total_before = unique.len();
-        unique.retain(|s| {
-            // Filter by protocol
-            if !settings_guard.allowed_protocols.is_empty()
-                && !settings_guard.allowed_protocols.contains(&s.protocol)
-            {
-                return false;
-            }
-            if !settings_guard.blocked_protocols.is_empty()
-                && settings_guard.blocked_protocols.contains(&s.protocol)
-            {
-                return false;
-            }
-            // Filter by country (flag must be resolved first)
-            if !settings_guard.allowed_countries.is_empty() {
-                if let Some(ref flag) = s.flag {
-                    if !settings_guard.allowed_countries.contains(flag) {
-                        return false;
-                    }
-                }
-            }
-            if !settings_guard.blocked_countries.is_empty() {
-                if let Some(ref flag) = s.flag {
-                    if settings_guard.blocked_countries.contains(flag) {
-                        return false;
-                    }
-                }
-            }
-            true
-        });
-        let filtered = total_before - unique.len();
-        if filtered > 0 {
-            tracing::info!(
-                target: "subscription",
-                "Filtered {filtered} server(s) by country/protocol settings",
-            );
+    let total_before = unique.len();
+    unique.retain(|s| {
+        // Filter by protocol
+        if !settings.allowed_protocols.is_empty()
+            && !settings.allowed_protocols.contains(&s.protocol)
+        {
+            return false;
         }
+        if !settings.blocked_protocols.is_empty()
+            && settings.blocked_protocols.contains(&s.protocol)
+        {
+            return false;
+        }
+        // Filter by country (flag must be resolved first)
+        if !settings.allowed_countries.is_empty() {
+            if let Some(ref flag) = s.flag {
+                if !settings.allowed_countries.contains(flag) {
+                    return false;
+                }
+            }
+        }
+        if !settings.blocked_countries.is_empty() {
+            if let Some(ref flag) = s.flag {
+                if settings.blocked_countries.contains(flag) {
+                    return false;
+                }
+            }
+        }
+        true
+    });
+    let filtered = total_before - unique.len();
+    if filtered > 0 {
+        tracing::info!(
+            target: "subscription",
+            "Filtered {filtered} server(s) by country/protocol settings",
+        );
     }
 
     // 3. TCP ping — up to 50 concurrent connections, 3-second timeout each
@@ -730,7 +755,7 @@ pub async fn process_servers(
 
     // Check negative cache before TCP ping — skip servers known to be dead
     // (backoff period still active). This avoids spending 3s per dead server.
-    if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+    if let Some(cache) = cache.as_ref() {
         let mut negative_ids = std::collections::HashSet::new();
         for server in &unique {
             if cache.is_cached_negative(&server.id).await {
@@ -911,9 +936,7 @@ pub async fn process_servers(
             Ok((server, false, _, _)) => {
                 // TCP ping failed — store in negative cache so it's not re-tested
                 // until the backoff period expires.
-                if let Some(cache) =
-                    app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
-                {
+                if let Some(cache) = cache.as_ref() {
                     cache
                         .update_negative(
                             &server.id,
@@ -931,18 +954,20 @@ pub async fn process_servers(
         }
 
         // Отправка прогресса TCP Ping
-        crate::events::emit_refresh_progress(
-            app,
-            crate::events::RefreshProgress {
-                profile_id: profile_id.to_string(),
-                total: unique_count,
-                tested: tcp_tested,
-                cache_hits: 0,
-                successful: alive.len(),
-                failed: tcp_tested - alive.len(),
-                phase: "tcp_ping".into(),
-            },
-        );
+        if let Some(app) = app_handle {
+            crate::events::emit_refresh_progress(
+                app,
+                crate::events::RefreshProgress {
+                    profile_id: profile_id.to_string(),
+                    total: unique_count,
+                    tested: tcp_tested,
+                    cache_hits: 0,
+                    successful: alive.len(),
+                    failed: tcp_tested - alive.len(),
+                    phase: "tcp_ping".into(),
+                },
+            );
+        }
     }
 
     // 3b. IP-based dedup: after DNS resolution, multiple hostnames may resolve
@@ -992,7 +1017,7 @@ pub async fn process_servers(
     let mut ready_servers = Vec::new();
     let mut needs_batch_test = Vec::new();
 
-    if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+    if let Some(cache) = cache.as_ref() {
         for mut server in alive {
             if let Some(pos) = cache.get_positive_if_fresh(&server.id).await {
                 // Server is alive (TCP ping passed) and cache is fresh.
@@ -1026,7 +1051,7 @@ pub async fn process_servers(
     // Batch test использует порты из PortPool (30000-35000),
     // основной прокси — свой порт (~1080/5050), конфликта нет.
     if !needs_batch_test.is_empty() {
-        if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+        if let Some(cache) = cache.as_ref() {
             let main_proxy_running =
                 crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
 
@@ -1037,14 +1062,23 @@ pub async fn process_servers(
                 if main_proxy_running { " (main proxy running — separate ports)" } else { "" },
             );
 
-            let cancel_token = app
-                .try_state::<Mutex<CancellationToken>>()
+            let cancel_token = app_handle
+                .and_then(|app| app.try_state::<Mutex<CancellationToken>>())
                 .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()).clone());
 
             let total_alive_servers = ready_servers.len() + needs_batch_test.len();
-            let mut updated = cache
-                .batch_test(app, &needs_batch_test, cancel_token, profile_id, total_alive_servers)
-                .await;
+            let mut updated = match app_handle {
+                Some(app) => cache
+                    .batch_test(app, &needs_batch_test, cancel_token, profile_id, total_alive_servers)
+                    .await,
+                None => {
+                    tracing::info!(
+                        target: "cache",
+                        "Batch test skipped (no Tauri app handle — adding servers without test)",
+                    );
+                    needs_batch_test.clone()
+                }
+            };
             ready_servers.append(&mut updated);
         } else {
             tracing::warn!(
@@ -1057,18 +1091,15 @@ pub async fn process_servers(
     }
 
     // Apply CDN node filter if user enabled it
-    if let Some(settings) = app.try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>() {
-        let settings_guard = settings.lock().await;
-        if settings_guard.block_cdn_nodes {
-            let before_cdn = ready_servers.len();
-            ready_servers.retain(|s| !s.behind_cdn);
-            let cdn_filtered = before_cdn - ready_servers.len();
-            if cdn_filtered > 0 {
-                tracing::info!(
-                    target: "subscription",
-                    "Removed {cdn_filtered} CDN/Worker/WARP server(s) (blockCdnNodes enabled)",
-                );
-            }
+    if settings.block_cdn_nodes {
+        let before_cdn = ready_servers.len();
+        ready_servers.retain(|s| !s.behind_cdn);
+        let cdn_filtered = before_cdn - ready_servers.len();
+        if cdn_filtered > 0 {
+            tracing::info!(
+                target: "subscription",
+                "Removed {cdn_filtered} CDN/Worker/WARP server(s) (blockCdnNodes enabled)",
+            );
         }
     }
 

@@ -140,6 +140,7 @@ export interface Settings {
   minimizeToTray: boolean;
   blockCdnNodes: boolean;
   ipinfoToken: string;
+  tlsInsecure: boolean;
 }
 
 export interface ExitIpInfo {

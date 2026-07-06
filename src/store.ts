@@ -359,6 +359,7 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     minimizeToTray: false,
     blockCdnNodes: false,
     ipinfoToken: '',
+    tlsInsecure: true,
   },
 
   setStatus: (status) => {

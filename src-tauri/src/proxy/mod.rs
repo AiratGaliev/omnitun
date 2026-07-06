@@ -370,10 +370,9 @@ pub async fn is_cdn_server(s: &ServerProfile) -> bool {
 
 impl ServerProfile {
     /// Construct a human-readable display name from GeoIP data or fallback to original_name.
+    /// NOTE: city is intentionally excluded per user requirement.
     pub fn display_name(&self) -> String {
-        if let (Some(country), Some(city)) = (&self.country_name, &self.city_name) {
-            format!("{country}, {city}")
-        } else if let Some(country) = &self.country_name {
+        if let Some(country) = &self.country_name {
             country.clone()
         } else if !self.original_name.is_empty() {
             self.original_name.clone()

@@ -164,7 +164,7 @@ pub(crate) mod orphan_guard {
 
     /// Create a job object with KILL_ON_JOB_CLOSE.
     /// Returns None on failure (fallback to taskkill/kill).
-    pub(crate) fn create(_app: &tauri::AppHandle) -> Option<JobObject> {
+    pub(crate) fn create() -> Option<JobObject> {
         unsafe {
             let log_it = |msg: &str| {
                 tracing::warn!(target: "process", "{msg}");
@@ -376,7 +376,7 @@ impl ProcessManager {
         }
     }
 
-    async fn launch(&self, config_path: &str, app: &tauri::AppHandle) -> Result<u32, ProxyError> {
+    async fn launch(&self, config_path: &str, _app: &tauri::AppHandle) -> Result<u32, ProxyError> {
         let binary = self
             .binary_path
             .to_str()
@@ -384,6 +384,31 @@ impl ProcessManager {
                 ErrorCode::ProcessStartFailed,
                 "Invalid binary path",
             ))?;
+
+        // Open stderr log file next to config.json for diagnostics.
+        let stderr_path = std::path::Path::new(config_path)
+            .parent()
+            .map(|p| p.join("sing-box-stderr.log"))
+            .unwrap_or_else(|| std::path::PathBuf::from("sing-box-stderr.log"));
+        let stderr_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stderr_path)
+            .ok();
+
+        // Pre-compute stderr Stdio: use the log file if available, null otherwise.
+        let stderr_stdio = match stderr_file {
+            Some(ref file) => std::process::Stdio::from(file.try_clone().unwrap_or_else(|_| {
+                // Fallback: create a new file handle. This should never fail
+                // since we just opened it, but be defensive.
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&stderr_path)
+                    .expect("Failed to reopen stderr log file")
+            })),
+            None => std::process::Stdio::null(),
+        };
 
         #[cfg(windows)]
         {
@@ -396,7 +421,7 @@ impl ProcessManager {
             cmd_breakaway
                 .args(["run", "-c", config_path])
                 .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stderr(stderr_stdio)
                 .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
 
             let child = match cmd_breakaway.spawn() {
@@ -408,7 +433,17 @@ impl ProcessManager {
                     std::process::Command::new(binary)
                         .args(["run", "-c", config_path])
                         .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
+                        .stderr({
+                            // Re-open stderr log for the fallback process
+                            match std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&stderr_path)
+                            {
+                                Ok(f) => std::process::Stdio::from(f),
+                                Err(_) => std::process::Stdio::null(),
+                            }
+                        })
                         .creation_flags(CREATE_NO_WINDOW)
                         .spawn()
                         .map_err(|e| {
@@ -423,7 +458,7 @@ impl ProcessManager {
             // Assign the child process to a kill-on-close job object.
             use std::os::windows::io::AsRawHandle;
             let process_handle = child.as_raw_handle();
-            if let Some(job) = orphan_guard::create(app) {
+            if let Some(job) = orphan_guard::create() {
                 if orphan_guard::assign(&job, process_handle) {
                     *self.job.lock().unwrap_or_else(|e| e.into_inner()) = Some(job);
                 }

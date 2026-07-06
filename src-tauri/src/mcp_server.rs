@@ -15,6 +15,8 @@ use rmcp::{
 };
 
 use crate::logging::{log_to_logger, LogLevel, LogSource, Logger};
+use crate::proxy::cache::ServerCache;
+use crate::proxy::port_pool::PortPool;
 use crate::proxy::{ProcessManager, ServerProfile};
 use crate::settings::{AppSettings, SettingsManager};
 
@@ -38,6 +40,9 @@ struct ServerState {
     bin_path: PathBuf,
     data_dir: PathBuf,
     _logger: Arc<Mutex<Logger>>,
+    cache: Arc<ServerCache>,
+    port_pool: Arc<PortPool>,
+    cancel_token: tokio_util::sync::CancellationToken,
 }
 
 struct Handler {
@@ -58,11 +63,17 @@ fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
     let mut profile_mgr = super::profile::ProfileManager::new(data_dir.clone());
     let _ = profile_mgr.load();
 
+    // Create cache, port pool, and cancellation token
+    let cache = Arc::new(ServerCache::new(&data_dir));
+    let port_pool = Arc::new(PortPool::new());
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
     log_to_logger(&*logger, LogLevel::Info, LogSource::System,
         format!("MCP server starting (data_dir: {:?})", data_dir));
 
     Ok(ServerState {
         process_mgr, profile_mgr, settings_mgr, bin_path, data_dir, _logger: logger,
+        cache, port_pool, cancel_token,
     })
 }
 
@@ -102,10 +113,22 @@ async fn launch_sing_box(state: &ServerState, proxy_port: u16, routing_mode: &st
 
     let b = state.bin_path.to_str().unwrap_or("");
     let c = cpath.to_str().unwrap_or("");
+
+    // Open stderr log file next to config.json for diagnostics.
+    let stderr_path = state.data_dir.join("config").join("sing-box-stderr.log");
+    let stderr_stdio = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_path)
+    {
+        Ok(f) => std::process::Stdio::from(f),
+        Err(_) => std::process::Stdio::null(),
+    };
+
     let child = std::process::Command::new(b)
         .args(["run", "-c", c])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(stderr_stdio)
         .spawn()
         .map_err(|e| ErrorData::internal_error(format!("spawn: {e}"), None))?;
 
@@ -189,31 +212,54 @@ impl Handler {
         let id = args.get("id").and_then(|v| v.as_str())
             .ok_or_else(|| ErrorData::invalid_params("'id' is required", None))?;
 
-        // Phase 1: read lock — get URL
-        let url;
-        {
+        // Phase 1: read lock — get URL + settings + data_dir
+        let (url, data_dir, settings) = {
             let state = self.state.lock().await;
-            url = state.profile_mgr.list().iter()
+            let url = state.profile_mgr.list().iter()
                 .find(|p| p.id == id)
                 .ok_or_else(|| ErrorData::invalid_params(format!("Profile '{id}' not found"), None))?
                 .url
                 .clone();
-        } // lock released
+            let data_dir = state.data_dir.clone();
+            let settings = state.settings_mgr.load()
+                .unwrap_or_default();
+            (url, data_dir, settings)
+        }; // lock released
 
-        // Phase 2: fetch + parse (no lock)
+        // Phase 2: fetch + enrich + batch test (no lock — long operations)
         let servers = crate::subscription::fetch_subscription(&url, None).await
             .map_err(|e| ErrorData::internal_error(format!("fetch: {e}"), None))?;
 
-        // Phase 3: write lock — commit
-        let mut state = self.state.lock().await;
-        let idx = state.profile_mgr.list().iter()
-            .position(|p| p.id == id)
-            .ok_or_else(|| ErrorData::invalid_params(format!("Profile '{id}' not found"), None))?;
-        state.profile_mgr.list_mut()[idx].servers = servers;
-        state.profile_mgr.list_mut()[idx].updated_at = chrono::Utc::now().to_rfc3339();
-        let count = state.profile_mgr.list()[idx].servers.len();
-        state.profile_mgr.save()
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        // Enrich servers via process_servers_inner (GeoIP, TCP ping, CDN detection)
+        let cache = {
+            let state = self.state.lock().await;
+            state.settings_mgr.save(&settings).ok(); // ensure settings persisted
+            state.cache.clone() // clone Arc before releasing lock
+        }; // lock released
+        let enriched = crate::profile::process_servers_inner(
+            &data_dir,
+            &settings,
+            servers,
+            id,
+            Some(&cache),
+            None, // no Tauri AppHandle — skip events
+        )
+        .await;
+
+        // Phase 3: write lock — commit enriched servers
+        let count = {
+            let mut state = self.state.lock().await;
+            let idx = state.profile_mgr.list().iter()
+                .position(|p| p.id == id)
+                .ok_or_else(|| ErrorData::invalid_params(format!("Profile '{id}' not found"), None))?;
+            state.profile_mgr.list_mut()[idx].servers = enriched;
+            state.profile_mgr.list_mut()[idx].updated_at = chrono::Utc::now().to_rfc3339();
+            let count = state.profile_mgr.list()[idx].servers.len();
+            state.profile_mgr.save()
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            count
+        }; // lock released
+
         Ok(CallToolResult::success(vec![
             ContentBlock::text(format!("Subscription refreshed: {count} server(s)"))
         ]))
@@ -415,6 +461,18 @@ pub fn run(data_dir: PathBuf) -> Result<(), String> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
     rt.block_on(async {
         let state = mk_state(data_dir)?;
+
+        // Start the batcher background task for batch testing
+        crate::cleanup_stale_temp_dirs();
+        let batcher_pool = state.port_pool.clone();
+        let batcher_data = state.data_dir.clone();
+        let batcher_cancel = state.cancel_token.clone();
+        state.cache.start_batcher(
+            batcher_pool.clone(),
+            batcher_data.clone(),
+            batcher_cancel.clone(),
+        );
+
         let handler = Handler { state: Arc::new(tokio::sync::Mutex::new(state)) };
         let (r, w) = transport::io::stdio();
         let transport = AsyncRwTransport::new_server(r, w);

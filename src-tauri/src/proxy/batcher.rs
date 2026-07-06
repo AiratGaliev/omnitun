@@ -16,9 +16,9 @@ use crate::proxy::config::generate_batch_config;
 use crate::proxy::installer::Installer;
 use crate::proxy::port_pool::PortPool;
 use crate::proxy::ServerProfile;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(windows)]
@@ -70,7 +70,7 @@ pub async fn run(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<BatchRequest>,
     cache: ServerCache,
     port_pool: Arc<PortPool>,
-    app_handle: AppHandle,
+    data_dir: PathBuf,
     cancel: CancellationToken,
 ) {
     tracing::info!(target: "cache", "[Batcher] engine started");
@@ -97,7 +97,7 @@ pub async fn run(
                 let count = batch.len();
                 tracing::info!(target: "cache", "[Batcher] processing batch of {count} server(s)");
 
-                process_batch(batch, &cache, &port_pool, &app_handle, &cancel).await;
+                process_batch(batch, &cache, &port_pool, &data_dir, &cancel).await;
             }
         }
     }
@@ -136,7 +136,7 @@ async fn process_batch(
     batch: Vec<BatchRequest>,
     cache: &ServerCache,
     port_pool: &PortPool,
-    app_handle: &AppHandle,
+    data_dir: &Path,
     cancel: &CancellationToken,
 ) {
     let count = batch.len();
@@ -144,18 +144,6 @@ async fn process_batch(
 
     // 1. Acquire ports
     tracing::info!(target: "cache", "[Batcher] acquiring {count} port(s)");
-
-    // Get binary path
-    let data_dir = match app_handle.path().app_data_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::error!(target: "cache", "[Batcher] cannot get app data dir: {e}");
-            for req in batch {
-                let _ = req.reply.send(Err(format!("App data dir error: {e}")));
-            }
-            return;
-        }
-    };
 
     let binary_path = data_dir.join("binaries").join(Installer::binary_name());
 
@@ -327,7 +315,7 @@ async fn process_batch(
         // Assign to kill-on-close JobObject for orphan protection
         use std::os::windows::io::AsRawHandle;
         let mut job_guard = None;
-        if let Some(job) = crate::proxy::process::orphan_guard::create(app_handle) {
+        if let Some(job) = crate::proxy::process::orphan_guard::create() {
             if crate::proxy::process::orphan_guard::assign(&job, child_proc.as_raw_handle()) {
                 job_guard = Some(job);
             }
@@ -463,9 +451,9 @@ async fn process_batch(
     while let Some(res) = set.join_next().await {
         match res {
             Ok((req, Ok(result))) => {
-                // Log any [BUG] diagnostics caught during the test
+                // Log any diagnostics caught during the test (e.g. outlet IP in CDN ranges)
                 if let Some(warning) = &result.diagnostic_warning {
-                    tracing::warn!(target: "cache", "{warning}");
+                    tracing::info!(target: "cache", "{warning}");
                 }
 
                 let positive = PositiveResult {
@@ -692,13 +680,7 @@ async fn test_single_server(
         behind_cdn: server.behind_cdn,
         exit_flag: exit_geoip.as_ref().map(|g| g.country_code.clone()),
         exit_country: exit_geoip.as_ref().map(|g| g.country_name.clone()),
-        exit_city: exit_geoip.as_ref().and_then(|g| {
-            if g.city.is_empty() {
-                None
-            } else {
-                Some(g.city.clone())
-            }
-        }),
+        exit_city: None, // city intentionally excluded per user requirement
         diagnostic_warning,
     })
 }

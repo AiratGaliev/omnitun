@@ -1339,10 +1339,10 @@ async fn refresh_subscription(
 
     let fetch_result = match &url {
         u if u.starts_with("http://") || u.starts_with("https://") => {
-            match crate::subscription::fetch_subscription(u, crate::profile::proxy_port(&app)).await {
+            match crate::subscription::fetch_subscription(u, crate::profile::proxy_port_from_app(&app)).await {
                 Ok(s) => Ok(s),
                 Err(e) => {
-                    if crate::profile::proxy_port(&app).is_some() {
+                    if crate::profile::proxy_port_from_app(&app).is_some() {
                         tracing::error!(
                             target: "subscription",
                             "Proxy fetch failed, retrying direct: {e}"
@@ -1468,7 +1468,7 @@ async fn refresh_subscription(
 
     // Fetch traffic info (no lock, URL from Phase 1)
     let traffic =
-        crate::subscription::fetch_subscription_traffic(&url, crate::profile::proxy_port(&app)).await;
+        crate::subscription::fetch_subscription_traffic(&url, crate::profile::proxy_port_from_app(&app)).await;
 
     if servers.is_empty() {
         return Err(ProxyError::subscription(
@@ -1722,7 +1722,7 @@ pub fn run() {
             // Start the background batching engine
             cache.start_batcher(
                 port_pool.clone(),
-                app.handle().clone(),
+                data_dir.clone(),
                 cancel_token.clone(),
             );
 
@@ -2706,6 +2706,10 @@ async fn initialize_app(
     }
     // U7: Cleanup stale tmp files from previous sessions before downloading.
     crate::proxy::geoip::cleanup_stale_tmp_files();
+
+    // U8: Cleanup stale batch/latency/outlet/test temp dirs from crashed sessions.
+    cleanup_stale_temp_dirs();
+
     crate::proxy::geoip::ensure_downloaded(&geo_dir, &ipinfo_token).await?;
 
     // 3. Enrich loaded profiles with GeoIP data (fix corrupted names)
@@ -3042,6 +3046,44 @@ async fn wait_for_proxy_ready(pid: u32, proxy_port: u16) -> Result<u32, String> 
             ));
         }
         tokio::time::sleep(Duration::from_millis(PROXY_POLL_MS)).await;
+    }
+}
+
+/// Cleanup stale omnitun temp directories from crashed sessions.
+/// Removes orphaned batch/latency/outlet/test dirs older than 1 hour.
+pub(crate) fn cleanup_stale_temp_dirs() {
+    let tmp_dir = std::env::temp_dir();
+    let cutoff = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(3600); // 1 hour
+    let mut total = 0u32;
+    let prefixes = [
+        "omnitun-batch-",
+        "omnitun-latency-",
+        "omnitun-outlet-",
+        "omnitun-settings-test-",
+        "omnitun-test-",
+    ];
+    if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            if let Some(name) = entry.file_name().to_str() {
+                if prefixes.iter().any(|p| name.starts_with(p)) {
+                    if let Ok(meta) = entry.metadata() {
+                        if let Ok(mtime) = meta.modified() {
+                            if mtime < cutoff {
+                                let _ = std::fs::remove_dir_all(entry.path());
+                                total += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if total > 0 {
+        tracing::info!(target: "system", "Cleaned up {total} stale omnitun temp dir(s) from previous sessions");
     }
 }
 

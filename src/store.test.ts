@@ -162,6 +162,7 @@ beforeEach(() => {
       minimizeToTray: false,
       blockCdnNodes: false,
       ipinfoToken: '',
+      tlsInsecure: true,
     },
   });
 });

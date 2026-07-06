@@ -24,7 +24,7 @@ use crate::proxy::ServerProfile;
 use moka::future::Cache;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
@@ -247,7 +247,7 @@ impl ServerCache {
     pub fn start_batcher(
         &self,
         port_pool: Arc<PortPool>,
-        app_handle: AppHandle,
+        data_dir: PathBuf,
         cancel: CancellationToken,
     ) {
         if self
@@ -266,7 +266,7 @@ impl ServerCache {
                     .take()
                     .expect("start_batcher: batch_rx already consumed")
             };
-            crate::proxy::batcher::run(rx, cache, port_pool, app_handle, cancel).await;
+            crate::proxy::batcher::run(rx, cache, port_pool, data_dir, cancel).await;
         });
 
         log::info!("[ServerCache] batch worker started");
@@ -388,6 +388,17 @@ impl ServerCache {
             result.exit_country = None;
             result.exit_city = None;
         }
+        // Look up previous entry to properly increment consecutive_successes
+        let prev_successes = {
+            let store = self.store.read().await;
+            match store.get(server_id) {
+                Some(CacheEntry {
+                    status: CacheStatus::Positive { consecutive_successes, .. },
+                    ..
+                }) => *consecutive_successes,
+                _ => 0,
+            }
+        };
         let entry = CacheEntry {
             server_id: server_id.to_string(),
             last_updated: chrono::Utc::now().timestamp(),
@@ -398,7 +409,7 @@ impl ServerCache {
                 exit_country: result.exit_country.clone(),
                 exit_city: result.exit_city.clone(),
                 behind_cdn: result.behind_cdn,
-                consecutive_successes: 1,
+                consecutive_successes: prev_successes + 1,
             },
         };
 

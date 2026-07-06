@@ -80,6 +80,14 @@ pub fn generate_config(
             apply_anti_dpi(&mut outbound);
         }
 
+        // Apply TLS insecurity setting — override the default `insecure: true`
+        // from set_tls() when the user has explicitly disabled it.
+        if !settings.tls_insecure {
+            if let Some(tls) = outbound.get_mut("tls") {
+                tls["insecure"] = json!(false);
+            }
+        }
+
         // Apply Mux for TCP-based outbounds if enabled
         if settings.enable_mux {
             apply_mux(&mut outbound);
