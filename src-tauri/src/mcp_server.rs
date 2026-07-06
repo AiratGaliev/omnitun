@@ -27,6 +27,10 @@ fn schema(json: serde_json::Value) -> Arc<JsonMap> {
     }
 }
 
+fn empty_obj() -> Arc<JsonMap> {
+    Arc::default()
+}
+
 struct ServerState {
     process_mgr: ProcessManager,
     profile_mgr: super::profile::ProfileManager,
@@ -62,6 +66,52 @@ fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
     })
 }
 
+// ── Helper: build ServerProfile from JSON args ──────────────────────────
+
+fn profile_from_args(args: &serde_json::Value) -> ServerProfile {
+    ServerProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        protocol: args.get("protocol").and_then(|v| v.as_str()).unwrap_or("vless").into(),
+        server: args.get("server").and_then(|v| v.as_str()).unwrap_or("").into(),
+        port: args.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16,
+        uuid: args.get("uuid").and_then(|v| v.as_str()).map(String::from),
+        password: args.get("password").and_then(|v| v.as_str()).map(String::from),
+        method: args.get("method").and_then(|v| v.as_str()).map(String::from),
+        sni: args.get("sni").and_then(|v| v.as_str()).map(String::from),
+        flow: args.get("flow").and_then(|v| v.as_str()).map(String::from),
+        public_key: args.get("public_key").and_then(|v| v.as_str()).map(String::from),
+        private_key: args.get("private_key").and_then(|v| v.as_str()).map(String::from),
+        transport_type: args.get("transport_type").and_then(|v| v.as_str()).map(String::from),
+        transport_path: args.get("transport_path").and_then(|v| v.as_str()).map(String::from),
+        transport_host: args.get("transport_host").and_then(|v| v.as_str()).map(String::from),
+        reality_pbk: args.get("reality_pbk").and_then(|v| v.as_str()).map(String::from),
+        reality_sid: args.get("reality_sid").and_then(|v| v.as_str()).map(String::from),
+        username: args.get("username").and_then(|v| v.as_str()).map(String::from),
+        ..Default::default()
+    }
+}
+
+// ── Helper: launch sing-box with config ─────────────────────────────────
+
+async fn launch_sing_box(state: &ServerState, proxy_port: u16, routing_mode: &str, profiles: &[ServerProfile]) -> Result<u32, ErrorData> {
+    let (cfg, _) = crate::proxy::config::generate_config(
+        &state.data_dir.join("config"), proxy_port, routing_mode, profiles, &AppSettings::default(),
+    ).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    let cpath = crate::proxy::config::write_config(&cfg, &state.data_dir.join("config"))
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+
+    let b = state.bin_path.to_str().unwrap_or("");
+    let c = cpath.to_str().unwrap_or("");
+    let child = std::process::Command::new(b)
+        .args(["run", "-c", c])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| ErrorData::internal_error(format!("spawn: {e}"), None))?;
+
+    Ok(child.id())
+}
+
 // ── Command handlers ─────────────────────────────────────────────────────
 
 impl Handler {
@@ -73,33 +123,15 @@ impl Handler {
         let proxy_port = args.get("proxy_port").and_then(|v| v.as_u64()).unwrap_or(5050) as u16;
         let routing_mode = args.get("routing_mode").and_then(|v| v.as_str()).unwrap_or("system-proxy");
 
-        let profile = ServerProfile {
-            id: uuid::Uuid::new_v4().to_string(),
-            protocol: args.get("protocol").and_then(|v| v.as_str()).unwrap_or("vless").into(),
-            server: server.into(),
-            port,
-            ..Default::default()
-        };
+        let mut profile = profile_from_args(&args);
+        profile.server = server.into();
+        profile.port = port;
 
         let state = self.state.lock().await;
-        let (cfg, _) = crate::proxy::config::generate_config(
-            &state.data_dir.join("config"), proxy_port, routing_mode, &[profile], &AppSettings::default(),
-        ).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        let cpath = crate::proxy::config::write_config(&cfg, &state.data_dir.join("config"))
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        let b = state.bin_path.to_str().unwrap_or("");
-        let c = cpath.to_str().unwrap_or("");
-        let child = std::process::Command::new(b)
-            .args(["run", "-c", c])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| ErrorData::internal_error(format!("spawn: {e}"), None))?;
-
-        state.process_mgr.set_pid(child.id());
+        let pid = launch_sing_box(&state, proxy_port, routing_mode, &[profile]).await?;
+        state.process_mgr.set_pid(pid);
         Ok(CallToolResult::success(vec![
-            ContentBlock::text(format!("Proxy started (PID {}) on port {}", child.id(), proxy_port))
+            ContentBlock::text(format!("Proxy started (PID {pid}) on port {proxy_port}"))
         ]))
     }
 
@@ -153,6 +185,40 @@ impl Handler {
         Ok(CallToolResult::success(vec![ContentBlock::text(j)]))
     }
 
+    async fn cmd_refresh_sub(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
+        let id = args.get("id").and_then(|v| v.as_str())
+            .ok_or_else(|| ErrorData::invalid_params("'id' is required", None))?;
+
+        // Phase 1: read lock — get URL
+        let url;
+        {
+            let state = self.state.lock().await;
+            url = state.profile_mgr.list().iter()
+                .find(|p| p.id == id)
+                .ok_or_else(|| ErrorData::invalid_params(format!("Profile '{id}' not found"), None))?
+                .url
+                .clone();
+        } // lock released
+
+        // Phase 2: fetch + parse (no lock)
+        let servers = crate::subscription::fetch_subscription(&url, None).await
+            .map_err(|e| ErrorData::internal_error(format!("fetch: {e}"), None))?;
+
+        // Phase 3: write lock — commit
+        let mut state = self.state.lock().await;
+        let idx = state.profile_mgr.list().iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| ErrorData::invalid_params(format!("Profile '{id}' not found"), None))?;
+        state.profile_mgr.list_mut()[idx].servers = servers;
+        state.profile_mgr.list_mut()[idx].updated_at = chrono::Utc::now().to_rfc3339();
+        let count = state.profile_mgr.list()[idx].servers.len();
+        state.profile_mgr.save()
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text(format!("Subscription refreshed: {count} server(s)"))
+        ]))
+    }
+
     async fn cmd_remove_sub(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
         let id = args.get("id").and_then(|v| v.as_str())
             .ok_or_else(|| ErrorData::invalid_params("'id' is required", None))?;
@@ -167,6 +233,29 @@ impl Handler {
         state.profile_mgr.save()
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(format!("Removed {removed} profile(s)"))]))
+    }
+
+    async fn cmd_start_server(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
+        let sub_id = args.get("subscription_id").and_then(|v| v.as_str())
+            .ok_or_else(|| ErrorData::invalid_params("'subscription_id' is required", None))?;
+        let server_id = args.get("server_id").and_then(|v| v.as_str())
+            .ok_or_else(|| ErrorData::invalid_params("'server_id' is required", None))?;
+        let proxy_port = args.get("proxy_port").and_then(|v| v.as_u64()).unwrap_or(5050) as u16;
+        let routing_mode = args.get("routing_mode").and_then(|v| v.as_str()).unwrap_or("system-proxy");
+
+        let state = self.state.lock().await;
+        let profile = state.profile_mgr.list().iter()
+            .find(|p| p.id == sub_id)
+            .ok_or_else(|| ErrorData::invalid_params(format!("Subscription '{sub_id}' not found"), None))?;
+        let server = profile.servers.iter()
+            .find(|s| s.id == server_id)
+            .ok_or_else(|| ErrorData::invalid_params(format!("Server '{server_id}' not found"), None))?;
+
+        let pid = launch_sing_box(&state, proxy_port, routing_mode, &[server.clone()]).await?;
+        state.process_mgr.set_pid(pid);
+        Ok(CallToolResult::success(vec![
+            ContentBlock::text(format!("Proxy started (PID {pid}) via server '{}' on port {proxy_port}", server.server))
+        ]))
     }
 
     async fn cmd_settings(&self) -> Result<CallToolResult, ErrorData> {
@@ -188,8 +277,16 @@ fn define_tools() -> Vec<Tool> {
                 "properties": {
                     "server":     { "type": "string", "description": "Server hostname or IP" },
                     "port":       { "type": "integer", "description": "Server port", "minimum": 1, "maximum": 65535 },
-                    "protocol":   { "type": "string", "description": "Protocol (vless, vmess, trojan, shadowsocks, hysteria2, tuic)", "enum": ["vless","vmess","trojan","shadowsocks","hysteria2","tuic"], "default": "vless" },
-                    "uuid":       { "type": "string", "description": "VLESS/VMESS/Trojan UUID or password (optional if in profile)" },
+                    "protocol":   { "type": "string", "description": "Protocol", "enum": ["vless","vmess","trojan","shadowsocks","hysteria2","tuic","wireguard"], "default": "vless" },
+                    "uuid":       { "type": "string", "description": "VLESS/VMESS UUID" },
+                    "password":   { "type": "string", "description": "Password (trojan, shadowsocks, hysteria2)" },
+                    "method":     { "type": "string", "description": "Encryption method (shadowsocks)" },
+                    "sni":        { "type": "string", "description": "TLS SNI (server_name)" },
+                    "flow":       { "type": "string", "description": "Flow control (vless: xtls-rprx-vision)" },
+                    "transport_type": { "type": "string", "description": "Transport type", "enum": ["ws","tcp","grpc","quic"] },
+                    "transport_path": { "type": "string", "description": "WebSocket path (e.g. /ws)" },
+                    "transport_host": { "type": "string", "description": "WebSocket host header" },
+                    "public_key": { "type": "string", "description": "Reality / hysteria2 public key" },
                     "proxy_port": { "type": "integer", "description": "Local SOCKS5 port", "default": 5050, "minimum": 1024, "maximum": 65535 },
                     "routing_mode": { "type": "string", "description": "Routing mode", "enum": ["system-proxy","local-proxy"], "default": "system-proxy" }
                 },
@@ -197,7 +294,7 @@ fn define_tools() -> Vec<Tool> {
             }))
         ),
         Tool::new("stop_proxy",
-            "Stop the running sing-box proxy. No parameters needed.",
+            "Stop the running sing-box proxy.",
             schema(serde_json::json!({"type":"object","properties":{}}))
         ),
         Tool::new("get_status",
@@ -205,7 +302,7 @@ fn define_tools() -> Vec<Tool> {
             schema(serde_json::json!({"type":"object","properties":{}}))
         ),
         Tool::new("list_profiles",
-            "List all subscription profiles with their metadata.",
+            "List all subscription profiles with their servers.",
             schema(serde_json::json!({"type":"object","properties":{}}))
         ),
         Tool::new("add_subscription",
@@ -219,6 +316,16 @@ fn define_tools() -> Vec<Tool> {
                 "required": ["url"]
             }))
         ),
+        Tool::new("refresh_subscription",
+            "Fetch and parse a subscription URL, replacing its server list.",
+            schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Profile ID to refresh" }
+                },
+                "required": ["id"]
+            }))
+        ),
         Tool::new("remove_subscription",
             "Remove a subscription profile by its ID.",
             schema(serde_json::json!({
@@ -227,6 +334,19 @@ fn define_tools() -> Vec<Tool> {
                     "id": { "type": "string", "description": "Profile ID to remove" }
                 },
                 "required": ["id"]
+            }))
+        ),
+        Tool::new("start_server_from_subscription",
+            "Start proxy using a specific server from a subscription profile.",
+            schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "subscription_id": { "type": "string", "description": "Subscription profile ID" },
+                    "server_id":       { "type": "string", "description": "Server ID within the subscription" },
+                    "proxy_port":      { "type": "integer", "description": "Local SOCKS5 port", "default": 5050, "minimum": 1024 },
+                    "routing_mode":    { "type": "string", "description": "Routing mode", "enum": ["system-proxy","local-proxy"], "default": "system-proxy" }
+                },
+                "required": ["subscription_id", "server_id"]
             }))
         ),
         Tool::new("get_settings",
@@ -274,13 +394,15 @@ impl ServerHandler for Handler {
         async move {
             let args = serde_json::Value::Object(request.arguments.unwrap_or_default());
             match request.name.as_ref() {
-                "start_proxy"       => self.cmd_start(args).await,
-                "stop_proxy"        => self.cmd_stop().await,
-                "get_status"        => self.cmd_status().await,
-                "list_profiles"     => self.cmd_profiles().await,
-                "add_subscription"  => self.cmd_add_sub(args).await,
-                "remove_subscription" => self.cmd_remove_sub(args).await,
-                "get_settings"      => self.cmd_settings().await,
+                "start_proxy"                 => self.cmd_start(args).await,
+                "stop_proxy"                  => self.cmd_stop().await,
+                "get_status"                  => self.cmd_status().await,
+                "list_profiles"               => self.cmd_profiles().await,
+                "add_subscription"            => self.cmd_add_sub(args).await,
+                "refresh_subscription"        => self.cmd_refresh_sub(args).await,
+                "remove_subscription"         => self.cmd_remove_sub(args).await,
+                "start_server_from_subscription" => self.cmd_start_server(args).await,
+                "get_settings"                => self.cmd_settings().await,
                 n => Err(ErrorData::new(rmcp::model::ErrorCode::METHOD_NOT_FOUND, format!("Unknown tool: {n}"), None)),
             }
         }
