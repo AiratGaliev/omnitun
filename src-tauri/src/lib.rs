@@ -1805,6 +1805,7 @@ pub fn run() {
             )?;
 
             let _tray_icon = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("OmniTun")
                 .menu(&menu)
                 .on_menu_event(move |app, event| {
