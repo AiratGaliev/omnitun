@@ -41,6 +41,18 @@ pub fn set_pid_file_path(data_dir: &Path) {
     }
 }
 
+/// Write PID file without an AppHandle (for headless / MCP mode).
+/// Same as write_pid_file but takes no _app parameter.
+pub fn write_pid_file_headless(pid: u32) {
+    let path = match PID_FILE.lock().ok().and_then(|g| g.clone()) {
+        Some(p) => p,
+        None => return,
+    };
+    if let Err(e) = std::fs::write(&path, pid.to_string()) {
+        tracing::warn!(target: "process", "[pidfile] failed to write sing-box PID {pid}: {e}");
+    }
+}
+
 /// Write the current PID to the PID file.
 pub fn write_pid_file(pid: u32, _app: &tauri::AppHandle) {
     let path = match PID_FILE.lock().ok().and_then(|g| g.clone()) {
@@ -295,6 +307,143 @@ impl ProcessManager {
         Ok(())
     }
 
+    // Headless spawn — same as start() but no AppHandle.
+    // Used by the MCP server. Does NOT write the PID file (the caller
+    // should call write_pid_file_headless separately if needed).
+    pub async fn start_headless(&self, config_path: &Path) -> Result<u32, ProxyError> {
+        let existing_pid = *self.pid.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pid) = existing_pid {
+            if !crate::is_process_alive(pid) {
+                *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            } else {
+                return Err(ProxyError::process(
+                    ErrorCode::ProcessAlreadyRunning,
+                    "Proxy is already running",
+                ));
+            }
+        }
+
+        let config_str = config_path
+            .to_str()
+            .ok_or_else(|| ProxyError::process(
+                ErrorCode::ProcessStartFailed,
+                "Invalid config path",
+            ))?;
+
+        let binary = self
+            .binary_path
+            .to_str()
+            .ok_or_else(|| ProxyError::process(
+                ErrorCode::ProcessStartFailed,
+                "Invalid binary path",
+            ))?;
+
+        let stderr_path = std::path::Path::new(config_str)
+            .parent()
+            .map(|p| p.join("sing-box-stderr.log"))
+            .unwrap_or_else(|| std::path::PathBuf::from("sing-box-stderr.log"));
+        let stderr_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&stderr_path)
+            .ok();
+        let stderr_stdio = match stderr_file {
+            Some(ref file) => std::process::Stdio::from(file.try_clone().unwrap_or_else(|_| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&stderr_path)
+                    .expect("Failed to reopen stderr log file")
+            })),
+            None => std::process::Stdio::null(),
+        };
+
+        #[cfg(windows)]
+        {
+            const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let mut cmd_breakaway = std::process::Command::new(binary);
+            cmd_breakaway
+                .args(["run", "-c", config_str])
+                .stdout(std::process::Stdio::null())
+                .stderr(stderr_stdio)
+                .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
+
+            let child = match cmd_breakaway.spawn() {
+                Ok(c) => c,
+                Err(_) => {
+                    std::process::Command::new(binary)
+                        .args(["run", "-c", config_str])
+                        .stdout(std::process::Stdio::null())
+                        .stderr({
+                            match std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(&stderr_path)
+                            {
+                                Ok(f) => std::process::Stdio::from(f),
+                                Err(_) => std::process::Stdio::null(),
+                            }
+                        })
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .spawn()
+                        .map_err(|e| ProxyError::process(
+                            ErrorCode::ProcessStartFailed,
+                            format!("Failed to start sing-box: {e}"),
+                        ))?
+                }
+            };
+
+            use std::os::windows::io::AsRawHandle;
+            let process_handle = child.as_raw_handle();
+            if let Some(job) = orphan_guard::create() {
+                if orphan_guard::assign(&job, process_handle) {
+                    *self.job.lock().unwrap_or_else(|e| e.into_inner()) = Some(job);
+                }
+            }
+
+            let new_pid = child.id();
+            *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(new_pid);
+            crate::proxy::PROXY_PID.store(new_pid, std::sync::atomic::Ordering::Release);
+            write_pid_file_headless(new_pid);
+            Ok(new_pid)
+        }
+
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::process::CommandExt;
+            let mut cmd = std::process::Command::new(binary);
+            cmd.args(["run", "-c", config_str])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .process_group(0);
+
+            #[cfg(target_os = "linux")]
+            unsafe {
+                cmd.pre_exec(|| {
+                    extern "C" {
+                        fn prctl(option: i32, arg2: u64, ...) -> i32;
+                    }
+                    prctl(1, 9);
+                    Ok(())
+                });
+            }
+
+            let child = cmd
+                .spawn()
+                .map_err(|e| ProxyError::process(
+                    ErrorCode::ProcessStartFailed,
+                    format!("Failed to start sing-box: {e}"),
+                ))?;
+
+            let new_pid = child.id();
+            *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(new_pid);
+            crate::proxy::PROXY_PID.store(new_pid, std::sync::atomic::Ordering::Release);
+            write_pid_file_headless(new_pid);
+            Ok(new_pid)
+        }
+    }
+
     pub async fn stop(&self) -> Result<(), ProxyError> {
         remove_pid_file();
 
@@ -340,7 +489,7 @@ impl ProcessManager {
             }
 
             // Process still alive after 3s — log warning but don't block
-            log::warn!("[process] sing-box PID {p} still alive 3s after taskkill");
+            tracing::warn!(target: "process", "[process] sing-box PID {p} still alive 3s after taskkill");
             Ok(())
         }
 

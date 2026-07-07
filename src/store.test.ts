@@ -162,7 +162,7 @@ beforeEach(() => {
       minimizeToTray: false,
       blockCdnNodes: false,
       ipinfoToken: '',
-      tlsInsecure: true,
+      tlsInsecure: true, testUrl: "cp.cloudflare.com/generate_204", testUseTls: true,
     },
   });
 });

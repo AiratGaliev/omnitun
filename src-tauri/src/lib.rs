@@ -1,5 +1,4 @@
 #![recursion_limit = "512"]
-pub mod core;
 pub mod events;
 pub mod logging;
 pub mod profile;
@@ -35,9 +34,8 @@ const PROXY_POLL_MS: u64 = 300;
 
 const IP_URLS: &[&str] = &[
     "https://api.ipify.org",
-    "https://whatismyip.akamai.com",
-    "http://myip.ipip.net/s",
-    "https://www.cloudflare.com/cdn-cgi/trace",
+    "https://ifconfig.me/ip",
+    "https://api.ip.sb/ip",
 ];
 
 /// Guard: ensure initialize_app runs only once per process.
@@ -1118,6 +1116,7 @@ async fn add_subscription(
     }
 }
 
+
 #[tauri::command]
 async fn remove_subscription(
     app: tauri::AppHandle,
@@ -1509,6 +1508,7 @@ async fn refresh_subscription(
     Ok(profile)
 }
 
+
 #[tauri::command]
 async fn get_settings(state: tauri::State<'_, Mutex<AppSettings>>) -> Result<AppSettings, String> {
     let mut settings = state.lock().await;
@@ -1591,7 +1591,7 @@ fn set_start_on_boot(enabled: bool) {
         let exe_path = match std::env::current_exe() {
             Ok(p) => p,
             Err(e) => {
-                log::warn!("Cannot get exe path: {e}");
+                tracing::warn!(target: "settings", "Cannot get exe path: {e}");
                 return;
             }
         };
@@ -1750,7 +1750,7 @@ pub fn run() {
 
             let mut profile_manager = ProfileManager::new(data_dir);
             profile_manager.load().unwrap_or_else(|e| {
-                log::error!("Failed to load profiles: {e} — starting with empty profile list");
+                tracing::error!(target: "subscription", "Failed to load profiles: {e} — starting with empty profile list");
                 // logger not available yet, but we can continue with empty
             });
             let profile_state = ProfileState {
@@ -1871,7 +1871,7 @@ pub fn run() {
                         let pid =
                             crate::proxy::PROXY_PID.load(std::sync::atomic::Ordering::Acquire);
                         if pid > 0 {
-                            log::info!("[cleanup] killing our proxy (PID {pid})");
+                            tracing::info!(target: "system", "[cleanup] killing our proxy (PID {pid})");
                             #[cfg(target_os = "windows")]
                             let _ = std::process::Command::new("taskkill")
                                 .args(["/pid", &pid.to_string(), "/f"])
@@ -1880,9 +1880,9 @@ pub fn run() {
                             let _ = std::process::Command::new("kill")
                                 .args(["-9", &pid.to_string()])
                                 .output();
-                            log::info!("[cleanup] done");
+                            tracing::info!(target: "system", "[cleanup] done");
                         } else {
-                            log::info!("[cleanup] no proxy PID to kill");
+                            tracing::info!(target: "system", "[cleanup] no proxy PID to kill");
                         }
 
                         let minimize = if let Some(state) =
@@ -1960,9 +1960,8 @@ fn read_clipboard_text() -> Result<String, String> {
 }
 
 /// Get the user's real IP (before proxy) with GeoIP location.
-/// Always fetches directly (no proxy) — works whether connected or not.
-#[tauri::command]
-async fn get_real_ip(_app: tauri::AppHandle) -> Result<RealIpInfo, String> {
+/// Shared implementation used by both the Tauri command and the MCP handler.
+pub(crate) async fn fetch_real_ip() -> Result<RealIpInfo, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .build()
@@ -1972,11 +1971,7 @@ async fn get_real_ip(_app: tauri::AppHandle) -> Result<RealIpInfo, String> {
     for url in IP_URLS {
         if let Ok(resp) = client.get(*url).send().await {
             if let Ok(text) = resp.text().await {
-                let extracted = text
-                    .lines()
-                    .find_map(|l| l.strip_prefix("ip="))
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_else(|| text.trim().to_string());
+                let extracted = text.trim().to_string();
                 if !extracted.is_empty() {
                     ip = extracted;
                     break;
@@ -1986,7 +1981,7 @@ async fn get_real_ip(_app: tauri::AppHandle) -> Result<RealIpInfo, String> {
     }
 
     if ip.is_empty() {
-        tracing::error!(target: "system", "get_real_ip: could not determine external IP");
+        tracing::error!(target: "system", "fetch_real_ip: could not determine external IP");
         return Err("Could not determine external IP".into());
     }
 
@@ -2006,6 +2001,14 @@ async fn get_real_ip(_app: tauri::AppHandle) -> Result<RealIpInfo, String> {
         country_name,
         city_name,
     })
+}
+
+/// Get the user's real IP (before proxy) with GeoIP location.
+/// Always fetches directly (no proxy) — works whether connected or not.
+/// Wraps the shared `fetch_real_ip()` for Tauri command compatibility.
+#[tauri::command]
+async fn get_real_ip(_app: tauri::AppHandle) -> Result<RealIpInfo, String> {
+    fetch_real_ip().await
 }
 
 /// Find the active proxy's outlet (external) IP address via IP echo services.
@@ -2116,12 +2119,7 @@ async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
             if let Ok(resp) = client.get(url).send().await {
                 if resp.status().is_success() {
                     if let Ok(text) = resp.text().await {
-                        // Try to extract ip=... (Cloudflare trace)
-                        let extracted = text
-                            .lines()
-                            .find_map(|l| l.strip_prefix("ip="))
-                            .map(|s| s.trim().to_string())
-                            .unwrap_or_else(|| text.trim().to_string());
+                        let extracted = text.trim().to_string();
                         if !extracted.is_empty() {
                             return Some(extracted);
                         }
@@ -2751,7 +2749,7 @@ async fn initialize_app(
                     if resp.status().is_success() {
                         if let Ok(text) = resp.text().await {
                             let ip = text.trim().to_string();
-                            if !ip.is_empty() && ip.chars().all(|c| c.is_ascii_digit() || c == '.')
+                            if !ip.is_empty()
                             {
                                 log(
                                     &app,
@@ -3061,8 +3059,7 @@ pub(crate) fn cleanup_stale_temp_dirs() {
         "omnitun-batch-",
         "omnitun-latency-",
         "omnitun-outlet-",
-        "omnitun-settings-test-",
-        "omnitun-test-",
+        "omnitun-settings-test-",  // safe: only used by settings tests, which always clean up
     ];
     if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
         for entry in entries.flatten() {

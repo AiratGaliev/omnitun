@@ -278,13 +278,13 @@ impl Installer {
                     ));
             }
             Ok(resp) => {
-                log::warn!(
+                tracing::warn!(target: "installer", 
                     "Direct download returned HTTP {}, trying ghproxy...",
                     resp.status()
                 );
             }
             Err(e) => {
-                log::warn!("Direct download failed ({e}), trying ghproxy...");
+                tracing::warn!(target: "installer", "Direct download failed ({e}), trying ghproxy...");
             }
         }
 

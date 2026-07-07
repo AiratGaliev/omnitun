@@ -41,7 +41,7 @@ impl PortPool {
     /// Create a new pool covering [`PORT_MIN`, `PORT_MAX`].
     pub fn new() -> Self {
         let ports: Vec<u16> = (PORT_MIN..=PORT_MAX).collect();
-        log::info!(
+        tracing::info!(target: "cache", 
             "[PortPool] created with {} ports ({}–{})",
             ports.len(),
             PORT_MIN,
@@ -100,7 +100,7 @@ impl PortPool {
         if !pool.contains(&port) {
             pool.push(port);
         } else {
-            log::warn!("[PortPool] port {port} returned twice — ignoring");
+            tracing::warn!(target: "cache", "[PortPool] port {port} returned twice — ignoring");
         }
     }
 }

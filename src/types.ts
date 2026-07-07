@@ -141,6 +141,8 @@ export interface Settings {
   blockCdnNodes: boolean;
   ipinfoToken: string;
   tlsInsecure: boolean;
+  testUrl: string;
+  testUseTls: boolean;
 }
 
 export interface ExitIpInfo {

@@ -34,6 +34,7 @@ pub async fn fetch_subscription(
         let mirrors = [
             "https://ghproxy.net/https://raw.githubusercontent.com/",
             "https://gh-proxy.com/https://raw.githubusercontent.com/",
+            "https://raw.githack.com/",
         ];
         let mut all = vec![url.to_string()];
         for prefix in &mirrors {

@@ -219,7 +219,7 @@ fn ipguide_cache() -> &'static AsyncMutex<std::collections::HashMap<String, IpGu
 /// Reset the per-cycle rate-limit counter.
 pub fn reset_ipguide_rate_limit() {
     IPGUIDE_REQUESTS_THIS_CYCLE.store(0, std::sync::atomic::Ordering::Relaxed);
-    log::debug!("GeoIP: ip.guide rate-limit counter reset for new refresh cycle");
+    tracing::debug!(target: "system", "GeoIP: ip.guide rate-limit counter reset for new refresh cycle");
 }
 
 /// Check if an IP is private/mock (skip ip.guide for these).
@@ -253,7 +253,7 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
         if let Some(entry) = cache.get(ip) {
             if let Ok(age) = SystemTime::now().duration_since(entry.fetched_at) {
                 if age < IPGUIDE_CACHE_TTL {
-                    log::debug!("GeoIP: ip.guide cache hit for {}", ip);
+                    tracing::debug!(target: "system", "GeoIP: ip.guide cache hit for {}", ip);
                     return Some(GeoIpResult {
                         country_code: entry.country_code.clone(),
                         country_name: String::new(),
@@ -267,7 +267,7 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
     // Rate-limit check
     let current = IPGUIDE_REQUESTS_THIS_CYCLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if current >= IPGUIDE_MAX_REQUESTS_PER_CYCLE {
-        log::warn!(
+        tracing::warn!(target: "system", 
             "GeoIP: ip.guide rate limit exceeded (max {}/cycle), skipping {}",
             IPGUIDE_MAX_REQUESTS_PER_CYCLE, ip
         );
@@ -278,7 +278,7 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
     let _permit = match IPGUIDE_SEMAPHORE.acquire().await {
         Ok(p) => p,
         Err(_) => {
-            log::warn!("GeoIP: ip.guide semaphore closed for {}", ip);
+            tracing::warn!(target: "system", "GeoIP: ip.guide semaphore closed for {}", ip);
             return None;
         }
     };
@@ -292,7 +292,7 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
     {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("GeoIP: ip.guide client build failed for {}: {}", ip, e);
+            tracing::warn!(target: "system", "GeoIP: ip.guide client build failed for {}: {}", ip, e);
             return None;
         }
     };
@@ -300,20 +300,20 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
     let resp = match client.get(&url).send().await {
         Ok(r) => r,
         Err(e) => {
-            log::warn!("GeoIP: ip.guide request failed for {}: {}", ip, e);
+            tracing::warn!(target: "system", "GeoIP: ip.guide request failed for {}: {}", ip, e);
             return None;
         }
     };
 
     if !resp.status().is_success() {
-        log::warn!("GeoIP: ip.guide returned HTTP {} for {}", resp.status(), ip);
+        tracing::warn!(target: "system", "GeoIP: ip.guide returned HTTP {} for {}", resp.status(), ip);
         return None;
     }
 
     let body = match resp.text().await {
         Ok(t) => t,
         Err(e) => {
-            log::warn!("GeoIP: ip.guide body read failed for {}: {}", ip, e);
+            tracing::warn!(target: "system", "GeoIP: ip.guide body read failed for {}: {}", ip, e);
             return None;
         }
     };
@@ -324,7 +324,7 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
     let json: serde_json::Value = match serde_json::from_str(&body) {
         Ok(v) => v,
         Err(e) => {
-            log::warn!("GeoIP: ip.guide JSON parse failed for {}: {}. Body: {}",
+            tracing::warn!(target: "system", "GeoIP: ip.guide JSON parse failed for {}: {}. Body: {}",
                        ip, e, &body[..body.len().min(200)]);
             return None;
         }
@@ -359,11 +359,11 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
     };
 
     if country_code.is_empty() {
-        log::warn!("GeoIP: ip.guide returned no country for {}", ip);
+        tracing::warn!(target: "system", "GeoIP: ip.guide returned no country for {}", ip);
         return None;
     }
 
-    log::info!(
+    tracing::info!(target: "system", 
         "GeoIP: country resolved via ip.guide for {} → {} (ASN {} {}). \
          country_name will be filled by frontend via i18n-iso-countries.",
         ip, country_code,
@@ -551,7 +551,7 @@ pub fn cleanup_stale_tmp_files() {
         }
     }
     if cleaned > 0 {
-        log::info!("Cleaned up {} stale CDN tmp file(s) from previous sessions", cleaned);
+        tracing::info!(target: "system", "Cleaned up {} stale CDN tmp file(s) from previous sessions", cleaned);
     }
 }
 
@@ -600,7 +600,7 @@ pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
     let tmp_name = format!("omnitun-cdn-srs-{tmp_uuid}.json");
     let tmp_json = tmp_dir.join(&tmp_name);
 
-    log::debug!(
+    tracing::debug!(target: "system", 
         "parse_srs_file: decompiling {} → {}",
         path.display(),
         tmp_json.display()
@@ -668,7 +668,7 @@ pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
     // Cleanup: best-effort, log on failure (could indicate filesystem
     // issues worth knowing about).
     if let Err(e) = std::fs::remove_file(&tmp_json) {
-        log::warn!(
+        tracing::warn!(target: "system", 
             "Failed to clean up tmp file {}: {e} (non-fatal — file will be \
              removed at next OS temp cleanup)",
             tmp_json.display()
@@ -707,7 +707,7 @@ pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
 /// Load a .srs file and set CDN_RANGES.
 pub fn init_cdn_ranges(path: &Path) -> Result<(), String> {
     let ranges = parse_srs_file(path)?;
-    log::info!(
+    tracing::info!(target: "system", 
         "Loaded {} CDN CIDR entries from {}",
         ranges.len(),
         path.display()
@@ -862,7 +862,7 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
     // но без country_code — это anycast IP или специальный случай.
     if country_code.is_empty() {
         if let Some(ref asn) = ipinfo_asn {
-            log::debug!(
+            tracing::debug!(target: "system", 
                 "GeoIP: ipinfo Lite has ASN for {} but no country_code (anycast?): \
                  asn={}, as_name={:?}",
                 ip, asn, ipinfo_as_name
@@ -914,7 +914,7 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
                 let asn_num = entry.autonomous_system_number;
                 let asn_org = entry.autonomous_system_organization;
                 if asn_num.is_some() || asn_org.is_some() {
-                    log::debug!(
+                    tracing::debug!(target: "system", 
                         "GeoIP: MaxMind ASN has data for {} (no country in City): \
                          asn={:?}, org={:?}. Will try ip.guide fallback.",
                         ip, asn_num, asn_org
@@ -934,7 +934,7 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
     // почти всегда содержит country для IP с city), а для anycast IP
     // ip.guide — единственный источник country.
     if country_code.is_empty() && !city.is_empty() {
-        log::debug!(
+        tracing::debug!(target: "system", 
             "GeoIP: MaxMind City has city ({}) for {} but no country — will try ip.guide",
             city, ip
         );
@@ -1078,7 +1078,7 @@ pub(crate) fn should_download_ipinfo(path: &Path) -> bool {
     };
 
     if elapsed < IPINFO_REFRESH_INTERVAL {
-        log::info!(
+        tracing::info!(target: "system", 
             "ipinfo Lite database refreshed {:.0?} ago — skipping download (interval: {:.0?})",
             elapsed,
             IPINFO_REFRESH_INTERVAL,
@@ -1118,7 +1118,7 @@ async fn validate_ipinfo_token(client: &reqwest::Client, token: &str) -> Result<
         _ => {
             // 200 or other success code without redirect is also unexpected
             // for the HEAD endpoint, but treat as valid rather than block
-            log::info!(
+            tracing::info!(target: "system", 
                 "IPinfo token validation returned HTTP {status} (expected 302) — proceeding anyway"
             );
             Ok(())
@@ -1161,7 +1161,7 @@ async fn check_latest_release(client: &reqwest::Client, db_dir: &Path) -> Option
     let url = "https://api.github.com/repos/P3TERX/GeoLite.mmdb/releases/latest";
     let resp = client.get(url).send().await.ok()?;
     if !resp.status().is_success() {
-        log::warn!(
+        tracing::warn!(target: "system", 
             "GitHub API returned HTTP {} for release check",
             resp.status().as_u16()
         );
@@ -1169,7 +1169,7 @@ async fn check_latest_release(client: &reqwest::Client, db_dir: &Path) -> Option
     }
     let body: serde_json::Value = resp.json().await.ok()?;
     let tag = body.get("tag_name")?.as_str()?.to_string();
-    log::info!("GitHub API: latest P3TERX/GeoLite.mmdb release is {tag}");
+    tracing::info!(target: "system", "GitHub API: latest P3TERX/GeoLite.mmdb release is {tag}");
 
     let now = chrono::Utc::now().to_rfc3339();
     meta.last_release_check = Some(now);
@@ -1210,7 +1210,7 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
     {
         Ok(c) => c,
         Err(e) => {
-            log::warn!("Failed to build HTTP client for GeoIP check: {e}");
+            tracing::warn!(target: "system", "Failed to build HTTP client for GeoIP check: {e}");
             return;
         }
     };
@@ -1218,9 +1218,9 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
     // ── 1. MaxMind: check GitHub for latest release ────────────────────
     let latest_tag = check_latest_release(&client, db_dir).await;
     if let Some(ref tag) = latest_tag {
-        log::info!("Latest P3TERX/GeoLite.mmdb release: {tag}");
+        tracing::info!(target: "system", "Latest P3TERX/GeoLite.mmdb release: {tag}");
     } else {
-        log::info!("P3TERX/GeoLite.mmdb release check skipped (cached or unavailable)");
+        tracing::info!(target: "system", "P3TERX/GeoLite.mmdb release check skipped (cached or unavailable)");
     }
 
     // ── 2. MaxMind City ────────────────────────────────────────────────
@@ -1251,11 +1251,11 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
                 Ok(bytes) => {
                     update_db_meta(db_dir, "GeoLite2-City.mmdb", latest_tag.as_deref(), bytes)
                 }
-                Err(e) => log::warn!("City DB download: {e}"),
+                Err(e) => tracing::warn!(target: "system", "City DB download: {e}"),
             }
         }
     } else if city_path.exists() {
-        log::info!("GeoLite2-City.mmdb is up-to-date");
+        tracing::info!(target: "system", "GeoLite2-City.mmdb is up-to-date");
     }
     let _ = init_city(&city_path);
 
@@ -1287,11 +1287,11 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
                 Ok(bytes) => {
                     update_db_meta(db_dir, "GeoLite2-ASN.mmdb", latest_tag.as_deref(), bytes)
                 }
-                Err(e) => log::warn!("ASN DB download: {e}"),
+                Err(e) => tracing::warn!(target: "system", "ASN DB download: {e}"),
             }
         }
     } else if asn_path.exists() {
-        log::info!("GeoLite2-ASN.mmdb is up-to-date");
+        tracing::info!(target: "system", "GeoLite2-ASN.mmdb is up-to-date");
     }
     let _ = init_asn(&asn_path);
 
@@ -1301,7 +1301,7 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
             "https://ipinfo.io/data/ipinfo_lite.mmdb?token={}",
             ipinfo_token
         );
-        log::info!("Downloading ipinfo Lite database from ipinfo.io ...");
+        tracing::info!(target: "system", "Downloading ipinfo Lite database from ipinfo.io ...");
         if let Ok(dl) = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .timeout(Duration::from_secs(30))
@@ -1310,9 +1310,9 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
             match download_single(&dl, &ipinfo_path, &url, "ipinfo Lite").await {
                 Ok(bytes) => update_db_meta(db_dir, "ipinfo_lite.mmdb", None, bytes),
                 Err(e) => {
-                    log::warn!("ipinfo Lite download: {e}");
+                    tracing::warn!(target: "system", "ipinfo Lite download: {e}");
                     if let Err(ve) = validate_ipinfo_token(&dl, ipinfo_token).await {
-                        log::warn!("{ve}");
+                        tracing::warn!(target: "system", "{ve}");
                     }
                 }
             }
@@ -1359,7 +1359,7 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
         if needs {
             let mut downloaded = false;
             for url in *urls {
-                log::info!("Downloading CDN .srs from {name} ({url}) ...");
+                tracing::info!(target: "system", "Downloading CDN .srs from {name} ({url}) ...");
                 if let Ok(dl) = reqwest::Client::builder()
                     .user_agent("omnitun/1.0")
                     .danger_accept_invalid_certs(true)
@@ -1369,31 +1369,31 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
                     match download_single(&dl, &path, url, &format!("CDN .srs {name}")).await {
                         Ok(bytes) => {
                             update_db_meta(db_dir, filename, None, bytes);
-                            log::info!("CDN .srs {name} downloaded ({bytes} bytes)");
+                            tracing::info!(target: "system", "CDN .srs {name} downloaded ({bytes} bytes)");
                             downloaded = true;
                             break;
                         }
-                        Err(e) => log::warn!("CDN .srs {name} download from {url} failed: {e}"),
+                        Err(e) => tracing::warn!(target: "system", "CDN .srs {name} download from {url} failed: {e}"),
                     }
                 }
             }
             if !downloaded {
-                log::warn!("CDN .srs {name}: all download URLs failed");
+                tracing::warn!(target: "system", "CDN .srs {name}: all download URLs failed");
             }
         }
         if path.exists() {
             match parse_srs_file(&path) {
                 Ok(r) => {
-                    log::info!("CDN .srs {name}: {} CIDR entries", r.len());
+                    tracing::info!(target: "system", "CDN .srs {name}: {} CIDR entries", r.len());
                     all_cdn_ranges.extend(r);
                 }
-                Err(e) => log::warn!("CDN .srs {name} parse: {e}"),
+                Err(e) => tracing::warn!(target: "system", "CDN .srs {name} parse: {e}"),
             }
         }
     }
 
     if !all_cdn_ranges.is_empty() {
-        log::info!("CDN ranges merged: {} total entries", all_cdn_ranges.len());
+        tracing::info!(target: "system", "CDN ranges merged: {} total entries", all_cdn_ranges.len());
         set_cdn_ranges(all_cdn_ranges);
     }
 
@@ -1410,7 +1410,7 @@ async fn download_db_geoip(
 ) -> Result<u64, String> {
     let mut last_err = String::new();
     for url in urls {
-        log::info!("Downloading GeoIP {} database from {} ...", label, url);
+        tracing::info!(target: "system", "Downloading GeoIP {} database from {} ...", label, url);
         match client.get(*url).send().await {
             Ok(resp) => {
                 let status = resp.status();
@@ -1440,7 +1440,7 @@ async fn download_db_geoip(
                     .map_err(|e| format!("Failed to write {label} database: {e}"))?;
                 std::fs::rename(&tmp, target_path)
                     .map_err(|e| format!("Failed to finalize {label} database: {e}"))?;
-                log::info!("GeoIP {} database downloaded ({len} bytes)", label);
+                tracing::info!(target: "system", "GeoIP {} database downloaded ({len} bytes)", label);
                 return Ok(len);
             }
             Err(e) => last_err = format!("{e}"),
@@ -1489,7 +1489,7 @@ pub async fn download_ipinfo_db(db_dir: &Path, ipinfo_token: &str) -> Result<boo
             .build()
             .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
-        log::info!("Downloading ipinfo Lite database from ipinfo.io ...");
+        tracing::info!(target: "system", "Downloading ipinfo Lite database from ipinfo.io ...");
         let bytes = download_single(&dl_client, &ipinfo_path, &url, "ipinfo Lite").await?;
         update_db_meta(db_dir, "ipinfo_lite.mmdb", None, bytes);
         let _ = init_ipinfo(&ipinfo_path);
@@ -1542,7 +1542,7 @@ async fn download_single(
                 .map_err(|e| format!("Failed to write {label} database: {e}"))?;
             std::fs::rename(&tmp_path, target_path)
                 .map_err(|e| format!("Failed to finalize {label} database: {e}"))?;
-            log::info!("{label} database downloaded ({len} bytes)");
+            tracing::info!(target: "system", "{label} database downloaded ({len} bytes)");
             Ok(len)
         }
         Err(e) => Err(format!("Failed to download {label} database: {e}")),
@@ -1559,7 +1559,7 @@ async fn download_db(
 ) -> Result<u64, String> {
     let mut last_err = String::new();
     for url in urls {
-        log::info!("Downloading GeoIP {} database from {} ...", label, url);
+        tracing::info!(target: "system", "Downloading GeoIP {} database from {} ...", label, url);
         match client.get(*url).send().await {
             Ok(resp) => {
                 let status = resp.status();
@@ -1589,7 +1589,7 @@ async fn download_db(
                     .map_err(|e| format!("Failed to write GeoIP {} database: {e}", label))?;
                 std::fs::rename(&tmp_path, target_path)
                     .map_err(|e| format!("Failed to finalize GeoIP {} database: {e}", label))?;
-                log::info!("GeoIP {} database downloaded ({len} bytes)", label);
+                tracing::info!(target: "system", "GeoIP {} database downloaded ({len} bytes)", label);
                 return Ok(len);
             }
             Err(e) => {

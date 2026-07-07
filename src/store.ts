@@ -360,6 +360,8 @@ export const useAppStore = create<ProxyStore>((set, get) => ({
     blockCdnNodes: false,
     ipinfoToken: '',
     tlsInsecure: true,
+    testUrl: 'cp.cloudflare.com/generate_204',
+    testUseTls: true,
   },
 
   setStatus: (status) => {

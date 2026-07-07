@@ -540,8 +540,21 @@ const TEST_URLS: &[&str] = &[
     "http://cp.cloudflare.com/generate_204",
 ];
 
-/// Per-URL timeout для test_single_server: 4s на URL × 5 URL × 2 попытки = 40s макс.
+/// Per-URL timeout для test_single_server: 4s на URL, без retry.
 const PER_URL_TIMEOUT_SECS: u64 = 4;
+
+static CONFIGURED_TEST_URL: std::sync::LazyLock<std::sync::RwLock<String>> = std::sync::LazyLock::new(|| {
+    std::sync::RwLock::new("https://cp.cloudflare.com/generate_204".to_string())
+});
+
+/// Update the configured test URL from user preferences.
+pub fn set_configured_test_url(host_path: &str, use_tls: bool) {
+    let scheme = if use_tls { "https" } else { "http" };
+    let url = format!("{}://{}", scheme, host_path);
+    if let Ok(mut locked) = CONFIGURED_TEST_URL.write() {
+        *locked = url;
+    }
+}
 
 /// Test a single server through its dedicated proxy port.
 /// Tries multiple test URLs with one retry on total failure.

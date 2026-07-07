@@ -35,9 +35,28 @@ pub struct AppSettings {
     /// Default: true (backward compatible — insecure by default).
     #[serde(default = "default_tls_insecure")]
     pub tls_insecure: bool,
+    /// Latency test URL host+path (e.g. "cp.cloudflare.com/generate_204").
+    /// Picked from AVAILABLE_TEST_URLS. User-configurable via settings.
+    #[serde(default = "default_test_url")]
+    pub test_url: String,
+    /// Use HTTPS for the latency test URL. If false, uses HTTP.
+    #[serde(default = "default_test_use_tls")]
+    pub test_use_tls: bool,
 }
 
 fn default_tls_insecure() -> bool { true }
+fn default_test_url() -> String { "cp.cloudflare.com/generate_204".to_string() }
+fn default_test_use_tls() -> bool { true }
+
+/// Available test URLs for latency measurement.
+/// User picks one via the `test_url` setting.
+#[allow(dead_code)]
+pub const AVAILABLE_TEST_URLS: &[&str] = &[
+    "cp.cloudflare.com/generate_204",
+    "www.gstatic.com/generate_204",
+    "www.msftconnecttest.com/connecttest.txt",
+    "detectportal.firefox.com/success.txt",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,7 +71,7 @@ impl Default for AppSettings {
         Self {
             accept_terms: false,
             routing_mode: "system-proxy".to_string(),
-            proxy_port: 5050,
+            proxy_port: 5055,
             bypass_ru: true,
             start_with_windows: true,
             auto_connect_fastest: true,
@@ -73,6 +92,8 @@ impl Default for AppSettings {
             block_cdn_nodes: false,
             ipinfo_token: String::new(),
             tls_insecure: true,
+            test_url: "cp.cloudflare.com/generate_204".to_string(),
+            test_use_tls: true,
         }
     }
 }
@@ -147,7 +168,7 @@ mod tests {
         assert!(result.is_ok(), "expected Ok for missing file, got Err");
         let settings = result.unwrap();
         assert_eq!(settings.routing_mode, "system-proxy");
-        assert_eq!(settings.proxy_port, 5050);
+        assert_eq!(settings.proxy_port, 5055);
         assert!(settings.bypass_ru);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -214,7 +235,7 @@ mod tests {
         let s = AppSettings::default();
         assert!(!s.accept_terms);
         assert_eq!(s.routing_mode, "system-proxy");
-        assert_eq!(s.proxy_port, 5050);
+        assert_eq!(s.proxy_port, 5055);
         assert!(s.bypass_ru);
         assert!(s.start_with_windows);
         assert!(s.auto_connect_fastest);

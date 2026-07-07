@@ -122,7 +122,7 @@ impl ProfileManager {
         if changed {
             let _ = self.save();
         }
-        log::info!(
+        tracing::info!(target: "subscription", 
             "GeoIP enrichment: {enriched_count} enriched, {cdn_cleanup} CDN exit cleaned up"
         );
     }
@@ -1069,14 +1069,16 @@ pub async fn process_servers_inner(
             let total_alive_servers = ready_servers.len() + needs_batch_test.len();
             let mut updated = match app_handle {
                 Some(app) => cache
-                    .batch_test(app, &needs_batch_test, cancel_token, profile_id, total_alive_servers)
+                    .batch_test(Some(app), &needs_batch_test, cancel_token, profile_id, total_alive_servers)
                     .await,
                 None => {
                     tracing::info!(
                         target: "cache",
-                        "Batch test skipped (no Tauri app handle — adding servers without test)",
+                        "Batch test running headless (no Tauri app handle)",
                     );
-                    needs_batch_test.clone()
+                    cache
+                        .batch_test(None, &needs_batch_test, cancel_token, profile_id, total_alive_servers)
+                        .await
                 }
             };
             ready_servers.append(&mut updated);

@@ -220,5 +220,8 @@
   "speedKbps": "KB/s",
   "speedMbps": "MB/s",
   "speedGbps": "GB/s",
-  "reconnectingTo": "Reconnecting to {{name}}..."
+  "reconnectingTo": "Reconnecting to {{name}}...",
+  "testUrl": "Latency test URL",
+  "testUrlDesc": "URL used to measure server ping. Change if the default is blocked in your region.",
+  "testProtocol": "Protocol:"
 }

@@ -22,7 +22,7 @@ pub fn load_cache(data_dir: &Path) -> HashMap<String, CacheEntry> {
     match std::fs::read_to_string(&path) {
         Ok(json) => match serde_json::from_str::<HashMap<String, CacheEntry>>(&json) {
             Ok(map) => {
-                log::info!(
+                tracing::info!(target: "cache", 
                     "[Cache Persistence] loaded {} entries from {}",
                     map.len(),
                     path.display()
@@ -30,7 +30,7 @@ pub fn load_cache(data_dir: &Path) -> HashMap<String, CacheEntry> {
                 map
             }
             Err(e) => {
-                log::warn!(
+                tracing::warn!(target: "cache", 
                     "[Cache Persistence] failed to parse {}: {e} — starting fresh",
                     path.display()
                 );
@@ -38,14 +38,14 @@ pub fn load_cache(data_dir: &Path) -> HashMap<String, CacheEntry> {
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            log::info!(
+            tracing::info!(target: "cache", 
                 "[Cache Persistence] no cache file at {} — starting fresh",
                 path.display()
             );
             HashMap::new()
         }
         Err(e) => {
-            log::warn!(
+            tracing::warn!(target: "cache", 
                 "[Cache Persistence] error reading {}: {e} — starting fresh",
                 path.display()
             );
@@ -68,14 +68,14 @@ pub fn save_cache(data_dir: &Path, entries: &HashMap<String, CacheEntry>) {
                 Ok(_) => {
                     match std::fs::rename(&tmp_path, &path) {
                         Ok(_) => {
-                            log::info!(
+                            tracing::info!(target: "cache", 
                                 "[Cache Persistence] saved {} entries to {}",
                                 entries.len(),
                                 path.display()
                             );
                         }
                         Err(e) => {
-                            log::error!(
+                            tracing::error!(target: "cache", 
                                 "[Cache Persistence] atomic rename failed: {e} — cache NOT saved"
                             );
                             // Try to clean up the temp file
@@ -84,13 +84,13 @@ pub fn save_cache(data_dir: &Path, entries: &HashMap<String, CacheEntry>) {
                     }
                 }
                 Err(e) => {
-                    log::error!("[Cache Persistence] write failed: {e} — cache NOT saved");
+                    tracing::error!(target: "cache", "[Cache Persistence] write failed: {e} — cache NOT saved");
                     let _ = std::fs::remove_file(&tmp_path);
                 }
             }
         }
         Err(e) => {
-            log::error!("[Cache Persistence] serialization failed: {e} — cache NOT saved");
+            tracing::error!(target: "cache", "[Cache Persistence] serialization failed: {e} — cache NOT saved");
         }
     }
 }
@@ -99,12 +99,12 @@ pub fn save_cache(data_dir: &Path, entries: &HashMap<String, CacheEntry>) {
 pub fn clear_cache(data_dir: &Path) {
     let path = data_dir.join(CACHE_FILE);
     match std::fs::remove_file(&path) {
-        Ok(_) => log::info!("[Cache Persistence] deleted {}", path.display()),
+        Ok(_) => tracing::info!(target: "cache", "[Cache Persistence] deleted {}", path.display()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // Already gone — nothing to do
         }
         Err(e) => {
-            log::warn!(
+            tracing::warn!(target: "cache", 
                 "[Cache Persistence] failed to delete {}: {e}",
                 path.display()
             );

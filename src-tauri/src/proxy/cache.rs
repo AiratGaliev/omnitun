@@ -224,11 +224,11 @@ impl ServerCache {
 
         let (batch_tx, batch_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        log::info!("[ServerCache] initialized with {persisted_count} persisted entries");
-        log::info!(
+        tracing::info!(target: "cache", "[ServerCache] initialized with {persisted_count} persisted entries");
+        tracing::info!(target: "cache", 
             "[ServerCache] hot cache TTL={POSITIVE_TTL_SECS}s, idle={POSITIVE_IDLE_SECS}s, SWR stale={POSITIVE_STALE_SECS}s"
         );
-        log::info!("[ServerCache] batch channel created (not started — call start_batcher)");
+        tracing::info!(target: "cache", "[ServerCache] batch channel created (not started — call start_batcher)");
 
         Self {
             store,
@@ -254,7 +254,7 @@ impl ServerCache {
             .batcher_started
             .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
-            log::warn!("[ServerCache] start_batcher called twice — ignoring");
+            tracing::warn!(target: "cache", "[ServerCache] start_batcher called twice — ignoring");
             return;
         }
 
@@ -269,7 +269,7 @@ impl ServerCache {
             crate::proxy::batcher::run(rx, cache, port_pool, data_dir, cancel).await;
         });
 
-        log::info!("[ServerCache] batch worker started");
+        tracing::info!(target: "cache", "[ServerCache] batch worker started");
     }
 
     /// Get a server's cached positive result, or initiate a test.
@@ -312,10 +312,10 @@ impl ServerCache {
                                     let rx = cache.queue_test(&srv, "");
                                     match rx.await {
                                         Ok(Ok(r)) => {
-                                            log::info!("SWR refresh ok for {}", r.server_id)
+                                            tracing::info!(target: "cache", "SWR refresh ok for {}", r.server_id)
                                         }
-                                        Ok(Err(e)) => log::warn!("SWR refresh failed: {e}"),
-                                        Err(_) => log::warn!("SWR refresh cancelled"),
+                                        Ok(Err(e)) => tracing::warn!(target: "cache", "SWR refresh failed: {e}"),
+                                        Err(_) => tracing::warn!(target: "cache", "SWR refresh cancelled"),
                                     }
                                 });
                                 return Ok(result);
@@ -444,12 +444,21 @@ impl ServerCache {
             profile_id: profile_id.to_string(),
             reply: tx,
         }) {
-            log::warn!(
-                "[Cache] batch channel closed, request for {} lost: {e}",
-                server.id
+            tracing::error!(
+                target: "cache",
+                "Queue test failed — batch channel closed: {e}"
             );
         }
         rx
+    }
+
+    /// Public wrapper around `queue_test` — used by the MCP server
+    /// to queue a single server for batch testing.
+    pub fn queue_test_public(
+        &self,
+        server: &ServerProfile,
+    ) -> tokio::sync::oneshot::Receiver<Result<PositiveResult, String>> {
+        self.queue_test(server, "")
     }
 
     /// Update the store with a negative result.
@@ -550,26 +559,27 @@ impl ServerCache {
     ///   Phase 2: await all queued results in parallel
     pub async fn batch_test(
         &self,
-        app: &AppHandle,
+        app: Option<&AppHandle>,
         servers: &[crate::proxy::ServerProfile],
         cancel: Option<tokio_util::sync::CancellationToken>,
         profile_id: &str,
         total_alive_servers: usize,
     ) -> Vec<crate::proxy::ServerProfile> {
-        let logger = app.state::<std::sync::Mutex<Logger>>();
+        let app_ref = app;  // rename so we can shadow with Option
+        let (logger, use_tracing) = match app_ref {
+            Some(a) => (Some(a.state::<std::sync::Mutex<Logger>>()), false),
+            None => (None, true),
+        };
+
         let initial_cache_hits = total_alive_servers.saturating_sub(servers.len());
         let total = total_alive_servers.max(servers.len());
         let mut cache_hits = 0usize;
         let mut cdn_skip_count = 0usize;
         let mut queued = 0usize;
 
-        log(
-            app,
-            &logger,
-            LogLevel::Info,
-            LogSource::Cache,
-            format!("[Cache] batch_test: {total} server(s)"),
-        );
+        if use_tracing {
+            tracing::info!(target: "cache", "[Cache] batch_test: {total} server(s)");
+        }
 
         // Phase 1: Check cache for all servers. Queue uncached ones.
         // Use a simple cache-only check to avoid blocking on the batch worker.
@@ -653,16 +663,10 @@ impl ServerCache {
                 // и нестабильный (CDN anycast, Workers, WARP). TCP Ping уже
                 // подтвердил базовую связность, чего достаточно для CDN-узлов.
                 cdn_skip_count += 1;
-                log(
-                    app,
-                    &logger,
-                    LogLevel::Info,
-                    LogSource::Cache,
-                    format!(
-                        "[Cache] server {} behind CDN — skipping batch test, using TCP ping",
-                        server.id
-                    ),
-                );
+                if let Some(l) = &logger {
+                    log(app_ref.unwrap(), l, LogLevel::Info, LogSource::Cache,
+                        format!("[Cache] server {} behind CDN — skipping batch test, using TCP ping", server.id));
+                }
                 let mut s = server.clone();
                 // Инвариант I-CDN-1: behind_cdn => exit_* = None
                 s.assert_no_cdn_exit_data("batch_test::cdn_skip");
@@ -680,13 +684,10 @@ impl ServerCache {
             }
         }
 
-        log(
-            app,
-            &logger,
-            LogLevel::Info,
-            LogSource::Cache,
-            format!("[Cache] batch_test: {total} total, {cache_hits} cache hits, {cdn_skip_count} CDN skip, {queued} queued"),
-        );
+        if let Some(l) = &logger {
+            log(app_ref.unwrap(), l, LogLevel::Info, LogSource::Cache,
+                format!("[Cache] batch_test: {total} total, {cache_hits} cache hits, {cdn_skip_count} CDN skip, {queued} queued"));
+        }
 
         if queued == 0 {
             return result_slots.into_iter().filter_map(|s| s).collect();
@@ -708,13 +709,10 @@ impl ServerCache {
         while let Some(res) = set.join_next().await {
             if let Some(ref token) = cancel {
                 if token.is_cancelled() {
-                    log(
-                        app,
-                        &logger,
-                        LogLevel::Info,
-                        LogSource::Cache,
-                        "[Cache] batch_test cancelled".into(),
-                    );
+                    if let Some(l) = &logger {
+                        log(app_ref.unwrap(), l, LogLevel::Info, LogSource::Cache,
+                            "[Cache] batch_test cancelled".into());
+                    }
                     break;
                 }
             }
@@ -748,23 +746,17 @@ impl ServerCache {
                     }
                     Ok(Err(e)) => {
                         failed += 1;
-                        log(
-                            app,
-                            &logger,
-                            LogLevel::Warning,
-                            LogSource::Cache,
-                            format!("[Cache] server {} batch test failed: {e}", server.id),
-                        );
+                        if let Some(l) = &logger {
+                            log(app_ref.unwrap(), l, LogLevel::Warning, LogSource::Cache,
+                                format!("[Cache] server {} batch test failed: {e}", server.id));
+                        }
                     }
                     Err(_) => {
                         failed += 1;
-                        log(
-                            app,
-                            &logger,
-                            LogLevel::Error,
-                            LogSource::Cache,
-                            format!("[Cache] server {} batch worker dropped", server.id),
-                        );
+                        if let Some(l) = &logger {
+                            log(app_ref.unwrap(), l, LogLevel::Error, LogSource::Cache,
+                                format!("[Cache] server {} batch worker dropped", server.id));
+                        }
                     }
                 }
 
@@ -777,7 +769,7 @@ impl ServerCache {
                 }
 
                 crate::events::emit_refresh_progress(
-                    app,
+                    app_ref.unwrap(),
                     crate::events::RefreshProgress {
                         profile_id: profile_id.to_string(),
                         total,
@@ -792,26 +784,25 @@ impl ServerCache {
                 // JoinError: task panicked or was cancelled — fill slot with TCP-ping data
                 // to avoid panicking on the final .unwrap()
                 failed += 1;
-                log(
-                    app,
-                    &logger,
-                    LogLevel::Warning,
-                    LogSource::Cache,
-                    format!("[Cache] batch_test task panicked or was cancelled"),
-                );
+                if use_tracing {
+                    tracing::warn!(target: "cache", "[Cache] batch_test task panicked or was cancelled");
+                } else if let Some(l) = &logger {
+                    log(app_ref.unwrap(), l, LogLevel::Warning, LogSource::Cache,
+                        "[Cache] batch_test task panicked or was cancelled".into());
+                }
                 // We can't identify which server panicked, so skip slot filling
                 // The slot will be filled by the next completed task, or at worst
                 // the cost is one fewer result in the final list.
             }
         }
 
-        log(
-            app,
-            &logger,
-            LogLevel::Info,
-            LogSource::Cache,
-            format!("[Cache] batch_test done: {completed}/{queued} completed, {failed} failed"),
-        );
+        if use_tracing {
+            tracing::info!(target: "cache",
+                "[Cache] batch_test done: {completed}/{queued} completed, {failed} failed");
+        } else if let Some(l) = &logger {
+            log(app_ref.unwrap(), l, LogLevel::Info, LogSource::Cache,
+                format!("[Cache] batch_test done: {completed}/{queued} completed, {failed} failed"));
+        }
 
         result_slots.into_iter().filter_map(|s| s).collect()
     }
@@ -839,7 +830,7 @@ impl ServerCache {
         // every subscription refresh, wasting resources on known-dead servers.
 
         if removed > 0 {
-            log::info!(
+            tracing::info!(target: "cache", 
                 "[Cache] subscription refresh: removed {removed} stale server(s) ({} remaining)",
                 store.len(),
             );
@@ -862,7 +853,7 @@ impl ServerCache {
         });
         let removed = before - store.len();
         if removed > 0 {
-            log::info!(
+            tracing::info!(target: "cache", 
                 "[Cache] pruned {removed} old entries older than {}d ({} remaining)",
                 max_age_secs / 86400,
                 store.len(),
@@ -883,7 +874,7 @@ impl ServerCache {
         let count = persisted.len();
         let mut store = self.store.write().await;
         *store = persisted;
-        log::info!("[Cache] loaded {count} entries from disk");
+        tracing::info!(target: "cache", "[Cache] loaded {count} entries from disk");
     }
 
     /// Get the number of positive entries in the store.

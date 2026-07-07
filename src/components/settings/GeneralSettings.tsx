@@ -256,6 +256,62 @@ export function GeneralSettings() {
           </div>
         </div>
       </div>
+
+      {/* Latency test URL */}
+      <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 hover:bg-zinc-900/60 hover:border-white/10 transition-all duration-300 rounded-2xl p-6 shadow-sm group">
+        <div className="flex gap-5">
+          <div className="mt-0.5 bg-zinc-800/80 p-2.5 rounded-xl shadow-inner h-fit border border-white/5 group-hover:border-white/10 transition-colors">
+            <Rocket size={20} className="text-green-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <h3 className="font-semibold text-sm text-zinc-100 tracking-wide">
+              {t('testUrl')}
+            </h3>
+            <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed">{t('testUrlDesc')}</p>
+
+            {/* Test URL selector */}
+            <select
+              value={settings.testUrl}
+              onChange={(e) => {
+                updateSettings({ testUrl: e.target.value });
+                addLog(`Test URL changed to ${e.target.value}`, 'info', 'settings');
+              }}
+              className="mt-3 w-full bg-zinc-800/60 border border-white/10 rounded-xl px-4 py-2.5 text-sm font-mono text-zinc-200 focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none transition-all shadow-inner appearance-none cursor-pointer"
+            >
+              <option value="cp.cloudflare.com/generate_204" className="bg-zinc-900 text-white">cp.cloudflare.com/generate_204</option>
+              <option value="www.gstatic.com/generate_204" className="bg-zinc-900 text-white">www.gstatic.com/generate_204</option>
+              <option value="www.msftconnecttest.com/connecttest.txt" className="bg-zinc-900 text-white">www.msftconnecttest.com/connecttest.txt</option>
+              <option value="detectportal.firefox.com/success.txt" className="bg-zinc-900 text-white">detectportal.firefox.com/success.txt</option>
+            </select>
+
+            {/* HTTPS/HTTP toggle */}
+            <div className="mt-3 flex items-center gap-3">
+              <span className="text-xs text-zinc-500">{t('testProtocol')}</span>
+              <button
+                onClick={() => updateSettings({ testUseTls: !settings.testUseTls })}
+                className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-all ${
+                  settings.testUseTls
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                    : 'bg-zinc-800/60 border-white/10 text-zinc-400'
+                }`}
+              >
+                HTTPS
+              </button>
+              <span className="text-xs text-zinc-600">/</span>
+              <button
+                onClick={() => updateSettings({ testUseTls: !settings.testUseTls })}
+                className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-all ${
+                  !settings.testUseTls
+                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'
+                    : 'bg-zinc-800/60 border-white/10 text-zinc-400'
+                }`}
+              >
+                HTTP
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
