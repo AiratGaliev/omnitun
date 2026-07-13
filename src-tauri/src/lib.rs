@@ -1508,6 +1508,105 @@ async fn refresh_subscription(
     Ok(profile)
 }
 
+/// Test existing servers WITHOUT re-fetching the subscription URL.
+///
+/// This is the "server testing" layer, separate from "subscription refresh":
+///   - `refresh_subscription` = HTTP fetch + parse + TCP-ping + batch-test
+///     (discovers NEW servers, re-tests all). Cadence: `auto_update_interval`.
+///   - `test_servers`         = TCP-ping + batch-test only (no URL fetch).
+///     Re-tests EXISTING servers to keep latency/exit-IP fresh.
+///     Cadence: `auto_test_interval`.
+///
+/// `process_servers_inner` is reused — it already skips batch-test for
+/// servers with fresh positive cache, so testing is cheap when servers
+/// haven't changed.
+///
+/// Updates `last_tested` (not `updated_at`) so the test timer doesn't
+/// immediately re-test after a refresh.
+#[tauri::command]
+async fn test_servers(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, ProfileState>,
+    id: String,
+) -> Result<SubscriptionProfile, ProxyError> {
+    let logger = app.state::<StdMutex<Logger>>();
+    log(
+        &app,
+        &logger,
+        LogLevel::Info,
+        LogSource::Cache,
+        "Testing existing servers (no URL fetch)...".into(),
+    );
+
+    // Phase 1: brief read lock — get existing servers
+    let servers = {
+        let mgr = state.manager.lock().await;
+        let idx = mgr
+            .list()
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| {
+                ProxyError::subscription(
+                    crate::proxy::ErrorCode::SubscriptionNotFound,
+                    "Profile not found",
+                )
+            })?;
+        // Clone servers, reset ping_ms so they get re-tested
+        mgr.list()[idx]
+            .servers
+            .iter()
+            .map(|s| {
+                let mut s = s.clone();
+                s.ping_ms = None;
+                s
+            })
+            .collect::<Vec<_>>()
+    }; // lock released
+
+    // Phase 2: process_servers (TCP-ping + batch-test, no URL fetch)
+    crate::proxy::geoip::reset_ipguide_rate_limit();
+    let tested = crate::profile::process_servers(&app, servers, &id).await;
+
+    if tested.is_empty() {
+        log(
+            &app,
+            &logger,
+            LogLevel::Warning,
+            LogSource::Cache,
+            "Test returned 0 alive servers — keeping existing".into(),
+        );
+    } else {
+        log(
+            &app,
+            &logger,
+            LogLevel::Success,
+            LogSource::Cache,
+            format!("Tested {} server(s)", tested.len()),
+        );
+    }
+
+    // Phase 3: brief write lock — commit with last_tested
+    let servers_to_commit = if tested.is_empty() {
+        state
+            .manager
+            .lock()
+            .await
+            .list()
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.servers.clone())
+            .unwrap_or_default()
+    } else {
+        tested
+    };
+
+    let profile = {
+        let mut mgr = state.manager.lock().await;
+        mgr.commit_test(&app, &id, servers_to_commit).await?
+    };
+
+    Ok(profile)
+}
 
 #[tauri::command]
 async fn get_settings(state: tauri::State<'_, Mutex<AppSettings>>) -> Result<AppSettings, String> {
@@ -1536,6 +1635,11 @@ async fn update_settings(
         new_settings.auto_update_interval = 1;
     } else if new_settings.auto_update_interval > 10080 {
         new_settings.auto_update_interval = 10080;
+    }
+    // Clamp auto-test interval. 0 = disabled. Otherwise 1 min min,
+    // 1 week max.
+    if new_settings.auto_test_interval > 10080 {
+        new_settings.auto_test_interval = 10080;
     }
     // Normalize country codes to uppercase for reliable GeoIP matching
     new_settings.allowed_countries = new_settings
@@ -1570,6 +1674,13 @@ async fn update_settings(
 
     // Handle startWithWindows
     set_start_on_boot(new_settings.start_with_windows);
+
+    // Apply the configured test URL so test_single_server
+    // prepends it to the URL list on the next test.
+    crate::proxy::batcher::set_configured_test_url(
+        &new_settings.test_url,
+        new_settings.test_use_tls,
+    );
 
     log(
         &app,
@@ -1926,6 +2037,7 @@ pub fn run() {
             add_subscription,
             remove_subscription,
             get_subscriptions,
+            test_servers,
             refresh_subscription,
             get_settings,
             update_settings,
@@ -2534,6 +2646,7 @@ async fn import_subscription_content(
         url: format!("content://{}", uuid::Uuid::new_v4()),
         servers,
         updated_at: chrono::Utc::now().to_rfc3339(),
+        last_tested: None,
         traffic_used: None,
         traffic_total: None,
         traffic_expiry: None,
@@ -2630,6 +2743,7 @@ async fn import_subscription_file(
         url,
         servers,
         updated_at: chrono::Utc::now().to_rfc3339(),
+        last_tested: None,
         traffic_used: None,
         traffic_total: None,
         traffic_expiry: None,
@@ -2698,10 +2812,21 @@ async fn initialize_app(
         .flatten()
         .unwrap_or_default();
     // Set locale for city name localisation (MaxMind City supports en/ru/etc.)
-    if let Some(settings_state) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
+    let test_url_host = if let Some(settings_state) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
         if let Ok(guard) = settings_state.try_lock() {
             crate::proxy::geoip::set_locale(&guard.language);
+            // Load saved test URL so test_single_server uses it
+            let url = guard.test_url.clone();
+            let use_tls = guard.test_use_tls;
+            Some((url, use_tls))
+        } else {
+            None
         }
+    } else {
+        None
+    };
+    if let Some((test_url, use_tls)) = test_url_host {
+        crate::proxy::batcher::set_configured_test_url(&test_url, use_tls);
     }
     // U7: Cleanup stale tmp files from previous sessions before downloading.
     crate::proxy::geoip::cleanup_stale_tmp_files();

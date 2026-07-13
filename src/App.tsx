@@ -115,11 +115,34 @@ export default function App() {
       const intervalMs = settings.autoUpdateInterval * 60 * 1000;
       const now = Date.now();
 
-      let updatedCount = 0;
-      profiles.forEach((p) => {
+      // ── Stagger refreshes (UI freeze fix) ──────────────────────────────
+      // Previously, ALL due profiles were refreshed simultaneously. Each
+      // refresh triggers process_servers (TCP ping + batch test) which
+      // emits a burst of refresh-progress events. With N profiles refreshing
+      // at once, the events from all profiles interleave into a massive
+      // burst that saturates the frontend.
+      //
+      // We now stagger refresh starts by ~400ms per profile.
+      const due = profiles.filter((p) => {
         const lastUpdated = p.lastUpdated ?? 0;
-        if (now - lastUpdated >= intervalMs) {
-          updatedCount++;
+        return now - lastUpdated >= intervalMs;
+      });
+
+      if (due.length > 0) {
+        addLog(`Auto-refreshing ${String(due.length)} subscription(s)`, 'info', 'subscription');
+      }
+
+      const STAGGER_MS = 400;
+      due.forEach((p, index) => {
+        setTimeout(() => {
+          // Re-check that the profile still exists and is still due
+          const current = useAppStore.getState().profiles.find((x) => x.id === p.id);
+          if (!current) return;
+          const currentInterval = useAppStore.getState().settings.autoUpdateInterval;
+          if (!currentInterval || currentInterval <= 0) return;
+          const currentIntervalMs = currentInterval * 60 * 1000;
+          if (Date.now() - (current.lastUpdated ?? 0) < currentIntervalMs) return;
+
           refreshProfile(p.id).catch((err: unknown) => {
             if (isRustError(err)) {
               toast.error(t(err.code, { defaultValue: err.message }));
@@ -127,12 +150,8 @@ export default function App() {
               toast.error(t('autoRefreshFailed'));
             }
           });
-        }
+        }, index * STAGGER_MS);
       });
-
-      if (updatedCount > 0) {
-        addLog(`Auto-refreshing ${String(updatedCount)} subscription(s)`, 'info', 'subscription');
-      }
     };
 
     const initialTimer = setTimeout(checkAndUpdate, 3000);
@@ -143,6 +162,54 @@ export default function App() {
       clearInterval(timer);
     };
   }, [isInitialized, settings.autoUpdateInterval, t]);
+
+  // Separate server TESTING timer ───────────────────────────────
+  // This is distinct from subscription REFRESH (above). Testing re-runs
+  // batch-test on EXISTING servers (no URL fetch) to keep latency/exit-IP
+  // fresh. Cadence: `autoTestInterval` (default 10 min). 0 = disabled.
+  useEffect(() => {
+    if (!isInitialized || !settings.autoTestInterval || settings.autoTestInterval <= 0) return;
+
+    const checkAndTest = () => {
+      const { profiles, testServers, addLog, settings } = useAppStore.getState();
+      if (!settings.autoTestInterval || settings.autoTestInterval <= 0) return;
+
+      const testIntervalMs = settings.autoTestInterval * 60 * 1000;
+      const now = Date.now();
+
+      const due = profiles.filter((p) => {
+        const lastTested = p.lastTested ?? p.lastUpdated ?? 0;
+        return now - lastTested >= testIntervalMs;
+      });
+
+      if (due.length > 0) {
+        addLog(`Auto-testing ${String(due.length)} profile(s) (no URL fetch)`, 'info', 'cache');
+      }
+
+      const STAGGER_MS = 400;
+      due.forEach((p, index) => {
+        setTimeout(() => {
+          const current = useAppStore.getState().profiles.find((x) => x.id === p.id);
+          if (!current) return;
+          const currentInterval = useAppStore.getState().settings.autoTestInterval;
+          if (!currentInterval || currentInterval <= 0) return;
+          const currentIntervalMs = currentInterval * 60 * 1000;
+          const lastTested = current.lastTested ?? current.lastUpdated ?? 0;
+          if (Date.now() - lastTested < currentIntervalMs) return;
+          if (useAppStore.getState()._refreshingIds.includes(p.id)) return;
+          void testServers(p.id);
+        }, index * STAGGER_MS);
+      });
+    };
+
+    const initialTestTimer = setTimeout(checkAndTest, 10000);
+    const testTimer = setInterval(checkAndTest, 60 * 1000);
+
+    return () => {
+      clearTimeout(initialTestTimer);
+      clearInterval(testTimer);
+    };
+  }, [isInitialized, settings.autoTestInterval]);
 
   return (
     <div className="w-full h-screen bg-zinc-950 text-zinc-100 font-sans flex overflow-hidden relative selection:bg-emerald-500/30">

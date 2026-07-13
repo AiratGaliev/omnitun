@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useCallback, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useAppStore } from '@/store.ts';
 import { Edit2, Globe2, Loader2, RefreshCw, Trash2 } from 'lucide-react';
@@ -6,7 +6,6 @@ import { toast } from 'sonner';
 import { useTranslation } from '@/hooks/useTranslation.ts';
 import type { Profile, RefreshProgress } from '@/types.ts';
 import { isRustError } from '@/types.ts';
-import type { TranslationKey } from '@/i18n.ts';
 import * as z from 'zod';
 import { AddProfileOptions } from '../AddProfileOptions';
 import { ConfirmDialog } from '../ConfirmDialog';
@@ -25,16 +24,27 @@ function formatBytes(bytes: number): string {
 }
 
 export function Profiles() {
-  const { profiles, addProfile, removeProfile, refreshProfile, updateProfile, refreshProgress } =
-    useAppStore();
+  // ── Selective selectors (UI freeze fix) ─────────────────────────────────
+  // Previously this component used `useAppStore()` with no selector, which
+  // subscribes to the ENTIRE store. Every store change — traffic updates
+  // (1/s when connected), log entries, connection list updates, speed tests —
+  // triggered a full re-render of Profiles AND all ProfileItem children.
+  // Selective selectors ensure Profiles only re-renders when `profiles` or
+  // `refreshProgress` actually change.
+  const profiles = useAppStore((s) => s.profiles);
+  const refreshProgress = useAppStore((s) => s.refreshProgress);
+  const addProfile = useAppStore((s) => s.addProfile);
+  const removeProfile = useAppStore((s) => s.removeProfile);
+  const refreshProfile = useAppStore((s) => s.refreshProfile);
+  const updateProfile = useAppStore((s) => s.updateProfile);
   const { t } = useTranslation();
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
-  const handleDelete = (id: string, _name: string) => {
+  const handleDelete = useCallback((id: string, _name: string) => {
     setDeleteConfirmId(id);
-  };
+  }, []);
 
   const confirmDelete = () => {
     if (!deleteConfirmId) return;
@@ -54,21 +64,24 @@ export function Profiles() {
       });
   };
 
-  const handleRefresh = (profile: Profile) => {
-    toast(`${t('updatingProfile')}${profile.name}...`);
-    refreshProfile(profile.id)
-      .then(() => {
-        toast.success(`${t('profileStr')}${profile.name}${t('profileUpdated')}`);
-      })
-      .catch((err: unknown) => {
-        // Backend already logged the error via tracing
-        if (isRustError(err)) {
-          toast.error(t(err.code, { defaultValue: err.message }));
-        } else {
-          toast.error(t('refreshFailed'));
-        }
-      });
-  };
+  const handleRefresh = useCallback(
+    (profile: Profile) => {
+      toast(`${t('updatingProfile')}${profile.name}...`);
+      refreshProfile(profile.id)
+        .then(() => {
+          toast.success(`${t('profileStr')}${profile.name}${t('profileUpdated')}`);
+        })
+        .catch((err: unknown) => {
+          // Backend already logged the error via tracing
+          if (isRustError(err)) {
+            toast.error(t(err.code, { defaultValue: err.message }));
+          } else {
+            toast.error(t('refreshFailed'));
+          }
+        });
+    },
+    [t, refreshProfile],
+  );
 
   return (
     <div className="flex flex-col h-full w-full p-10 pt-8">
@@ -98,8 +111,7 @@ export function Profiles() {
               progress={refreshProgress[p.id] ?? null}
               updateProfile={updateProfile}
               handleRefresh={handleRefresh}
-              t={t}
-              editingId={editingId}
+              isEditing={editingId === p.id}
               setEditingId={setEditingId}
               handleDelete={handleDelete}
             />
@@ -141,26 +153,30 @@ interface ProfileItemProps {
   readonly progress: RefreshProgress | null;
   readonly updateProfile: (id: string, data: Partial<Profile>) => void;
   readonly handleRefresh: (profile: Profile) => void;
-  readonly t: (key: TranslationKey | (string & {}), options?: Record<string, unknown>) => string;
-  readonly editingId: string | null;
+  readonly isEditing: boolean;
   readonly setEditingId: (id: string | null) => void;
   readonly handleDelete: (id: string, name: string) => void;
 }
 
-function ProfileItem({
+// ── React.memo (UI freeze fix) ───────────────────────────────────────────
+// Without memo, EVERY Profiles re-render re-renders ALL ProfileItems.
+// With memo, ProfileItem only re-renders when its OWN props change.
+const ProfileItem = memo(function ProfileItem({
   profile: p,
   progress,
   updateProfile,
   handleRefresh,
-  t,
-  editingId,
+  isEditing,
   setEditingId,
   handleDelete,
 }: ProfileItemProps) {
+  const { t } = useTranslation();
   const [editName, setEditName] = useState(p.name);
   const [editUrl, setEditUrl] = useState(p.url);
   // eslint-disable-next-line react-hooks/purity
   const timeAgo = p.lastUpdated ? Math.floor((Date.now() - p.lastUpdated) / 60000) : 0;
+  // eslint-disable-next-line react-hooks/purity
+  const testedAgo = p.lastTested ? Math.floor((Date.now() - p.lastTested) / 60000) : 0;
 
   const handleSave = () => {
     const result = profileSchema.safeParse({ name: editName, url: editUrl });
@@ -177,7 +193,7 @@ function ProfileItem({
       layout
       className="bg-zinc-900/40 backdrop-blur-md border border-white/5 hover:bg-zinc-900/60 hover:border-white/10 transition-all duration-300 p-6 rounded-3xl mb-5 flex flex-col justify-between group shadow-sm"
     >
-      {editingId === p.id ? (
+      {isEditing ? (
         <div className="flex flex-col gap-4 w-full">
           <input
             type="text"
@@ -299,6 +315,14 @@ function ProfileItem({
               {timeAgo}
               {t('minsAgo')}
             </p>
+            {p.lastTested && (
+              <p className="text-xs text-zinc-500 font-medium flex items-center gap-1.5 mt-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-600" />
+                {t('testedMinsAgo')}
+                {testedAgo}
+                {t('minsAgo')}
+              </p>
+            )}
             <div className="flex items-center gap-2.5 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
               <button
                 onClick={() => {
@@ -338,4 +362,4 @@ function ProfileItem({
       )}
     </motion.div>
   );
-}
+});

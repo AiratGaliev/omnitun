@@ -574,6 +574,19 @@ async fn test_single_server(
 
     // 1. Latency test — try URLs in order with 1 retry.
     //    На каждой попытке перебираем все URL, а не только первый.
+    //    Prepend the user-configured test URL (from settings) as the
+    //    first URL to try. If it fails, fall back to the hardcoded TEST_URLS.
+    //    Previously, CONFIGURED_TEST_URL was completely ignored here.
+    let configured = CONFIGURED_TEST_URL.read()
+        .map(|u| u.clone())
+        .unwrap_or_default();
+    let urls: Vec<&str> = if configured.is_empty() {
+        TEST_URLS.to_vec()
+    } else {
+        std::iter::once(configured.as_str())
+            .chain(TEST_URLS.iter().copied())
+            .collect()
+    };
     let mut last_err = "No test URL succeeded".to_string();
     let mut ping_ms = 0u64;
     let mut success = false;
@@ -582,7 +595,7 @@ async fn test_single_server(
         if cancel.is_cancelled() {
             return Err("Cancelled".into());
         }
-        for &url in TEST_URLS {
+        for &url in &urls {
             if cancel.is_cancelled() {
                 return Err("Cancelled".into());
             }

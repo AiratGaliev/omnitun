@@ -14,6 +14,11 @@ pub struct SubscriptionProfile {
     pub url: String,
     pub servers: Vec<ServerProfile>,
     pub updated_at: String,
+    /// When the servers were last batch-tested (without re-fetching
+    /// the subscription URL). Separate from `updated_at` (subscription refresh).
+    /// Enables two-tier cadence: refresh at auto_update_interval, test at auto_test_interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tested: Option<String>,
     /// Traffic info from Subscription-Userinfo header (HEAD request)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_used: Option<u64>,

@@ -143,6 +143,70 @@ export function GeneralSettings() {
         </div>
       </div>
 
+      {/* Auto-test interval */}
+      <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 hover:bg-zinc-900/60 hover:border-white/10 transition-all duration-300 rounded-2xl p-6 flex items-center justify-between gap-6 shadow-sm group">
+        <div className="flex-1 flex gap-5">
+          <div className="mt-0.5 bg-zinc-800/80 p-2.5 rounded-xl shadow-inner h-fit border border-white/5 group-hover:border-white/10 transition-colors">
+            <RefreshCw size={20} className="text-cyan-400" />
+          </div>
+          <div>
+            <h3 className="font-semibold text-sm text-zinc-100 tracking-wide">
+              {t('autoTestInterval')}
+            </h3>
+            <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed">
+              {t('autoTestIntervalDesc')}
+            </p>
+          </div>
+        </div>
+        <div className="relative">
+          <select
+            value={settings.autoTestInterval}
+            onChange={(e) => {
+              const val = Number(e.target.value);
+              updateSettings({ autoTestInterval: val });
+              addLog(`Auto-test interval set to ${String(val)} min`, 'info', 'settings');
+            }}
+            className="appearance-none bg-zinc-800/80 border border-white/10 rounded-xl pl-4 pr-10 py-2.5 text-sm font-medium focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none cursor-pointer transition-all shadow-inner"
+          >
+            <option value={0} className="bg-zinc-900 text-white">
+              {t('disabled')}
+            </option>
+            <option value={1} className="bg-zinc-900 text-white">
+              1 {t('minutes')}
+            </option>
+            <option value={3} className="bg-zinc-900 text-white">
+              3 {t('minutes')}
+            </option>
+            <option value={5} className="bg-zinc-900 text-white">
+              5 {t('minutes')}
+            </option>
+            <option value={10} className="bg-zinc-900 text-white">
+              10 {t('minutes')}
+            </option>
+            <option value={30} className="bg-zinc-900 text-white">
+              30 {t('minutes')}
+            </option>
+            <option value={60} className="bg-zinc-900 text-white">
+              1 {t('hour')}
+            </option>
+          </select>
+          <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-zinc-400">
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </div>
+        </div>
+      </div>
+
       <SettingItem
         icon={<Minus size={20} className="text-indigo-400" />}
         title={t('minimizeToTray')}
@@ -264,9 +328,7 @@ export function GeneralSettings() {
             <Rocket size={20} className="text-green-400" />
           </div>
           <div className="flex-1 min-w-0">
-            <h3 className="font-semibold text-sm text-zinc-100 tracking-wide">
-              {t('testUrl')}
-            </h3>
+            <h3 className="font-semibold text-sm text-zinc-100 tracking-wide">{t('testUrl')}</h3>
             <p className="text-xs text-zinc-500 mt-1.5 leading-relaxed">{t('testUrlDesc')}</p>
 
             {/* Test URL selector */}
@@ -278,10 +340,24 @@ export function GeneralSettings() {
               }}
               className="mt-3 w-full bg-zinc-800/60 border border-white/10 rounded-xl px-4 py-2.5 text-sm font-mono text-zinc-200 focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500/50 outline-none transition-all shadow-inner appearance-none cursor-pointer"
             >
-              <option value="cp.cloudflare.com/generate_204" className="bg-zinc-900 text-white">cp.cloudflare.com/generate_204</option>
-              <option value="www.gstatic.com/generate_204" className="bg-zinc-900 text-white">www.gstatic.com/generate_204</option>
-              <option value="www.msftconnecttest.com/connecttest.txt" className="bg-zinc-900 text-white">www.msftconnecttest.com/connecttest.txt</option>
-              <option value="detectportal.firefox.com/success.txt" className="bg-zinc-900 text-white">detectportal.firefox.com/success.txt</option>
+              <option value="cp.cloudflare.com/generate_204" className="bg-zinc-900 text-white">
+                cp.cloudflare.com/generate_204
+              </option>
+              <option value="www.gstatic.com/generate_204" className="bg-zinc-900 text-white">
+                www.gstatic.com/generate_204
+              </option>
+              <option
+                value="www.msftconnecttest.com/connecttest.txt"
+                className="bg-zinc-900 text-white"
+              >
+                www.msftconnecttest.com/connecttest.txt
+              </option>
+              <option
+                value="detectportal.firefox.com/success.txt"
+                className="bg-zinc-900 text-white"
+              >
+                detectportal.firefox.com/success.txt
+              </option>
             </select>
 
             {/* HTTPS/HTTP toggle */}

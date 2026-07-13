@@ -52,6 +52,10 @@ const NEGATIVE_BASE_NEVER_WORKED_SECS: u64 = 300; // 5 min
 /// Maximum negative cache TTL.
 const NEGATIVE_MAX_TTL_SECS: u64 = 7200; // 2 hours
 
+/// Number of validated servers to accumulate before emitting a
+/// `servers-discovered` chunk to the frontend.
+const STREAM_CHUNK_SIZE: usize = 10;
+
 // ── Data Structures ─────────────────────────────────────────────────────────
 
 /// Status of a cached server.
@@ -586,6 +590,9 @@ impl ServerCache {
         let mut pending = Vec::new();
         let mut result_slots: Vec<Option<ServerProfile>> = Vec::with_capacity(total);
 
+        // Streaming buffer for incremental server discovery.
+        let mut stream_buffer: Vec<ServerProfile> = Vec::with_capacity(STREAM_CHUNK_SIZE);
+
         for server in servers.iter() {
             let server_id = &server.id;
             let now = chrono::Utc::now().timestamp();
@@ -657,7 +664,18 @@ impl ServerCache {
                     s.exit_country_name = positive.exit_country;
                     s.exit_city_name = positive.exit_city;
                 }
-                result_slots.push(Some(s));
+                result_slots.push(Some(s.clone()));
+                // Stream cache-hit server immediately
+                stream_buffer.push(s);
+                if let Some(app) = app_ref.as_ref() {
+                    if stream_buffer.len() >= STREAM_CHUNK_SIZE {
+                        crate::events::emit_servers_discovered(
+                            app,
+                            profile_id,
+                            std::mem::take(&mut stream_buffer),
+                        );
+                    }
+                }
             } else if server.behind_cdn {
                 // CDN-серверы: пропускаем batch test — их exit IP динамический
                 // и нестабильный (CDN anycast, Workers, WARP). TCP Ping уже
@@ -674,7 +692,18 @@ impl ServerCache {
                 s.exit_flag = None;
                 s.exit_country_name = None;
                 s.exit_city_name = None;
-                result_slots.push(Some(s));
+                result_slots.push(Some(s.clone()));
+                // Stream CDN-skip server immediately
+                stream_buffer.push(s);
+                if let Some(app) = app_ref.as_ref() {
+                    if stream_buffer.len() >= STREAM_CHUNK_SIZE {
+                        crate::events::emit_servers_discovered(
+                            app,
+                            profile_id,
+                            std::mem::take(&mut stream_buffer),
+                        );
+                    }
+                }
             } else {
                 // Queue for batch test (don't await yet!)
                 let rx = self.queue_test(server, profile_id);
@@ -743,6 +772,17 @@ impl ServerCache {
                             s.exit_country_name = positive.exit_country;
                             s.exit_city_name = positive.exit_city;
                         }
+                            // Stream successful batch-test result
+                            stream_buffer.push(s.clone());
+                            if let Some(app) = app_ref.as_ref() {
+                                if stream_buffer.len() >= STREAM_CHUNK_SIZE {
+                                    crate::events::emit_servers_discovered(
+                                        app,
+                                        profile_id,
+                                        std::mem::take(&mut stream_buffer),
+                                    );
+                                }
+                            }
                     }
                     Ok(Err(e)) => {
                         failed += 1;
@@ -802,6 +842,17 @@ impl ServerCache {
         } else if let Some(l) = &logger {
             log(app_ref.unwrap(), l, LogLevel::Info, LogSource::Cache,
                 format!("[Cache] batch_test done: {completed}/{queued} completed, {failed} failed"));
+        }
+
+        // Flush any remaining streamed servers
+        if let Some(app) = app_ref.as_ref() {
+            if !stream_buffer.is_empty() {
+                crate::events::emit_servers_discovered(
+                    app,
+                    profile_id,
+                    std::mem::take(&mut stream_buffer),
+                );
+            }
         }
 
         result_slots.into_iter().filter_map(|s| s).collect()

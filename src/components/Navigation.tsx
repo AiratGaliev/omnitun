@@ -116,11 +116,7 @@ export function Navigation({ activeTab, onChange }: NavigationProps) {
       >
         <Globe
           size={14}
-          className={`shrink-0 ${
-            isConnected
-              ? 'text-emerald-500 animate-pulse'
-              : 'text-zinc-600'
-          }`}
+          className={`shrink-0 ${isConnected ? 'text-emerald-500 animate-pulse' : 'text-zinc-600'}`}
           style={isConnected ? { filter: 'drop-shadow(0 0 8px rgba(16,185,129,0.6))' } : undefined}
         />
         <AnimatePresence>

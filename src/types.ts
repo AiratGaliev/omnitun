@@ -80,6 +80,9 @@ export interface Profile {
   url: string;
   lastUpdated?: number;
   servers: Server[];
+  /** When servers were last batch-tested (no URL fetch). Separate
+   * from `lastUpdated` (subscription refresh). */
+  lastTested?: number;
   error?: string;
   trafficUsed?: number;
   trafficTotal?: number;
@@ -135,6 +138,9 @@ export interface Settings {
   blockedProtocols: string[];
   language: 'en' | 'ru';
   autoUpdateInterval: number;
+  /** Background server TESTING interval (minutes), separate from
+   * `autoUpdateInterval` (subscription refresh). 0 = disabled. */
+  autoTestInterval: number;
   antiDpi: boolean;
   enableMux: boolean;
   minimizeToTray: boolean;

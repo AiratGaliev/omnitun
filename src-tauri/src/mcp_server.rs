@@ -333,6 +333,7 @@ impl Handler {
             name: name.into(),
             servers: Vec::new(),
             updated_at: chrono::Utc::now().to_rfc3339(),
+            last_tested: None,
             traffic_used: None,
             traffic_total: None,
             traffic_expiry: None,
@@ -666,6 +667,7 @@ impl Handler {
             url: format!("content://{}", uuid::Uuid::new_v4()),
             servers,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            last_tested: None,
             traffic_used: None, traffic_total: None, traffic_expiry: None,
         };
         let mut state = self.state.lock().await;

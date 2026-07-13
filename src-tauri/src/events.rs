@@ -55,6 +55,39 @@ pub fn emit_refresh_progress(app_handle: &AppHandle, progress: RefreshProgress) 
     }
 }
 
+// ── Incremental server discovery (streaming during batch test) ────────────
+
+/// A chunk of servers that just passed testing and are ready to be displayed
+/// in the Dashboard's "Available Endpoints" dropdown. Emitted as
+/// `servers-discovered` Tauri event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServersDiscoveredPayload {
+    /// ID of the subscription profile being refreshed.
+    pub profile_id: String,
+    /// Chunk of fully-validated servers (passed TCP ping + batch test, or
+    /// cache hit, or CDN skip).
+    pub servers: Vec<crate::proxy::ServerProfile>,
+}
+
+/// Emit a chunk of discovered servers to the frontend.
+/// The backend chunks at ~10 servers per emit to avoid flooding the IPC channel.
+pub fn emit_servers_discovered(
+    app_handle: &AppHandle,
+    profile_id: &str,
+    servers: Vec<crate::proxy::ServerProfile>,
+) {
+    if servers.is_empty() {
+        return;
+    }
+    let payload = ServersDiscoveredPayload {
+        profile_id: profile_id.to_string(),
+        servers,
+    };
+    if let Err(e) = app_handle.emit("servers-discovered", payload) {
+        tracing::warn!(target: "system", "emit servers-discovered failed: {e}");
+    }
+}
+
 // ── Proxy connection progress ───────────────────────────────────────
 
 /// Granular progress of start_proxy. Emitted as `proxy-progress` event.

@@ -381,6 +381,32 @@ impl ServerProfile {
         }
     }
 
+    /// Returns `true` if this server uses a UDP-based transport protocol
+    /// (hysteria2, tuic, wireguard).
+    ///
+    /// UDP protocols do NOT listen on TCP — a `TcpStream::connect` to their
+    /// port will always fail (connection refused / timeout). This means the
+    /// TCP reachability ping in `process_servers_inner` must be skipped for
+    /// these protocols, otherwise they are filtered out as "unreachable" and
+    /// never reach the batch test stage — so the user never sees them in
+    /// their profile.
+    ///
+    /// The batch test (`test_single_server`) already handles UDP gracefully:
+    /// if the SOCKS5 HTTP latency test fails (UDP can't carry raw TCP through
+    /// a plain SOCKS5 proxy in some configs), the server is still added with
+    /// `ping_ms = 0`. Sing-box itself tunnels TCP-over-UDP for these
+    /// outbounds, so the real proxy connection works fine.
+    ///
+    /// This helper is the single source of truth for "is this protocol
+    /// UDP-based" — used by both `process_servers_inner` (TCP ping skip) and
+    /// `test_single_server` (latency test degradation).
+    pub fn is_udp_protocol(&self) -> bool {
+        matches!(
+            self.protocol.as_str(),
+            "hysteria2" | "tuic" | "wireguard"
+        )
+    }
+
     /// ═══════════════════════════════════════════════════════════════════
     /// INVARIANT CHECKER: I-CDN-1 (CDN servers must NOT have exit data)
     /// ═══════════════════════════════════════════════════════════════════

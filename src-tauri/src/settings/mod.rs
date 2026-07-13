@@ -22,6 +22,12 @@ pub struct AppSettings {
     pub blocked_protocols: Vec<String>,
     pub language: String,
     pub auto_update_interval: u32,
+    /// Background server TESTING interval (minutes), separate from
+    /// `auto_update_interval` (subscription REFRESH interval).
+    /// Testing re-runs batch-test on existing servers (no URL fetch).
+    /// 0 = disabled (only refresh tests servers).
+    #[serde(default = "default_auto_test_interval")]
+    pub auto_test_interval: u32,
     pub anti_dpi: bool,
     pub enable_mux: bool,
     pub minimize_to_tray: bool,
@@ -47,6 +53,7 @@ pub struct AppSettings {
 fn default_tls_insecure() -> bool { true }
 fn default_test_url() -> String { "cp.cloudflare.com/generate_204".to_string() }
 fn default_test_use_tls() -> bool { true }
+fn default_auto_test_interval() -> u32 { 3 }
 
 /// Available test URLs for latency measurement.
 /// User picks one via the `test_url` setting.
@@ -86,6 +93,7 @@ impl Default for AppSettings {
             blocked_protocols: Vec::new(),
             language: "en".to_string(),
             auto_update_interval: 5,
+            auto_test_interval: 3,
             anti_dpi: true,
             enable_mux: false,
             minimize_to_tray: false,

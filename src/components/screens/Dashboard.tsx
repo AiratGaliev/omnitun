@@ -32,23 +32,35 @@ function formatProtocol(protocol: string): string {
   return map[protocol] ?? protocol.charAt(0).toUpperCase() + protocol.slice(1);
 }
 
+// ── Cap rendered server dropdown (UI freeze fix for huge subscriptions) ───
+// Rendering 7000 buttons (one per server in a huge subscription) causes a
+// multi-second main-thread freeze. We cap to 200. Servers arrive pre-sorted
+// by ping ascending, so the top 200 are the fastest.
+const MAX_DROPDOWN_SERVERS = 200;
+
 export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => void }) {
-  const {
-    status,
-    activeServer,
-    servers,
-    speeds,
-    connectedAt,
-    setSpeeds,
-    setActiveServer,
-    settings,
-    updateSettings,
-    exitIp,
-    fetchExitIp,
-    realIp,
-    speedTestResult,
-    runSpeedTest,
-  } = useAppStore();
+  // ── Selective selectors (UI freeze fix) ─────────────────────────────────
+  // Previously Dashboard used `useAppStore()` with no selector, subscribing
+  // to the ENTIRE store. Every store change — log entries (hundreds during
+  // a 7000-server batch test), refresh-progress flushes (8/s), connection
+  // list updates, speed tests — triggered a full Dashboard re-render.
+  //
+  // Selective selectors ensure Dashboard only re-renders when the specific
+  // slices it uses actually change.
+  const status = useAppStore((s) => s.status);
+  const activeServer = useAppStore((s) => s.activeServer);
+  const servers = useAppStore((s) => s.servers);
+  const speeds = useAppStore((s) => s.speeds);
+  const connectedAt = useAppStore((s) => s.connectedAt);
+  const setSpeeds = useAppStore((s) => s.setSpeeds);
+  const setActiveServer = useAppStore((s) => s.setActiveServer);
+  const settings = useAppStore((s) => s.settings);
+  const updateSettings = useAppStore((s) => s.updateSettings);
+  const exitIp = useAppStore((s) => s.exitIp);
+  const fetchExitIp = useAppStore((s) => s.fetchExitIp);
+  const realIp = useAppStore((s) => s.realIp);
+  const speedTestResult = useAppStore((s) => s.speedTestResult);
+  const runSpeedTest = useAppStore((s) => s.runSpeedTest);
   const toggleConnection = useAppStore((state) => state.toggleConnection);
   const addLog = useAppStore((state) => state.addLog);
   const { t } = useTranslation();
@@ -166,18 +178,21 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
     if (freshStatus === 'disconnected') {
       toast(t('protectionDisabled'), { id: 'protection-disabled' });
     } else if (freshStatus === 'connected') {
-      toast.success(`${t('connectedTo')}${getServerDisplayName(
+      toast.success(
+        `${t('connectedTo')}${getServerDisplayName(
+          {
+            countryName: freshActiveServer?.countryName,
+            flag: freshActiveServer?.flag,
+            name: freshActiveServer?.name,
+            server: freshActiveServer?.server,
+            port: freshActiveServer?.port,
+          },
+          i18n.language,
+        )}`,
         {
-          countryName: freshActiveServer?.countryName,
-          flag: freshActiveServer?.flag,
-          name: freshActiveServer?.name,
-          server: freshActiveServer?.server,
-          port: freshActiveServer?.port,
+          description: t('trafficProtected'),
         },
-        i18n.language,
-      )}`, {
-        description: t('trafficProtected'),
-      });
+      );
     }
     // status === 'error' toast is already shown by store.ts toggleConnection
   };
@@ -325,7 +340,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                             {t('availableEndpoints')} ({servers.length})
                           </p>
                           <div className="flex flex-col gap-1">
-                            {servers.map((server) => (
+                            {servers.slice(0, MAX_DROPDOWN_SERVERS).map((server) => (
                               <button
                                 key={server.id}
                                 onClick={() => {
@@ -346,7 +361,9 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
 
                                   // Auto-reconnect if already connected
                                   if (status === 'connected') {
-                                    void seamlessReconnect(t('reconnectingTo', { name: localizedName }));
+                                    void seamlessReconnect(
+                                      t('reconnectingTo', { name: localizedName }),
+                                    );
                                   } else {
                                     toast.success(
                                       `${t('serverStr')}${localizedName}${t('selectedStr')}`,
@@ -415,6 +432,12 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                               </button>
                             ))}
                           </div>
+                          {servers.length > MAX_DROPDOWN_SERVERS && (
+                            <p className="text-[10px] text-zinc-600 text-center py-2 px-3">
+                              Showing top {String(MAX_DROPDOWN_SERVERS)} of {String(servers.length)}{' '}
+                              (sorted by ping)
+                            </p>
+                          )}
                         </motion.div>
                       </>
                     )}
@@ -607,7 +630,10 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                               <>
                                 <Globe size={12} className="text-emerald-500 shrink-0" />
                                 {activeServer.flag && (
-                                  <FlagDisplay code={activeServer.flag} className="text-xs shrink-0" />
+                                  <FlagDisplay
+                                    code={activeServer.flag}
+                                    className="text-xs shrink-0"
+                                  />
                                 )}
                                 <span className="truncate">
                                   {getServerDisplayName(

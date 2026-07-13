@@ -244,6 +244,7 @@ impl ProfileManager {
             url: clean_url,
             servers,
             updated_at: chrono::Utc::now().to_rfc3339(),
+            last_tested: None,
             traffic_used,
             traffic_total,
             traffic_expiry,
@@ -489,6 +490,8 @@ impl ProfileManager {
 
         self.profiles[idx].servers = servers;
         self.profiles[idx].updated_at = chrono::Utc::now().to_rfc3339();
+        // refresh INCLUDES batch-test, so last_tested = now too.
+        self.profiles[idx].last_tested = Some(chrono::Utc::now().to_rfc3339());
 
         // Notify cache: pass ALL current server IDs so stale entries are removed.
         if let Some(cache) =
@@ -511,6 +514,47 @@ impl ProfileManager {
         }
 
         self.deduplicate_profiles();
+        let profile = self.profiles[idx].clone();
+        self.save()?;
+        Ok(profile)
+    }
+
+    /// Commit a server TEST (no URL fetch).
+    ///
+    /// Like `commit_refresh` but:
+    ///   - Updates `last_tested` instead of `updated_at`
+    ///   - Does NOT fetch traffic info
+    ///   - Does NOT call `handle_subscription_refresh` (no new server IDs)
+    ///
+    /// Called by the `test_servers` Tauri command after `process_servers_inner`
+    /// re-tests existing servers.
+    pub async fn commit_test(
+        &mut self,
+        app: &tauri::AppHandle,
+        id: &str,
+        servers: Vec<ServerProfile>,
+    ) -> Result<SubscriptionProfile, ProxyError> {
+        let idx = self
+            .profiles
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| {
+                ProxyError::subscription(
+                    ErrorCode::SubscriptionNotFound,
+                    "Profile removed during test",
+                )
+            })?;
+
+        self.profiles[idx].servers = servers;
+        self.profiles[idx].last_tested = Some(chrono::Utc::now().to_rfc3339());
+
+        // Save cache (test may have updated positive/negative entries)
+        if let Some(cache) =
+            app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
+        {
+            cache.save_to_disk().await;
+        }
+
         let profile = self.profiles[idx].clone();
         self.save()?;
         Ok(profile)
@@ -807,14 +851,23 @@ pub async fn process_servers_inner(
                 .ok()
                 .and_then(|mut a| a.next())
                 .map(|s| s.ip().to_string());
-            // TCP connect with 3s timeout
-            let reachable = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                tokio::net::TcpStream::connect(&addr),
-            )
-            .await
-            .is_ok_and(|r| r.is_ok());
-            let ping_ms = start.elapsed().as_millis() as u64;
+            // Skip TCP ping for UDP-based protocols (hysteria2, tuic, wireguard),
+            // since they don't listen on TCP — connect would always fail.
+            // The batch test later validates them through sing-box which tunnels
+            // TCP-over-UDP for these outbounds.
+            let is_udp = server.is_udp_protocol();
+            let (reachable, ping_ms) = if is_udp {
+                (true, 0u64)
+            } else {
+                // TCP connect with 5s timeout
+                let reachable = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    tokio::net::TcpStream::connect(&addr),
+                )
+                .await
+                .is_ok_and(|r| r.is_ok());
+                (reachable, start.elapsed().as_millis() as u64)
+            };
             drop(permit);
             (server, reachable, ping_ms, entry_ip)
         });
@@ -826,7 +879,15 @@ pub async fn process_servers_inner(
         tcp_tested += 1;
         match result {
             Ok((mut server, true, ping_ms, entry_ip)) => {
-                server.ping_ms = Some(ping_ms);
+                // For UDP protocols, TCP ping was skipped (ping_ms == 0).
+                // Use None so the UI shows "-" instead of misleading "0ms".
+                // The batch test may fill in a real latency if the SOCKS5
+                // HTTP test succeeds through the UDP tunnel.
+                if server.is_udp_protocol() {
+                    server.ping_ms = None;
+                } else {
+                    server.ping_ms = Some(ping_ms);
+                }
 
                 // GeoIP enrichment: set flag + country/city fields + display name
                 // (subscription names often contain garbled emoji, components separate)
@@ -1018,6 +1079,7 @@ pub async fn process_servers_inner(
     let mut needs_batch_test = Vec::new();
 
     if let Some(cache) = cache.as_ref() {
+        // Запускаем batch test всегда, когда есть серверы для тестирования.
         for mut server in alive {
             if let Some(pos) = cache.get_positive_if_fresh(&server.id).await {
                 // Server is alive (TCP ping passed) and cache is fresh.
@@ -1045,6 +1107,19 @@ pub async fn process_servers_inner(
     } else {
         // No cache available — batch test everything
         needs_batch_test = alive;
+    }
+
+    // Stream cache-hit servers to the frontend immediately.
+    // Servers with fresh positive cache are fully validated (ping + exit IP
+    // from a previous test). Emit them now so the user sees working servers
+    // in the Dashboard dropdown within seconds, instead of waiting for the
+    // entire batch test.
+    if !ready_servers.is_empty() {
+        if let Some(app) = app_handle {
+            for chunk in ready_servers.chunks(50) {
+                crate::events::emit_servers_discovered(app, profile_id, chunk.to_vec());
+            }
+        }
     }
 
     // Запускаем batch test всегда, когда есть серверы для тестирования.
@@ -1176,6 +1251,7 @@ mod tests {
             url: "https://example.com/sub".into(),
             servers: vec![],
             updated_at: "2025-01-01T00:00:00Z".into(),
+            last_tested: None,
             traffic_used: None,
             traffic_total: None,
             traffic_expiry: None,
