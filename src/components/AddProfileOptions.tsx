@@ -5,7 +5,6 @@ import { toast } from 'sonner';
 import { invoke } from '@tauri-apps/api/core';
 import { readText } from '@tauri-apps/plugin-clipboard-manager';
 import { useTranslation } from '@/hooks/useTranslation';
-import type { RustSubscriptionProfile } from '@/store';
 import { useAppStore } from '@/store';
 import { isRustError } from '@/types';
 import { getErrorMessage } from '@/lib/errors';
@@ -56,25 +55,20 @@ export function AddProfileOptions({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleAddWithToast = (url: string, name?: string) => {
-    toast.promise(
-      onAdd(url, name).then(() => onProfileAdded?.()),
-      {
-        loading: `${t('updatingProfile')}...`,
-        success: t('profileAdded'),
-        error: (err: unknown) => {
-          onProfileError?.(err);
-
-          // Структурированная ошибка из Rust: код → i18n-ключ напрямую.
-          // Если перевода нет — i18next вернёт err.message (англ. dev-текст).
-          if (isRustError(err)) {
-            return t(err.code, { defaultValue: err.message });
-          }
-
-          // Легаси-ошибки (String) и прочее — общий fallback.
-          return t('addFailed');
-        },
-      },
-    );
+    // Нет loading-тоста. Профиль добавляется в store синхронно (pending-profile
+    // с пустыми серверами), onProfileAdded вызывается немедленно, чтобы UI
+    // переключился на Dashboard/Profiles, где виден прогресс бар refresh.
+    const promise = onAdd(url, name);
+    // Pending-профиль уже в store (addProfile добавляет до первого await).
+    onProfileAdded?.();
+    promise.catch((err: unknown) => {
+      onProfileError?.(err);
+      if (isRustError(err)) {
+        toast.error(t(err.code, { defaultValue: err.message }));
+      } else {
+        toast.error(t('addFailed'));
+      }
+    });
   };
 
   const handleClipboardAdd = async () => {
@@ -128,10 +122,17 @@ export function AddProfileOptions({
       const rawName = file.name.replace(/\.[^.]+$/, '');
       const existingNames = new Set(useAppStore.getState().profiles.map((p) => p.name));
       const name = uniqueName(rawName, existingNames);
-      await invoke<RustSubscriptionProfile>('import_subscription_content', {
-        name,
-        content: text,
-      });
+
+      // Используем store.importProfileContent — добавляет pending-профиль
+      // немедленно с пустыми серверами. Серверы появятся инкрементально
+      // через servers-discovered события во время process_servers.
+      const promise = useAppStore.getState().importProfileContent({ name, content: text });
+      // Call onProfileAdded immediately — the pending profile is already in
+      // the store (added synchronously by importProfileContent before its
+      // first await). This transitions from Onboarding to Dashboard right
+      // away, where the user sees the refresh progress.
+      onProfileAdded?.();
+      await promise;
     } catch (err) {
       const msg = getErrorMessage(err);
 

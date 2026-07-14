@@ -1080,6 +1080,7 @@ async fn add_subscription(
     state: tauri::State<'_, ProfileState>,
     name: String,
     url: String,
+    profile_id: String,
 ) -> Result<SubscriptionProfile, ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
     log(
@@ -1091,7 +1092,7 @@ async fn add_subscription(
     );
 
     let mut mgr = state.manager.lock().await;
-    match mgr.add(&app, name.clone(), url).await {
+    match mgr.add(&app, name.clone(), url, profile_id).await {
         Ok(profile) => {
             let count = profile.servers.len();
             log(
@@ -1373,7 +1374,7 @@ async fn refresh_subscription(
                             s
                         })
                         .collect(),
-                    "",
+                    &id,
                 )
                 .await
             } else {
@@ -2602,6 +2603,7 @@ async fn import_subscription_content(
     state: tauri::State<'_, ProfileState>,
     name: String,
     content: String,
+    profile_id: String,
 ) -> Result<SubscriptionProfile, ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
     log(
@@ -2638,10 +2640,19 @@ async fn import_subscription_content(
         ));
     }
 
-    let servers = crate::profile::process_servers(&app, servers, "").await;
+    // Use the profile_id passed by the frontend so refresh-progress and
+    // servers-discovered events carry the REAL profile ID — the frontend
+    // can then attach progress and discovered servers to the pending profile
+    // in its state (same pattern as add_subscription).
+    let servers = crate::profile::process_servers(&app, servers, &profile_id).await;
+
+    // Persist cache to disk so batch-test results survive app restart.
+    if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+        cache.save_to_disk().await;
+    }
 
     let profile = SubscriptionProfile {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: profile_id,
         name,
         url: format!("content://{}", uuid::Uuid::new_v4()),
         servers,
@@ -2733,12 +2744,19 @@ async fn import_subscription_file(
     // Use file URL as unique identifier (hash of content)
     let url = format!("file://{}", file_path);
 
-    let mut mgr = state.manager.lock().await;
-    let servers = crate::profile::process_servers(&app, servers, "").await;
+    // Pre-generate profile_id so refresh-progress and servers-discovered events
+    // emitted during process_servers carry the REAL profile ID.
+    let profile_id = uuid::Uuid::new_v4().to_string();
+    let servers = crate::profile::process_servers(&app, servers, &profile_id).await;
     let server_count = servers.len();
 
+    // Persist cache to disk so batch-test results survive app restart.
+    if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+        cache.save_to_disk().await;
+    }
+
     let profile = SubscriptionProfile {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: profile_id,
         name: file_name,
         url,
         servers,
@@ -2749,6 +2767,7 @@ async fn import_subscription_file(
         traffic_expiry: None,
     };
 
+    let mut mgr = state.manager.lock().await;
     mgr.list_mut().push(profile.clone());
     mgr.save()?;
 

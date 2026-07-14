@@ -66,7 +66,8 @@ export function Profiles() {
 
   const handleRefresh = useCallback(
     (profile: Profile) => {
-      toast(`${t('updatingProfile')}${profile.name}...`);
+      // Без loading-тоста — ProfileItem уже показывает прогресс-бар
+      // через `refreshProgress[p.id]`. Только финальный success/error тост.
       refreshProfile(profile.id)
         .then(() => {
           toast.success(`${t('profileStr')}${profile.name}${t('profileUpdated')}`);
@@ -240,12 +241,20 @@ const ProfileItem = memo(function ProfileItem({
               <p className="text-xs text-zinc-500 font-mono mt-2 break-all max-w-2xl truncate bg-black/20 inline-block px-2 py-1 rounded-md border border-white/5">
                 {p.url}
               </p>
-              {p.servers.length > 0 && (
+              {p.servers.length > 0 ? (
                 <span className="inline-block mt-3 text-xs font-semibold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-lg">
                   {p.servers.length}{' '}
                   {p.servers.length === 1 ? t('serverSingular') : t('serverPlural')}
                 </span>
-              )}
+              ) : progress !== null ? (
+                // Profile is being refreshed but no servers have passed
+                // testing yet — show an "Updating..." badge so the user sees
+                // immediate feedback that the profile is active, not empty.
+                <span className="inline-flex items-center gap-1.5 mt-3 text-xs font-semibold text-zinc-400 bg-zinc-500/10 border border-zinc-500/20 px-3 py-1 rounded-lg">
+                  <Loader2 size={11} className="animate-spin" />
+                  {t('updatingProfile').trim()}
+                </span>
+              ) : null}
               {p.trafficTotal && p.trafficTotal > 0 && (
                 <div className="mt-3 flex items-center gap-3 text-[11px] font-mono text-zinc-400">
                   <span className="flex items-center gap-1">

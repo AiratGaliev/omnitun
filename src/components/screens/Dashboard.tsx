@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { Check, ChevronDown, Gauge, Globe, Plus, Power, Server } from 'lucide-react';
+import { Check, ChevronDown, Gauge, Globe, Loader2, Plus, Power, Server } from 'lucide-react';
 import { toast } from 'sonner';
 import { getExitIpDisplayName, getServerDisplayName, useAppStore } from '@/store.ts';
 import { useTranslation } from '@/hooks/useTranslation.ts';
@@ -63,6 +63,13 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   const runSpeedTest = useAppStore((s) => s.runSpeedTest);
   const toggleConnection = useAppStore((state) => state.toggleConnection);
   const addLog = useAppStore((state) => state.addLog);
+  // Track whether ANY profile is currently being refreshed (add or refresh).
+  // When true and no servers are available yet, the server picker shows
+  // "Обновление профиля" and the connect button is disabled — matching the
+  // user's desired UX: "если серверов нет, но происходит обновление профиля,
+  // блокировать список доступных узлов и кнопку подключения/отключения".
+  const refreshingIds = useAppStore((state) => state._refreshingIds);
+  const isAnyProfileRefreshing = refreshingIds.length > 0;
   const { t } = useTranslation();
 
   const formatElapsed = (since: number): string => {
@@ -227,19 +234,31 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
         {servers.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-5 bg-zinc-900/30 border border-white/5 p-12 rounded-3xl backdrop-blur-sm w-full max-w-lg">
             <div className="w-20 h-20 bg-white/5 rounded-2xl flex items-center justify-center shadow-inner">
-              <Server size={40} className="text-zinc-500" />
+              {isAnyProfileRefreshing ? (
+                <Loader2 size={40} className="text-emerald-500 animate-spin" strokeWidth={1.5} />
+              ) : (
+                <Server size={40} className="text-zinc-500" />
+              )}
             </div>
             <div className="text-center">
-              <p className="text-zinc-200 font-semibold text-lg">{t('noServersTitle')}</p>
-              <p className="text-zinc-500 text-sm mt-1">{t('noServersDesc')}</p>
+              <p className="text-zinc-200 font-semibold text-lg">
+                {isAnyProfileRefreshing ? t('updatingProfile').trim() : t('noServersTitle')}
+              </p>
+              <p className="text-zinc-500 text-sm mt-1">
+                {isAnyProfileRefreshing
+                  ? t('testingServersDesc')
+                  : t('noServersDesc')}
+              </p>
             </div>
-            <button
-              onClick={() => onNavigate?.('profiles')}
-              className="mt-4 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold rounded-xl px-6 py-3 flex items-center gap-2 transition-all active:scale-95 shadow-[0_0_20px_rgba(16,185,129,0.3)]"
-            >
-              <Plus size={18} strokeWidth={2.5} />
-              {t('addSubscription')}
-            </button>
+            {!isAnyProfileRefreshing && (
+              <button
+                onClick={() => onNavigate?.('profiles')}
+                className="mt-4 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold rounded-xl px-6 py-3 flex items-center gap-2 transition-all active:scale-95 shadow-[0_0_20px_rgba(16,185,129,0.3)]"
+              >
+                <Plus size={18} strokeWidth={2.5} />
+                {t('addSubscription')}
+              </button>
+            )}
           </div>
         ) : (
           <>

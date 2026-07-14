@@ -206,6 +206,7 @@
   "ipinfoCached": "IPinfo database is up-to-date (cached copy)",
   "ipinfoDownloadFailed": "IPinfo database download failed",
   "testingServers": "Testing",
+  "testingServersDesc": "Testing servers from the subscription. The first available nodes will appear here automatically.",
   "startingSingbox": "Starting sing-box",
   "acquiringPorts": "Acquiring ports",
   "cached": "Cached",

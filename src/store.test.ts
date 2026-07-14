@@ -390,6 +390,7 @@ describe('store — profile management', () => {
     expect(mockInvoke).toHaveBeenCalledWith('add_subscription', {
       name: 'Test',
       url: 'https://example.com/sub',
+      profileId: expect.any(String),
     });
     const state = useAppStore.getState();
     expect(state.profiles).toHaveLength(1);

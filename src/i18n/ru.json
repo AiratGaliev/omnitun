@@ -206,6 +206,7 @@
   "ipinfoCached": "IPinfo база актуальна (используется кэш)",
   "ipinfoDownloadFailed": "Не удалось загрузить IPinfo базу",
   "testingServers": "Тестирование",
+  "testingServersDesc": "Идёт тестирование серверов из подписки. Первые доступные узлы появятся здесь автоматически.",
   "startingSingbox": "Запуск sing-box",
   "acquiringPorts": "Получение портов",
   "cached": "Кэш",

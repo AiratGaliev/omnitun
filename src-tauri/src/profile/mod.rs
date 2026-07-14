@@ -194,6 +194,7 @@ impl ProfileManager {
         app: &AppHandle,
         name: String,
         url: String,
+        profile_id: String,
     ) -> Result<SubscriptionProfile, ProxyError> {
         let clean_url = url.trim().to_string();
 
@@ -224,7 +225,10 @@ impl ProfileManager {
             crate::subscription::parser::parse_subscription(&clean_url)?
         };
 
-        servers = process_servers(app, servers, "").await;
+        // Pass the pre-generated profile_id so refresh-progress and
+        // servers-discovered events carry the REAL profile ID — the frontend
+        // can then attach progress to the pending profile in its state.
+        servers = process_servers(app, servers, &profile_id).await;
 
         // Persist cache to disk so negative entries survive app restart.
         if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
@@ -239,7 +243,7 @@ impl ProfileManager {
                 .unwrap_or((None, None, None));
 
         let profile = SubscriptionProfile {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: profile_id,
             name,
             url: clean_url,
             servers,
@@ -326,7 +330,7 @@ impl ProfileManager {
                                 s
                             })
                             .collect(),
-                        "",
+                        id,
                     )
                     .await;
                 }
@@ -1109,19 +1113,6 @@ pub async fn process_servers_inner(
         needs_batch_test = alive;
     }
 
-    // Stream cache-hit servers to the frontend immediately.
-    // Servers with fresh positive cache are fully validated (ping + exit IP
-    // from a previous test). Emit them now so the user sees working servers
-    // in the Dashboard dropdown within seconds, instead of waiting for the
-    // entire batch test.
-    if !ready_servers.is_empty() {
-        if let Some(app) = app_handle {
-            for chunk in ready_servers.chunks(50) {
-                crate::events::emit_servers_discovered(app, profile_id, chunk.to_vec());
-            }
-        }
-    }
-
     // Запускаем batch test всегда, когда есть серверы для тестирования.
     // Batch test использует порты из PortPool (30000-35000),
     // основной прокси — свой порт (~1080/5050), конфликта нет.
@@ -1186,6 +1177,15 @@ pub async fn process_servers_inner(
             .unwrap_or(u64::MAX)
             .cmp(&b.ping_ms.unwrap_or(u64::MAX))
     });
+
+    // Emit fully-tested servers to frontend in BATCH_SIZE groups.
+    // No emission happens before this point — servers only appear after
+    // completing TCP ping + batch test, guaranteeing correct data.
+    if let Some(app) = app_handle {
+        for chunk in ready_servers.chunks(50) {
+            crate::events::emit_servers_discovered(app, profile_id, chunk.to_vec());
+        }
+    }
 
     tracing::info!(
         target: "subscription",

@@ -130,6 +130,10 @@ interface ProxyStore {
   setServers: (servers: Server[]) => void;
   setConnectedAt: (timestamp: number | null) => void;
   addProfile: (data: { name: string; url: string }) => Promise<void>;
+  /** Import a subscription from raw content (file or pasted data).
+   * Uses the same pending-profile pattern as addProfile: the profile appears
+   * in the list immediately, and gets servers after process_servers completes. */
+  importProfileContent: (data: { name: string; content: string }) => Promise<void>;
   updateProfile: (id: string, data: Partial<Profile>) => void;
   removeProfile: (id: string) => Promise<void>;
   refreshProfile: (id: string) => Promise<void>;
@@ -433,37 +437,168 @@ export const useAppStore = create<ProxyStore>((set, get) => {
     },
 
     addProfile: async (data) => {
-      const result = await invoke<RustSubscriptionProfile>('add_subscription', {
+      // Pre-generate the profile ID so the backend can emit refresh-progress
+      // and servers-discovered events with the REAL profile_id during
+      // add_subscription. The pending profile is added to state.profiles
+      // immediately (with empty servers) so the user sees it in the list
+      // right away — same UX as clicking "Refresh servers" on an existing
+      // profile.
+      const profileId = crypto.randomUUID();
+      const pendingProfile: Profile = {
+        id: profileId,
         name: data.name,
         url: data.url,
-      });
-      const profile = mapRustProfile(result);
+        lastUpdated: Date.now(),
+        servers: [],
+      };
 
-      // Rebuild servers from flatMap instead of spread ──────
-      // During add_subscription, the backend streams servers via servers-discovered
-      // events. Using flatMap rebuilds from profile objects only, naturally
-      // deduplicating streamed servers.
-      const stateSnap = get();
-      const newProfiles = [...stateSnap.profiles, profile];
-      const allServers = newProfiles.flatMap((p) => p.servers);
+      // Add pending profile + mark as refreshing BEFORE invoking the backend.
+      // This way:
+      //   - The profile appears in the list immediately
+      //   - refresh-progress events (with profile_id === profileId) attach to it
+      //   - servers-discovered events (with profile_id === profileId) populate
+      //     both state.servers and the profile's servers array after full testing
+      //   - The Dashboard can detect "a profile is being refreshed" and block
+      //     the server picker / connect button until servers arrive
+      set((state) => ({
+        profiles: [...state.profiles, pendingProfile],
+        _refreshingIds: [...state._refreshingIds, profileId],
+      }));
 
-      const newActive = await getBestServer(
-        allServers,
-        stateSnap.settings.autoConnectFastest,
-        stateSnap.activeServer?.id,
-      );
+      try {
+        const result = await invoke<RustSubscriptionProfile>('add_subscription', {
+          name: data.name,
+          url: data.url,
+          profileId,
+        });
+        const updated = mapRustProfile(result);
 
-      set({
-        profiles: newProfiles,
-        servers: allServers,
-        activeServer: newActive,
-      });
+        // Replace the pending profile with the real one (same ID — no
+        // replacement needed, just update fields). Rebuild servers from
+        // flatMap to deduplicate any servers that arrived via servers-discovered
+        // events during the add.
+        const stateSnap = get();
+        const newProfiles = stateSnap.profiles.map((p) =>
+          p.id === profileId ? { ...p, ...updated } : p,
+        );
+        const allServers = newProfiles.flatMap((p) => p.servers);
+
+        const newActive = await getBestServer(
+          allServers,
+          stateSnap.settings.autoConnectFastest,
+          stateSnap.activeServer?.id,
+        );
+
+        set({
+          profiles: newProfiles,
+          servers: allServers,
+          activeServer: newActive,
+        });
+      } catch (e) {
+        // Atomic cleanup: remove pending profile, rebuild servers, AND clear
+        // _refreshingIds in a single set() call. This avoids a window where
+        // a late servers-discovered flush could add orphaned servers between
+        // the catch's set() and the finally's set().
+        // Also clear refreshProgress — backend doesn't emit phase:"done" for add.
+        set((state) => {
+          const remainingProfiles = state.profiles.filter((p) => p.id !== profileId);
+          const { [profileId]: _rp, ...remainingProgress } = state.refreshProgress;
+          return {
+            profiles: remainingProfiles,
+            servers: remainingProfiles.flatMap((p) => p.servers),
+            _refreshingIds: state._refreshingIds.filter((rid) => rid !== profileId),
+            refreshProgress: remainingProgress,
+          };
+        });
+        throw e;
+      } finally {
+        // Success path: clear _refreshingIds + refreshProgress (on error, catch already did this — no-op)
+        set((state) => {
+          const { [profileId]: _rp, ...remainingProgress } = state.refreshProgress;
+          return {
+            _refreshingIds: state._refreshingIds.filter((rid) => rid !== profileId),
+            refreshProgress: remainingProgress,
+          };
+        });
+      }
     },
 
     updateProfile: (id, data) => {
       set((state) => ({
         profiles: state.profiles.map((p) => (p.id === id ? { ...p, ...data } : p)),
       }));
+    },
+
+    importProfileContent: async (data) => {
+      // Same pending-profile pattern as addProfile: pre-generate profile_id,
+      // add the pending profile to the store immediately, then invoke the
+      // backend. This way refresh-progress events (which carry the real profile_id)
+      // update the pending profile's badge.
+      const profileId = crypto.randomUUID();
+      const pendingProfile: Profile = {
+        id: profileId,
+        name: data.name,
+        url: `content://${profileId}`,
+        lastUpdated: Date.now(),
+        servers: [],
+      };
+
+      set((state) => ({
+        profiles: [...state.profiles, pendingProfile],
+        _refreshingIds: [...state._refreshingIds, profileId],
+      }));
+
+      try {
+        const result = await invoke<RustSubscriptionProfile>('import_subscription_content', {
+          name: data.name,
+          content: data.content,
+          profileId,
+        });
+        const updated = mapRustProfile(result);
+
+        const stateSnap = get();
+        const newProfiles = stateSnap.profiles.map((p) =>
+          p.id === profileId ? { ...p, ...updated } : p,
+        );
+        const allServers = newProfiles.flatMap((p) => p.servers);
+
+        const newActive = await getBestServer(
+          allServers,
+          stateSnap.settings.autoConnectFastest,
+          stateSnap.activeServer?.id,
+        );
+
+        set({
+          profiles: newProfiles,
+          servers: allServers,
+          activeServer: newActive,
+        });
+      } catch (e) {
+        // Atomic cleanup: remove pending profile, rebuild servers, AND clear
+        // _refreshingIds in a single set() call to avoid leaving orphaned
+        // servers from late servers-discovered flushes.
+        // Also clear refreshProgress — backend doesn't emit phase:"done" here.
+        set((state) => {
+          const remainingProfiles = state.profiles.filter((p) => p.id !== profileId);
+          const { [profileId]: _rp, ...remainingProgress } = state.refreshProgress;
+          return {
+            profiles: remainingProfiles,
+            servers: remainingProfiles.flatMap((p) => p.servers),
+            _refreshingIds: state._refreshingIds.filter((rid) => rid !== profileId),
+            refreshProgress: remainingProgress,
+          };
+        });
+        throw e;
+      } finally {
+        // Success path: clear _refreshingIds + refreshProgress (on error, catch already did this — no-op)
+        set((state) => {
+          const { [profileId]: _rp, ...remainingProgress } = state.refreshProgress;
+          return {
+            _refreshingIds: state._refreshingIds.filter((rid) => rid !== profileId),
+            refreshProgress: remainingProgress,
+          };
+        });
+      }
     },
 
     removeProfile: async (id) => {
@@ -480,11 +615,17 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         newActive = await getBestServer(remaining, get().settings.autoConnectFastest);
       }
 
-      // Functional set: profiles/servers always based on latest state
+      // Clean up tracking state for the removed profile.
+      // Без этого _refreshingIds / _testingIds могут навсегда остаться
+      // с мёртвым profile_id, а refreshProgress — с устаревшей записью.
+      const { [id]: _removed, ...remainingProgress } = get().refreshProgress;
       set((state) => ({
         profiles: state.profiles.filter((p) => p.id !== id),
         servers: state.servers.filter((s) => !removedIds.has(s.id)),
         activeServer: newActive,
+        _refreshingIds: state._refreshingIds.filter((rid) => rid !== id),
+        _testingIds: state._testingIds.filter((tid) => tid !== id),
+        refreshProgress: remainingProgress,
       }));
     },
 
@@ -526,18 +667,27 @@ export const useAppStore = create<ProxyStore>((set, get) => {
           };
         });
       } catch (e) {
-        // Backend already logged the error via tracing
-        // Reset lastUpdated so timer doesn't retry every ~55s.
-        set((state) => ({
-          profiles: state.profiles.map((p) =>
-            p.id === id ? { ...p, lastUpdated: Date.now() + Math.random() * 60000 } : p,
-          ),
-        }));
+        // Ставим lastUpdated на NOW (не в будущее), чтобы auto-update таймер
+        // не ретраил немедленно. Ручное обновление доступно через кнопку Refresh.
+        // В будущее ставить нельзя — это даёт отрицательное «Обновлено -1 мин.».
+        set((state) => {
+          const { [id]: _rp, ...remainingProgress } = state.refreshProgress;
+          return {
+            profiles: state.profiles.map((p) =>
+              p.id === id ? { ...p, lastUpdated: Date.now() } : p,
+            ),
+            refreshProgress: remainingProgress,
+          };
+        });
         throw e;
       } finally {
-        set((state) => ({
-          _refreshingIds: state._refreshingIds.filter((rid) => rid !== id),
-        }));
+        set((state) => {
+          const { [id]: _rp, ...remainingProgress } = state.refreshProgress;
+          return {
+            _refreshingIds: state._refreshingIds.filter((rid) => rid !== id),
+            refreshProgress: remainingProgress,
+          };
+        });
       }
     },
 
@@ -554,14 +704,19 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         const result = await invoke<RustSubscriptionProfile>('test_servers', { id });
         const updated = mapRustProfile(result);
         set((state) => {
+          const { [id]: _rp, ...remainingProgress } = state.refreshProgress;
           const newProfiles = state.profiles.map((p) => (p.id === id ? { ...p, ...updated } : p));
           const allServers = newProfiles.flatMap((p) => p.servers);
-          return { profiles: newProfiles, servers: allServers };
+          return { profiles: newProfiles, servers: allServers, refreshProgress: remainingProgress };
         });
       } catch (e) {
-        set((state) => ({
-          profiles: state.profiles.map((p) => (p.id === id ? { ...p, lastTested: Date.now() } : p)),
-        }));
+        set((state) => {
+          const { [id]: _rp, ...remainingProgress } = state.refreshProgress;
+          return {
+            profiles: state.profiles.map((p) => (p.id === id ? { ...p, lastTested: Date.now() } : p)),
+            refreshProgress: remainingProgress,
+          };
+        });
         throw e;
       } finally {
         set((state) => ({
@@ -1052,23 +1207,28 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         }
       });
 
-      // Listen for incremental server discovery ──────────────────
-      // The backend emits `servers-discovered` chunks as servers pass testing.
-      // Throttle: buffer chunks and flush every ~150ms.
-      // Merge by ID via Map, sort by ping.
-      const serversDiscoveredBuffer: RustServerProfile[] = [];
+      // Listen for servers-discovered ────────────────────────────
+      // Backend emits fully-tested servers in BATCH_SIZE groups after
+      // TCP ping + batch test complete. Frontend merges by server ID.
+      const serversDiscoveredBuffer: { profileId: string; servers: RustServerProfile[] }[] = [];
       let serversDiscoveredFlushScheduled = false;
       const SERVERS_DISCOVERED_FLUSH_MS = 150;
 
       const flushServersDiscovered = () => {
         serversDiscoveredFlushScheduled = false;
         if (serversDiscoveredBuffer.length === 0) return;
-        const chunk = serversDiscoveredBuffer.splice(0, serversDiscoveredBuffer.length);
+        const chunks = serversDiscoveredBuffer.splice(0, serversDiscoveredBuffer.length);
         set((state) => {
+          const knownProfileIds = new Set(state.profiles.map((p) => p.id));
+          const validChunks = chunks.filter(({ profileId }) => knownProfileIds.has(profileId));
+          if (validChunks.length === 0) return {};
+
           const existing = new Map(state.servers.map((s) => [s.id, s]));
-          for (const rs of chunk) {
-            const mapped = mapRustServer(rs);
-            existing.set(mapped.id, mapped);
+          for (const { servers } of validChunks) {
+            for (const rs of servers) {
+              const mapped = mapRustServer(rs);
+              existing.set(mapped.id, mapped);
+            }
           }
           const newServers = Array.from(existing.values());
           newServers.sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
@@ -1076,7 +1236,32 @@ export const useAppStore = create<ProxyStore>((set, get) => {
           const updatedActive = currentActive
             ? (newServers.find((s) => s.id === currentActive.id) ?? currentActive)
             : null;
-          return { servers: newServers, activeServer: updatedActive };
+
+          const byProfile = new Map<string, Map<string, Server>>();
+          for (const { profileId, servers } of validChunks) {
+            let bucket = byProfile.get(profileId);
+            if (!bucket) {
+              bucket = new Map();
+              byProfile.set(profileId, bucket);
+            }
+            for (const rs of servers) {
+              const mapped = mapRustServer(rs);
+              bucket.set(mapped.id, mapped);
+            }
+          }
+          const newProfiles = state.profiles.map((p) => {
+            const bucket = byProfile.get(p.id);
+            if (!bucket) return p;
+            const profileExisting = new Map(p.servers.map((s) => [s.id, s]));
+            for (const [id, s] of bucket) {
+              profileExisting.set(id, s);
+            }
+            const mergedServers = Array.from(profileExisting.values());
+            mergedServers.sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
+            return { ...p, servers: mergedServers };
+          });
+
+          return { servers: newServers, activeServer: updatedActive, profiles: newProfiles };
         });
       };
 
@@ -1092,7 +1277,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
       }>('servers-discovered', (event) => {
         const chunk = event.payload.servers;
         if (chunk.length === 0) return;
-        serversDiscoveredBuffer.push(...chunk);
+        serversDiscoveredBuffer.push({ profileId: event.payload.profile_id, servers: chunk });
         scheduleServersDiscoveredFlush();
       });
 
