@@ -542,6 +542,10 @@ const TEST_URLS: &[&str] = &[
 
 /// Per-URL timeout для test_single_server: 4s на URL, без retry.
 const PER_URL_TIMEOUT_SECS: u64 = 4;
+/// Timeout for exit IP fetch (per-URL). Longer than PER_URL_TIMEOUT_SECS because
+/// TCP ping already confirmed the server is alive — just need a response from
+/// any one of the IP echo services.
+const EXIT_IP_TIMEOUT_SECS: u64 = 30;
 
 static CONFIGURED_TEST_URL: std::sync::LazyLock<std::sync::RwLock<String>> = std::sync::LazyLock::new(|| {
     std::sync::RwLock::new("https://cp.cloudflare.com/generate_204".to_string())
@@ -635,7 +639,16 @@ async fn test_single_server(
         // Fetch outlet IP only if server is NOT marked as CDN.
         // behind_cdn is finalized at the process_servers stage via entry-IP
         // + keyword checks; we do NOT override it here.
-        let fetched = fetch_outlet_ip_through_port(&client).await;
+        // Build a separate client for exit IP fetch with a longer timeout.
+        // TCP ping already confirmed the server is alive — just wait for
+        // the first IP echo service to respond.
+        let exit_client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}"))
+                .map_err(|e| format!("Exit proxy build error: {e}"))?)
+            .timeout(Duration::from_secs(EXIT_IP_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| format!("Exit client build error: {e}"))?;
+        let fetched = fetch_outlet_ip_through_port(&exit_client).await;
 
         if let Some(ref ip) = fetched {
             outlet_ip = Some(ip.clone());
@@ -671,14 +684,13 @@ async fn test_single_server(
 
     // 🚫 ANTI-REGRESSION: финальная проверка инварианты перед возвратом.
     // Если server.behind_cdn=true, то outlet_ip обязан быть None.
-    // После фикса B3 это всегда так, но проверка — гарантия от будущих
-    // регрессий. Не удалять эту проверку "потому что B3 фиксит это".
+    // Проверка — гарантия от будущих регрессий. Не удалять.
     if server.behind_cdn && outlet_ip.is_some() {
         tracing::error!(
             target: "cdn-invariant",
             "[BUG][I-CDN-1] INVARIANT VIOLATION in test_single_server (post-result): \
              server {} ({}:{}) — behind_cdn=true AND outlet_ip={:?}. \
-             This is a REGRESSION of fix B3. Returning outlet_ip=None defensively.",
+             This is a REGRESSION. Returning outlet_ip=None defensively.",
             server.id,
             server.server,
             server.port,
@@ -725,22 +737,22 @@ async fn fetch_outlet_ip_through_port(client: &reqwest::Client) -> Option<String
         let client = client.clone();
         set.spawn(async move {
             let resp = client.get(url).send().await.ok()?;
+            // Must check status — 403/50x returns HTML, not an IP.
+            if !resp.status().is_success() { return None; }
             let text = resp.text().await.ok()?;
             // cloudflare.com/cdn-cgi/trace returns key=value pairs (ip=... loc=...)
             // Extract the IP line. Other services return just the IP.
-            let ip = text
+            let candidate = text
                 .lines()
                 .find_map(|l| l.strip_prefix("ip="))
                 .map(|s| s.trim().to_string())
                 .or_else(|| {
                     let trimmed = text.trim().to_string();
-                    if !trimmed.is_empty() {
-                        Some(trimmed)
-                    } else {
-                        None
-                    }
-                });
-            ip
+                    if !trimmed.is_empty() { Some(trimmed) } else { None }
+                })?;
+            // Validate that the response is actually an IP address.
+            // Without this, HTML error pages (403 Forbidden etc.) get stored as exit IP.
+            if candidate.parse::<std::net::IpAddr>().is_ok() { Some(candidate) } else { None }
         });
     }
 

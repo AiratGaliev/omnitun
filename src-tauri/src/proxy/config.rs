@@ -618,8 +618,12 @@ fn build_hysteria2(profile: &ServerProfile) -> Value {
         "password": profile.password,
     });
 
+    // Hysteria2 requires TLS in modern sing-box versions.
+    // If SNI is missing, use server IP with insecure=true.
     if let Some(sni) = &profile.sni {
         set_tls(&mut outbound, sni);
+    } else {
+        set_tls(&mut outbound, &profile.server);
     }
 
     outbound

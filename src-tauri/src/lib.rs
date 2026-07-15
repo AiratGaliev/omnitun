@@ -20,7 +20,6 @@ use crate::proxy::{ConnectionStatus, ErrorCode, ProxyManager, ProxyError, Server
 use crate::settings::{AppSettings, SettingsManager};
 use crate::subscription::SubscriptionProfile;
 use serde::Serialize;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
@@ -33,7 +32,7 @@ const PROXY_TIMEOUT_SECS: u64 = 15;
 const PROXY_POLL_MS: u64 = 300;
 
 const IP_URLS: &[&str] = &[
-    "https://api.ipify.org",
+    "https://api64.ipify.org",
     "https://ifconfig.me/ip",
     "https://api.ip.sb/ip",
 ];
@@ -183,6 +182,7 @@ async fn start_proxy(
         .await
     {
         Ok(_) => {
+            crate::proxy::PROXY_PORT.store(proxy_port, std::sync::atomic::Ordering::Relaxed);
             emit_proxy_progress(&app, "verifying", "Waiting for proxy to become ready…");
             log(
                 &app,
@@ -317,16 +317,9 @@ async fn start_proxy(
                                                         format!("Proxy verified (exit IP: {ip})"),
                                                     );
                                                 }
-                                                let _ = app.emit(
-                                                    "exit-ip-changed",
-                                                    ExitIpInfo {
-                                                        server: ip.clone(),
-                                                        flag: String::new(),
-                                                        country_name: String::new(),
-                                                        city_name: String::new(),
-                                                        proxy_tag: String::new(),
-                                                    },
-                                                );
+                                                // exit-ip-changed removed — exit IP comes from
+                                                // profiles.json via activeServer.exit*.
+                                                // Health check IP fetch stays (verifies proxy works).
                                                 break;
                                             }
                                         }
@@ -389,17 +382,11 @@ async fn start_proxy(
                                                                     } else {
                                                                         tracing::info!(target: "proxy", "Proxy verified (exit IP: {ip}) via {tag}");
                                                                     }
-                                                                    // U2: Эмитим exit-ip-changed в fallback-ветке,
-                                                                    // чтобы UI получил exit IP при переключении.
+                                                                    // Fallback: emit failover-occurred so frontend updates activeServer.
+                                                                    // Exit IP data comes from profiles.json (new active server's exit* fields).
                                                                     let _ = app.emit(
-                                                                        "exit-ip-changed",
-                                                                        ExitIpInfo {
-                                                                            server: ip.clone(),
-                                                                            flag: String::new(),
-                                                                            country_name: String::new(),
-                                                                            city_name: String::new(),
-                                                                            proxy_tag: tag.clone(),
-                                                                        },
+                                                                        "failover-occurred",
+                                                                        all_servers[idx].id.clone(),
                                                                     );
                                                                     switched = true;
                                                                     break;
@@ -678,7 +665,7 @@ async fn start_proxy(
                                                     if let Ok(traffic) =
                                                         serde_json::from_str::<ClashTraffic>(&line)
                                                     {
-                                                        // Clash API returns B/s; convert to MB/s
+                                                        // Clash API returns B/s; convert to MiB/s
                                                         let speed_up = traffic.up / 1024.0 / 1024.0;
                                                         let speed_down =
                                                             traffic.down / 1024.0 / 1024.0;
@@ -764,6 +751,13 @@ async fn stop_proxy(
 
     // Step 2: Reset Clash API port immediately so health check stops.
     crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
+    crate::proxy::PROXY_PORT.store(0, std::sync::atomic::Ordering::Release);
+    // Clear ACTIVE_SERVER_ID so subsequent CDN checks don't target stale server.
+    {
+        let mut active = crate::proxy::ACTIVE_SERVER_ID
+            .lock().unwrap_or_else(|e| e.into_inner());
+        *active = None;
+    }
     log_stop(
         LogLevel::Info,
         "[stop_proxy] step 2: CLASH_API_PORT=0".into(),
@@ -936,6 +930,13 @@ async fn cancel_connect(
 
     // 3. Reset Clash API port.
     crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
+    crate::proxy::PROXY_PORT.store(0, std::sync::atomic::Ordering::Release);
+    // Clear ACTIVE_SERVER_ID so subsequent CDN checks don't target stale server.
+    {
+        let mut active = crate::proxy::ACTIVE_SERVER_ID
+            .lock().unwrap_or_else(|e| e.into_inner());
+        *active = None;
+    }
 
     // 4. Kill the PID (if start_proxy already spawned sing-box).
     let pid = crate::proxy::PROXY_PID.swap(0, std::sync::atomic::Ordering::AcqRel);
@@ -1494,6 +1495,8 @@ async fn refresh_subscription(
             successful: count,
             failed: 0,
             phase: "done".into(),
+            updated_at: profile.updated_at.clone(),
+            last_tested: profile.last_tested.clone(),
         },
     );
     log(
@@ -1606,6 +1609,23 @@ async fn test_servers(
         mgr.commit_test(&app, &id, servers_to_commit).await?
     };
 
+    // Emit done so the frontend updates last_tested.
+    let count = profile.servers.len();
+    let _ = crate::events::emit_refresh_progress(
+        &app,
+        crate::events::RefreshProgress {
+            profile_id: id,
+            total: count,
+            tested: count,
+            cache_hits: 0,
+            successful: count,
+            failed: 0,
+            phase: "done".into(),
+            updated_at: profile.updated_at.clone(),
+            last_tested: profile.last_tested.clone(),
+        },
+    );
+
     Ok(profile)
 }
 
@@ -1631,8 +1651,8 @@ async fn update_settings(
     }
     // Normalise old/migrated values
     new_settings.normalize();
-    // Clamp auto-update interval: 1 min minimum, 1 week max (10080 minutes)
-    if new_settings.auto_update_interval < 1 {
+    // Clamp auto-update interval: 0 = disabled, 1 min minimum, 1 week max (10080 minutes)
+    if new_settings.auto_update_interval != 0 && new_settings.auto_update_interval < 1 {
         new_settings.auto_update_interval = 1;
     } else if new_settings.auto_update_interval > 10080 {
         new_settings.auto_update_interval = 10080;
@@ -2027,6 +2047,102 @@ pub fn run() {
                 });
             }
 
+            // ── Auto-refresh/auto-test scheduler ──────────────────────────
+            // Runs on the backend, logs via tracing (→ UiLogLayer → frontend).
+            let scheduler_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                loop {
+                    let settings = scheduler_app
+                        .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
+                        .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
+                        .unwrap_or_default();
+                    let profiles: Vec<crate::subscription::SubscriptionProfile> = scheduler_app
+                        .try_state::<ProfileState>()
+                        .and_then(|ps| ps.manager.try_lock().ok().map(|g| g.list().to_vec()))
+                        .unwrap_or_default();
+
+                    let now = chrono::Utc::now();
+
+                    if settings.auto_update_interval > 0 {
+                        let interval = chrono::Duration::seconds(settings.auto_update_interval as i64 * 60);
+                        for p in &profiles {
+                            let updated = p
+                                .updated_at
+                                .parse::<chrono::DateTime<chrono::FixedOffset>>()
+                                .ok()
+                                .map(|d| d.naive_utc().and_utc())
+                                .unwrap_or(now);
+                            if now.signed_duration_since(updated) >= interval {
+                                tracing::info!(target: "subscription", "Auto-refreshing subscription '{}'", p.name);
+                                let result = refresh_subscription(
+                                    scheduler_app.clone(),
+                                    scheduler_app.state::<ProfileState>(),
+                                    p.id.clone(),
+                                )
+                                .await;
+                                match result {
+                                    Ok(_) => {},
+                                    Err(e) => {
+                                        tracing::warn!(target: "subscription", "Auto-refresh failed for '{}': {}", p.name, e);
+                                        // Match frontend behavior: advance timestamp even on failure
+                                        // so the scheduler doesn't retry every 60s.
+                                        if let Some(ps) = scheduler_app.try_state::<ProfileState>() {
+                                            if let Ok(mut mgr) = ps.manager.try_lock() {
+                                                if let Some(profile) = mgr.list_mut().iter_mut().find(|pr| pr.id == p.id) {
+                                                    profile.updated_at = chrono::Utc::now().to_rfc3339();
+                                                    let _ = mgr.save();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if settings.auto_test_interval > 0 {
+                        let interval = chrono::Duration::seconds(settings.auto_test_interval as i64 * 60);
+                        for p in &profiles {
+                            let tested = p
+                                .last_tested
+                                .as_ref()
+                                .and_then(|t| {
+                                    t.parse::<chrono::DateTime<chrono::FixedOffset>>()
+                                        .ok()
+                                        .map(|d| d.naive_utc().and_utc())
+                                })
+                                .unwrap_or(now);
+                            if now.signed_duration_since(tested) >= interval {
+                                tracing::info!(target: "cache", "Auto-testing profile '{}'", p.name);
+                                let result = test_servers(
+                                    scheduler_app.clone(),
+                                    scheduler_app.state::<ProfileState>(),
+                                    p.id.clone(),
+                                )
+                                .await;
+                                match result {
+                                    Ok(_) => {},
+                                    Err(e) => {
+                                        tracing::warn!(target: "cache", "Auto-test failed for '{}': {}", p.name, e);
+                                        if let Some(ps) = scheduler_app.try_state::<ProfileState>() {
+                                            if let Ok(mut mgr) = ps.manager.try_lock() {
+                                                if let Some(profile) = mgr.list_mut().iter_mut().find(|pr| pr.id == p.id) {
+                                                    profile.last_tested = Some(chrono::Utc::now().to_rfc3339());
+                                                    let _ = mgr.save();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2047,7 +2163,6 @@ pub fn run() {
             logging::log_message,
             read_clipboard_text,
             get_real_ip,
-            outlet_ip,
             speed_test,
             check_proxy_health,
             switch_proxy,
@@ -2124,14 +2239,7 @@ async fn get_real_ip(_app: tauri::AppHandle) -> Result<RealIpInfo, String> {
     fetch_real_ip().await
 }
 
-/// Find the active proxy's outlet (external) IP address via IP echo services.
-/// Uses the active proxy port when connected in proxy mode so the request
-/// actually goes through the proxy tunnel.
-/// If the active server is CDN-routed, returns immediately (CDN servers
-/// cannot route proxy traffic and have no meaningful exit IP).
-static PREV_OUTLET_IP: StdMutex<Option<String>> = StdMutex::new(None);
 
-#[derive(Debug, Clone, Serialize)]
 /// Clash API /traffic line-delimited JSON: instantaneous B/s.
 /// Converted to MB/s before sending to the frontend.
 #[derive(serde::Deserialize)]
@@ -2140,246 +2248,13 @@ struct ClashTraffic {
     down: f64,
 }
 #[derive(Debug, Clone, Serialize, PartialEq)]
-/// Real IP info (before proxy) — structured like ExitIpInfo.
+/// Real IP info (before proxy) — structured like exit data.
 pub struct RealIpInfo {
     pub server: String,
     pub flag: String,
     pub country_name: String,
     pub city_name: String,
 }
-
-#[derive(Debug, Clone, Serialize, PartialEq)]
-/// Information about the external IP address.
-pub struct ExitIpInfo {
-    pub server: String,
-    pub flag: String,
-    pub country_name: String,
-    pub city_name: String,
-    /// The sing-box outbound tag that handled the request (e.g. "proxy-5").
-    /// Empty if not available.
-    pub proxy_tag: String,
-}
-
-#[tauri::command]
-async fn outlet_ip(app: tauri::AppHandle) -> Result<ExitIpInfo, String> {
-    let stats_port = crate::proxy::CLASH_API_PORT.load(Ordering::Relaxed);
-    if stats_port == 0 {
-        tracing::debug!(target: "system", "outlet_ip: Clash API port is 0 — proxy not connected");
-        return Err("Proxy not connected".into());
-    }
-
-    // ── Early CDN check ────────────────────────────────────────────────
-    let active_id = crate::proxy::ACTIVE_SERVER_ID
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    if let Some(ref active_id) = active_id {
-        if let Some(profile_state) = app.try_state::<ProfileState>() {
-            let pm = profile_state.manager.lock().await;
-            let is_cdn = pm
-                .list()
-                .iter()
-                .any(|p| p.servers.iter().any(|s| s.id == *active_id && s.behind_cdn));
-            if is_cdn {
-                // Ожидаемое поведение: фронтенд вызывает outlet_ip после
-                // старта прокси к CDN-серверу. Early CDN check корректно
-                // возвращает пустой ExitIpInfo. Это не баг — логируем как
-                // INFO с префиксом [CDN], а не [BUG].
-                tracing::info!(
-                    target: "system",
-                    "[CDN] outlet_ip called for CDN server {} — returning empty \
-                     (outlet IP is meaningless for CDN)",
-                    active_id,
-                );
-                return Ok(ExitIpInfo {
-                    server: String::new(),
-                    flag: String::new(),
-                    country_name: String::new(),
-                    city_name: String::new(),
-                    proxy_tag: String::new(),
-                });
-            }
-        }
-    }
-
-    // Always route through proxy in proxy modes
-    let mut use_proxy = true;
-    let mut proxy_port = 0u16;
-    if let Some(state) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
-        if let Ok(guard) = state.try_lock() {
-            use_proxy = true;
-            proxy_port = guard.proxy_port;
-        }
-    }
-
-    let mut client_builder = reqwest::Client::builder().timeout(Duration::from_secs(8));
-
-    if use_proxy {
-        if let Ok(proxy) = reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}")) {
-            client_builder = client_builder.proxy(proxy);
-        }
-    }
-
-    let client = client_builder.build().map_err(|e| e.to_string())?;
-
-    let mut ip = String::new();
-
-    // Concurrently check all URLs, return first valid IP
-    let mut set = tokio::task::JoinSet::new();
-    for &url in IP_URLS {
-        let client = client.clone();
-        set.spawn(async move {
-            if let Ok(resp) = client.get(url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(text) = resp.text().await {
-                        let extracted = text.trim().to_string();
-                        if !extracted.is_empty() {
-                            return Some(extracted);
-                        }
-                    }
-                }
-            }
-            None
-        });
-    }
-
-    while let Some(res) = set.join_next().await {
-        if let Ok(Some(found)) = res {
-            ip = found;
-            break;
-        }
-    }
-
-    if ip.is_empty() {
-        tracing::warn!(target: "system", "outlet_ip: All IP check services failed — could not determine external IP");
-        return Err("Could not determine external IP".into());
-    }
-
-    // Аномалия-детектор: outlet IP в CDN-диапазонах при не-CDN entry.
-    // Это наблюдение, а не баг — возможные причины: WARP upstream,
-    // хостинг у облачного провайдера в .srs-списке, ISP-пересечение.
-    // Логируем как INFO, exit-данные корректны и сохраняются ниже.
-    if crate::proxy::geoip::is_cdn_entry_ip(&ip) {
-        tracing::info!(
-            target: "system",
-            "outlet_ip: Fetched outlet IP {ip} is in CDN ranges, but active server was not marked \
-             as CDN. Keeping exit IP (outlet is egress, not entry). If this fires repeatedly for \
-             the same server, investigate CDN list coverage or process_servers entry-IP \
-             classification.",
-        );
-    }
-
-    let mut proxy_tag = String::new();
-
-    // Query the Clash API for the currently selected proxy outbound tag
-    if stats_port != 0 {
-        let api_url = format!("http://127.0.0.1:{stats_port}/proxies/proxy");
-        let clash_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .unwrap_or_default();
-        if let Ok(resp) = clash_client.get(&api_url).send().await {
-            if let Ok(body) = resp.json::<serde_json::Value>().await {
-                if let Some(current) = body.get("now").and_then(|v| v.as_str()) {
-                    proxy_tag = current.to_string();
-                }
-            }
-        }
-    }
-
-    let info = match crate::proxy::geoip::resolve(&ip) {
-        Some(geo) => ExitIpInfo {
-            server: ip.clone(),
-            flag: geo.country_code.clone(),
-            country_name: geo.country_name.clone(),
-            city_name: geo.city.clone(),
-            proxy_tag: proxy_tag.clone(),
-        },
-        None => ExitIpInfo {
-            server: ip.clone(),
-            flag: String::new(),
-            country_name: String::new(),
-            city_name: String::new(),
-            proxy_tag,
-        },
-    };
-
-    // Persist exit IP geoip to the active server in profiles.json
-    let active_id = crate::proxy::ACTIVE_SERVER_ID
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    if let Some(ref server_id) = active_id {
-        if let Some(profile_state) = app.try_state::<ProfileState>() {
-            let mut pm = profile_state.manager.lock().await;
-            let mut saved = false;
-            for profile in pm.list_mut() {
-                for server in &mut profile.servers {
-                    if server.id == *server_id {
-                        // CDN servers have unstable outlet IPs — skip save
-                        if server.behind_cdn {
-                            // 🚫 ANTI-REGRESSION: если мы тут, значит Tauri-команда
-                            // outlet_ip отдала IP, но активный сервер — CDN. Это
-                            // означает, что либо outlet_ip получил IP для CDN-сервера
-                            // (что не должно происходить — см. early CDN check в
-                            // outlet_ip), либо в профиле CDN-сервер уже имел exit.
-                            // Логируем для диагностики.
-                            server.assert_no_cdn_exit_data("outlet_ip::save_skip");
-                            saved = true;
-                            break;
-                        }
-
-                        let cc = if info.flag.is_empty() {
-                            None
-                        } else {
-                            Some(info.flag.clone())
-                        };
-                        let cn = if info.country_name.is_empty() {
-                            None
-                        } else {
-                            Some(info.country_name.clone())
-                        };
-                        let city = if info.city_name.is_empty() {
-                            None
-                        } else {
-                            Some(info.city_name.clone())
-                        };
-                        server.exit_server = Some(info.server.clone());
-                        server.exit_flag = cc;
-                        server.exit_country_name = cn;
-                        server.exit_city_name = city;
-                        saved = true;
-                        break;
-                    }
-                }
-                if saved {
-                    break;
-                }
-            }
-            pm.deduplicate_profiles();
-            if saved {
-                if let Err(e) = pm.save() {
-                    tracing::warn!(target: "settings", "save failed: {e}");
-                }
-            }
-        }
-    }
-
-    {
-        let mut prev = PREV_OUTLET_IP.lock().unwrap_or_else(|e| e.into_inner());
-        if prev.as_deref() != Some(&ip) {
-            tracing::info!(
-                target: "system",
-                "[rust] exitIp: {} → {ip}",
-                prev.as_deref().unwrap_or("null"),
-            );
-            *prev = Some(ip.clone());
-        }
-    }
-
-    Ok(info)
-}
-
 /// Quick health check for the active proxy via Clash API delay endpoint.
 /// Returns true if the "proxy" outbound/group responds to a delay probe.
 #[tauri::command]
@@ -2799,13 +2674,11 @@ async fn initialize_app(
     );
 
     // Guard: prevent double initialization (React StrictMode in dev or
-    // effect re-runs). Atomic compare_exchange is race-free.
-    if INITIALIZED.compare_exchange(
-        false,
-        true,
-        std::sync::atomic::Ordering::SeqCst,
-        std::sync::atomic::Ordering::SeqCst,
-    ).is_err() {
+    // effect re-runs). Read-only check — concurrent calls serialize on
+    // ProxyManager lock (line 2817). Set only after ALL work succeeds,
+    // so a transient failure (network/down/GitHub blocked/disk full)
+    // doesn't leave INITIALIZED=true and prevent retry for the session.
+    if INITIALIZED.load(std::sync::atomic::Ordering::SeqCst) {
         tracing::info!(
             target: "system",
             "initialize_app already called — skipping (idempotent guard)"
@@ -2987,6 +2860,9 @@ async fn initialize_app(
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
+
+    // Mark initialized only after ALL work succeeded.
+    INITIALIZED.store(true, std::sync::atomic::Ordering::SeqCst);
 
     Ok(())
 }

@@ -56,8 +56,6 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   const setActiveServer = useAppStore((s) => s.setActiveServer);
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
-  const exitIp = useAppStore((s) => s.exitIp);
-  const fetchExitIp = useAppStore((s) => s.fetchExitIp);
   const realIp = useAppStore((s) => s.realIp);
   const speedTestResult = useAppStore((s) => s.speedTestResult);
   const runSpeedTest = useAppStore((s) => s.runSpeedTest);
@@ -85,7 +83,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   };
 
   const formatSpeed = (mbs: number): { value: string; unit: string } => {
-    const bps = mbs * 1_048_576; // Rust backend sends MB/s, convert to B/s
+    const bps = mbs * 1_048_576; // value is in MiB/s (backend: B/s ÷ 1024²)
     if (bps >= 1_073_741_824) {
       return { value: (bps / 1_073_741_824).toFixed(1), unit: t('speedGbps') };
     }
@@ -129,12 +127,6 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   }, [status, setSpeeds]);
 
   useEffect(() => {
-    if (status === 'connected') {
-      void fetchExitIp();
-    }
-  }, [status, fetchExitIp]);
-
-  useEffect(() => {
     if (status !== 'connected') return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSparklineData((prev) => {
@@ -171,8 +163,6 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
   /** Бесшовный реконнект: отключаем → ждём 500ms → включаем. */
   const seamlessReconnect = async (label: string) => {
     toast.info(label);
-    // Clear stale exit IP before changing connection
-    useAppStore.setState({ exitIp: null });
     await toggleConnection();
     await new Promise((r) => setTimeout(r, 500));
     await toggleConnection();
@@ -245,9 +235,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                 {isAnyProfileRefreshing ? t('updatingProfile').trim() : t('noServersTitle')}
               </p>
               <p className="text-zinc-500 text-sm mt-1">
-                {isAnyProfileRefreshing
-                  ? t('testingServersDesc')
-                  : t('noServersDesc')}
+                {isAnyProfileRefreshing ? t('testingServersDesc') : t('noServersDesc')}
               </p>
             </div>
             {!isAnyProfileRefreshing && (
@@ -623,19 +611,19 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                             {!activeServer.behindCdn &&
                             activeServer.exitFlag &&
                             activeServer.exitFlag === activeServer.flag &&
-                            (exitIp ?? activeServer.exitServer) ? (
+                            activeServer.exitServer ? (
                               // Same entry/exit country — show exit data directly
                               <>
                                 <Globe size={12} className="text-emerald-500 shrink-0" />
-                                {(exitIp?.flag ?? activeServer.exitFlag) && (
+                                {activeServer.exitFlag && (
                                   <FlagDisplay
-                                    code={exitIp?.flag ?? activeServer.exitFlag}
+                                    code={activeServer.exitFlag}
                                     className="text-xs shrink-0"
                                   />
                                 )}
                                 <span className="truncate">
                                   {getExitIpDisplayName(
-                                    exitIp ?? {
+                                    {
                                       server: activeServer.exitServer,
                                       flag: activeServer.exitFlag,
                                       country_name: activeServer.exitCountryName,
@@ -671,18 +659,18 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                                     CDN
                                   </span>
                                 )}
-                                {!activeServer.behindCdn && (exitIp ?? activeServer.exitServer) && (
+                                {!activeServer.behindCdn && activeServer.exitServer && (
                                   <>
                                     <span className="text-zinc-600 shrink-0">→</span>
-                                    {(exitIp?.flag ?? activeServer.exitFlag) && (
+                                    {activeServer.exitFlag && (
                                       <FlagDisplay
-                                        code={exitIp?.flag ?? activeServer.exitFlag}
+                                        code={activeServer.exitFlag}
                                         className="text-xs shrink-0"
                                       />
                                     )}
                                     <span className="truncate">
                                       {getExitIpDisplayName(
-                                        exitIp ?? {
+                                        {
                                           server: activeServer.exitServer,
                                           flag: activeServer.exitFlag,
                                           country_name: activeServer.exitCountryName,
@@ -700,22 +688,17 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                             {!activeServer.behindCdn &&
                             activeServer.exitFlag &&
                             activeServer.exitFlag === activeServer.flag &&
-                            (exitIp ?? activeServer.exitServer) ? (
-                              <span className="truncate">
-                                {exitIp?.server ?? activeServer.exitServer}
-                              </span>
+                            activeServer.exitServer ? (
+                              <span className="truncate">{activeServer.exitServer}</span>
                             ) : (
                               <>
                                 <span className="truncate">{activeServer.server}</span>
                                 {!activeServer.behindCdn &&
-                                  (exitIp ?? activeServer.exitServer) &&
-                                  (exitIp?.server ?? activeServer.exitServer) !==
-                                    activeServer.server && (
+                                  activeServer.exitServer &&
+                                  activeServer.exitServer !== activeServer.server && (
                                     <>
                                       <span className="text-zinc-700 shrink-0">·</span>
-                                      <span className="truncate">
-                                        {exitIp?.server ?? activeServer.exitServer}
-                                      </span>
+                                      <span className="truncate">{activeServer.exitServer}</span>
                                     </>
                                   )}
                               </>

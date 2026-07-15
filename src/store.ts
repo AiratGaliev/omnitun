@@ -35,7 +35,6 @@ import { getErrorMessage, localizeError } from './lib/errors';
 import type {
   ConnectionInfo,
   ConnectionStatus,
-  ExitIpInfo,
   LogEntry,
   LogSource,
   Profile,
@@ -158,10 +157,8 @@ interface ProxyStore {
   setSpeeds: (speeds: { up: number; down: number }) => void;
   toggleConnection: () => Promise<void>;
   initListener: () => Promise<() => void>;
-  exitIp: ExitIpInfo | null;
   /** Current proxy connection phase (null when idle). */
   proxyProgress: { phase: string; message: string } | null;
-  fetchExitIp: () => Promise<void>;
   realIp: RealIpInfo | null;
   fetchRealIp: () => Promise<void>;
   speedTestResult: SpeedTestResult | null;
@@ -378,7 +375,6 @@ export const useAppStore = create<ProxyStore>((set, get) => {
     connectedAt: null,
     logs: [],
     settingsVersion: 0,
-    exitIp: null,
     proxyProgress: null,
     realIp: null,
     speedTestResult: null,
@@ -713,7 +709,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         set((state) => {
           const { [id]: _rp, ...remainingProgress } = state.refreshProgress;
           return {
-            profiles: state.profiles.map((p) => (p.id === id ? { ...p, lastTested: Date.now() } : p)),
+            profiles: state.profiles.map((p) =>
+              p.id === id ? { ...p, lastTested: Date.now() } : p,
+            ),
             refreshProgress: remainingProgress,
           };
         });
@@ -892,30 +890,6 @@ export const useAppStore = create<ProxyStore>((set, get) => {
       set({ speeds });
     },
 
-    fetchExitIp: async () => {
-      const maxRetries = 3;
-      const retryDelayMs = 1000;
-
-      for (let attempt = 0; attempt < maxRetries; attempt++) {
-        try {
-          const info = await invoke<ExitIpInfo>('outlet_ip');
-          if (info.server) {
-            set({ exitIp: info });
-            return;
-          }
-        } catch {
-          // Clash API may not be ready yet — wait and retry
-        }
-
-        if (attempt < maxRetries - 1) {
-          await new Promise((r) => setTimeout(r, retryDelayMs));
-        }
-      }
-
-      // All retries failed — keep exitIp as null.
-      // The UI will use activeServer.exitServer as fallback.
-    },
-
     fetchRealIp: async () => {
       try {
         const info = await invoke<RealIpInfo>('get_real_ip');
@@ -1013,22 +987,6 @@ export const useAppStore = create<ProxyStore>((set, get) => {
             routingMode: settings.routingMode,
             proxyPort: settings.proxyPort,
           });
-
-          // Сразу после успешного старта прокси устанавливаем exitIp из данных
-          // батч-тестирования (activeServer.exitServer/exitFlag и т.д.).
-          // Это даёт мгновенный рендер outlet IP, пока fetchExitIp не получил
-          // живые данные от Clash API. Когда fetchExitIp вернёт ответ — перетрёт.
-          if (activeServer?.exitServer) {
-            set({
-              exitIp: {
-                server: activeServer.exitServer,
-                flag: activeServer.exitFlag ?? '',
-                country_name: activeServer.exitCountryName ?? '',
-                city_name: activeServer.exitCityName ?? '',
-                proxy_tag: '',
-              },
-            });
-          }
 
           // Save the actual port (may differ if port fallback was triggered)
           if (actualPort !== settings.proxyPort) {
@@ -1134,10 +1092,6 @@ export const useAppStore = create<ProxyStore>((set, get) => {
       });
 
       // Listen for exit IP changes emitted by Rust after proxy verification
-      const unlistenExitIp = await listen<ExitIpInfo>('exit-ip-changed', (event) => {
-        set({ exitIp: event.payload });
-      });
-
       // Listen for batch refresh progress from the BatchingEngine.
       //
       // ── THROTTLE (UI freeze fix) ──────────────────────────────────────────
@@ -1163,10 +1117,20 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         refreshProgressBuffer.clear();
         set((state) => {
           const next = { ...state.refreshProgress };
+          let profilesUpdated = false;
+          const updatedProfiles = state.profiles.map((p) => {
+            const prog = buffered.get(p.id);
+            if (prog?.phase === 'done' && prog.updated_at) {
+              profilesUpdated = true;
+              return { ...p, lastUpdated: Date.parse(prog.updated_at), lastTested: prog.last_tested ? Date.parse(prog.last_tested) || undefined : undefined };
+            }
+            return p;
+          });
           for (const [id, prog] of buffered) {
-            next[id] = prog;
+            next[id] = prog?.phase === 'done' ? null : prog;
           }
-          return { refreshProgress: next };
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+          return profilesUpdated ? { refreshProgress: next, profiles: updatedProfiles } : { refreshProgress: next };
         });
       };
 
@@ -1178,8 +1142,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
 
       const unlistenRefresh = await listen<RefreshProgress>('refresh-progress', (event) => {
         const progress = event.payload;
-        const value: RefreshProgress | null = progress.phase === 'done' ? null : progress;
-        refreshProgressBuffer.set(progress.profile_id, value);
+        refreshProgressBuffer.set(progress.profile_id, progress);
         scheduleRefreshProgressFlush();
       });
 
@@ -1195,14 +1158,13 @@ export const useAppStore = create<ProxyStore>((set, get) => {
       // switches to an alternative outbound. Passes exact server ID (no index guessing).
       const unlistenFailover = await listen<string>('failover-occurred', (event) => {
         const newServerId = event.payload;
-        const { servers, activeServer, fetchExitIp } = get();
+        const { servers, activeServer } = get();
         if (activeServer?.id !== newServerId) {
           const newServer = servers.find((s) => s.id === newServerId);
           if (newServer) {
             // Backend already logged the failover via tracing::info!
             // ("Seamless failover detected: {current_tag} -> {now_tag}")
             set({ activeServer: newServer });
-            void fetchExitIp();
           }
         }
       });
@@ -1285,7 +1247,6 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         unlisten();
         unlistenLogs();
         unlistenTraffic();
-        unlistenExitIp();
         unlistenRefresh();
         unlistenProxyProgress();
         unlistenFailover();

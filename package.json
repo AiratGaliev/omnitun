@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "tauri": "tauri dev",
     "tauri:build": "tauri build",
+    "mcp:build": "cd src-tauri && cargo build --features mcp-server --bin mcp_server",
+    "mcp:run": "cd src-tauri && cargo run --features mcp-server --bin mcp_server",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",

@@ -289,6 +289,8 @@ impl Handler {
                 // not a dead PID.
                 state.process_mgr.clear_pid();
                 crate::proxy::PROXY_PID.store(0, std::sync::atomic::Ordering::Release);
+                crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
+                crate::proxy::PROXY_PORT.store(0, std::sync::atomic::Ordering::Release);
                 ("disconnected", 0)
             }
             None => ("disconnected", 0),
@@ -383,7 +385,6 @@ impl Handler {
                         if let Some(idx) = state.profile_mgr.list().iter().position(|p| p.id == bg_id) {
                             state.profile_mgr.list_mut()[idx].servers = enriched;
                             state.profile_mgr.list_mut()[idx].updated_at = chrono::Utc::now().to_rfc3339();
-                            let _ = state.settings_mgr.save(&settings);
                             let _ = state.profile_mgr.save();
                             tracing::info!(target: "subscription",
                                 "Background refresh completed: {count} server(s) for profile {bg_id}");
@@ -586,7 +587,7 @@ impl Handler {
             }
             Ok(Ok(Err(e))) => Err(ErrorData::internal_error(format!("Test failed: {e}"), None)),
             Ok(Err(_)) => Err(ErrorData::internal_error("Test worker dropped", None)),
-            Err(_) => Err(ErrorData::internal_error("Test timed out after 30s", None)),
+            Err(_) => Err(ErrorData::internal_error("Test timed out after 120s", None)),
         }
     }
 
@@ -640,6 +641,8 @@ impl Handler {
         if let Some(v) = args.get("anti_dpi").and_then(|v| v.as_bool()) { settings.anti_dpi = v; }
         if let Some(v) = args.get("enable_mux").and_then(|v| v.as_bool()) { settings.enable_mux = v; }
         if let Some(v) = args.get("block_cdn_nodes").and_then(|v| v.as_bool()) { settings.block_cdn_nodes = v; }
+        if let Some(v) = args.get("auto_update_interval").and_then(|v| v.as_u64()) { settings.auto_update_interval = v as u32; }
+        if let Some(v) = args.get("auto_test_interval").and_then(|v| v.as_u64()) { settings.auto_test_interval = v as u32; }
         if let Some(v) = args.get("test_url").and_then(|v| v.as_str()) { settings.test_url = v.into(); }
         if let Some(v) = args.get("test_use_tls").and_then(|v| v.as_bool()) { settings.test_use_tls = v; }
         settings.normalize();
@@ -1208,7 +1211,7 @@ fn define_tools() -> Vec<Tool> {
         )
         .with_annotations(tool_ann(false, false, true, false)),
         Tool::new("update_settings",
-            "Update application settings. Accepts partial updates: routing_mode, proxy_port, bypass_ru, allow_lan, kill_switch, anti_dpi, enable_mux, block_cdn_nodes.",
+            "Update application settings. Accepts partial updates: routing_mode, proxy_port, bypass_ru, allow_lan, kill_switch, anti_dpi, enable_mux, block_cdn_nodes, auto_update_interval, auto_test_interval.",
             schema(serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1219,7 +1222,9 @@ fn define_tools() -> Vec<Tool> {
                     "kill_switch":    { "type": "boolean" },
                     "anti_dpi":       { "type": "boolean" },
                     "enable_mux":     { "type": "boolean" },
-                    "block_cdn_nodes": { "type": "boolean" }
+                    "block_cdn_nodes": { "type": "boolean" },
+                    "auto_update_interval": { "type": "integer", "minimum": 0, "maximum": 10080 },
+                    "auto_test_interval":   { "type": "integer", "minimum": 0, "maximum": 10080 }
                 }
             }))
         )
@@ -1371,7 +1376,7 @@ impl ServerHandler for Handler {
                     let status = serde_json::json!({
                         "connected": pid > 0,
                         "pid": pid,
-                        "proxy_port": if port > 0 { port - 1 } else { 0 },
+                        "proxy_port": crate::proxy::PROXY_PORT.load(std::sync::atomic::Ordering::Relaxed),
                         "clash_api_port": port,
                     });
                     let json = serde_json::to_string_pretty(&status).unwrap_or_else(|_| "{}".into());

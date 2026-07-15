@@ -17,10 +17,11 @@ impl HttpFetcher {
             .user_agent("omnitun/0.1.0")
             .timeout(std::time::Duration::from_secs(15));
 
-        // If sing-box is running (proxy_port from app settings), route fetch through it
+        // If sing-box is running (proxy_port from app settings), route fetch through it.
+        // Use Proxy::all so both http:// and https:// subscription URLs are intercepted.
         if let Some(port) = proxy_port {
             let proxy_url = format!("http://127.0.0.1:{port}");
-            if let Ok(proxy) = reqwest::Proxy::http(&proxy_url) {
+            if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
                 builder = builder.proxy(proxy);
             }
         }

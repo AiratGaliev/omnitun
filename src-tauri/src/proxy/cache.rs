@@ -783,6 +783,8 @@ impl ServerCache {
                         successful: initial_cache_hits + cache_hits + cdn_skip_count + successful,
                         failed,
                         phase: "testing".into(),
+                        updated_at: String::new(),
+                        last_tested: None,
                     },
                 );
             } else {
@@ -795,9 +797,26 @@ impl ServerCache {
                     log(app_ref.unwrap(), l, LogLevel::Warning, LogSource::Cache,
                         "[Cache] batch_test task panicked or was cancelled".into());
                 }
-                // We can't identify which server panicked, so skip slot filling
+                // We can't identify which server panicked, so skip slot filling.
                 // The slot will be filled by the next completed task, or at worst
                 // the cost is one fewer result in the final list.
+                // Emit progress so the UI bar doesn't freeze on panicked tasks.
+                if let Some(app) = app_ref.as_ref() {
+                    crate::events::emit_refresh_progress(
+                        app,
+                        crate::events::RefreshProgress {
+                            profile_id: profile_id.to_string(),
+                            total,
+                            tested: initial_cache_hits + cache_hits + completed,
+                            cache_hits: initial_cache_hits + cache_hits,
+                            successful: initial_cache_hits + cache_hits + cdn_skip_count + successful,
+                            failed,
+                            phase: "testing".into(),
+                            updated_at: String::new(),
+                            last_tested: None,
+                        },
+                    );
+                }
             }
         }
 

@@ -46,6 +46,10 @@ pub struct RefreshProgress {
     pub failed: usize,
     /// Current phase label for the UI progress bar.
     pub phase: String,
+    /// Backend updated_at timestamp (RFC3339), set only on phase=done.
+    pub updated_at: String,
+    /// Backend last_tested timestamp (RFC3339), set only on phase=done.
+    pub last_tested: Option<String>,
 }
 
 /// Emit a batch testing progress event to the frontend.

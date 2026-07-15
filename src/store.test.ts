@@ -134,7 +134,6 @@ beforeEach(() => {
     connectedAt: null,
     logs: [],
     settingsVersion: 0,
-    exitIp: null,
     realIp: null,
     speedTestResult: null,
     connections: [],
@@ -390,6 +389,7 @@ describe('store — profile management', () => {
     expect(mockInvoke).toHaveBeenCalledWith('add_subscription', {
       name: 'Test',
       url: 'https://example.com/sub',
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
       profileId: expect.any(String),
     });
     const state = useAppStore.getState();
@@ -616,7 +616,7 @@ describe('store — toggleConnection', () => {
       flag: 'PL',
       country_name: 'Poland',
       city_name: 'Warsaw',
-    }); // outlet_ip
+    }); // batch-test exit IP mock (unused after outlet_ip removal but kept for compat)
 
     await useAppStore.getState().toggleConnection();
 
@@ -654,7 +654,7 @@ describe('store — toggleConnection', () => {
       flag: 'PL',
       country_name: 'Poland',
       city_name: 'Warsaw',
-    }); // outlet_ip
+    }); // batch-test exit IP mock (unused after outlet_ip removal but kept for compat)
 
     await useAppStore.getState().toggleConnection();
 
@@ -678,7 +678,7 @@ describe('store — toggleConnection', () => {
       flag: 'PL',
       country_name: 'Poland',
       city_name: 'Warsaw',
-    }); // outlet_ip
+    }); // batch-test exit IP mock (unused after outlet_ip removal but kept for compat)
 
     await useAppStore.getState().toggleConnection();
     const startCall = mockInvoke.mock.calls.find((c) => c[0] === 'start_proxy');
@@ -712,25 +712,6 @@ describe('store — toggleConnection', () => {
 // 6. IP fetching
 // ─────────────────────────────────────────────────────────────────────────────
 describe('store — IP fetching', () => {
-  it('fetchOutletIp stores IP on success', async () => {
-    mockInvoke.mockResolvedValueOnce({
-      server: '1.2.3.4',
-      flag: 'PL',
-      country_name: 'Poland',
-      city_name: 'Warsaw',
-    });
-    await useAppStore.getState().fetchExitIp();
-    const result = useAppStore.getState().exitIp;
-    expect(result).not.toBeNull();
-    expect(result?.server).toBe('1.2.3.4');
-  });
-
-  it('fetchOutletIp stores null on error', async () => {
-    mockInvoke.mockRejectedValueOnce(new Error('fail'));
-    await useAppStore.getState().fetchExitIp();
-    expect(useAppStore.getState().exitIp).toBeNull();
-  });
-
   it('fetchRealIp stores IP on success', async () => {
     mockInvoke.mockResolvedValueOnce({
       server: '9.9.9.9',

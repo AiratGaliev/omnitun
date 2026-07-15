@@ -176,6 +176,8 @@ export interface RefreshProgress {
   successful: number;
   failed: number;
   phase: string;
+  updated_at: string;
+  last_tested: string | null;
 }
 
 // ─── Rust backend structured errors ─────────────────────────────────────────

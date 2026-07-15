@@ -144,7 +144,12 @@ impl ProfileManager {
                     }
                     Some(&idx) => {
                         dup_count += 1;
-                        if s.ping_ms < deduped[idx].ping_ms {
+                        // Rust's derived Ord for Option<T> puts None < Some(_),
+                        // so None < Some(0) is true — untested servers would evict
+                        // tested ones. Use unwrap_or(u64::MAX) for correct ordering.
+                        let new_ping = s.ping_ms.unwrap_or(u64::MAX);
+                        let old_ping = deduped[idx].ping_ms.unwrap_or(u64::MAX);
+                        if new_ping < old_ping {
                             deduped[idx] = s;
                         }
                     }
@@ -270,201 +275,6 @@ impl ProfileManager {
         }
         self.save()?;
         Ok(())
-    }
-
-    pub async fn refresh(
-        &mut self,
-        app: &AppHandle,
-        id: &str,
-    ) -> Result<SubscriptionProfile, ProxyError> {
-        let idx = self
-            .profiles
-            .iter()
-            .position(|p| p.id == id)
-            .ok_or_else(|| ProxyError::subscription(
-                ErrorCode::SubscriptionNotFound,
-                "Profile not found",
-            ))?;
-
-        let url = &self.profiles[idx].url;
-        let fetch_result = match url {
-            u if u.starts_with("http://") || u.starts_with("https://") => {
-                match crate::subscription::fetch_subscription(u, proxy_port_from_app(app)).await {
-                    Ok(s) => Ok(s),
-                    Err(e) => {
-                        if proxy_port_from_app(app).is_some() {
-                            tracing::error!(
-                                target: "subscription",
-                                "Proxy fetch failed, retrying direct: {e}",
-                            );
-                            crate::subscription::fetch_subscription(u, None).await
-                        } else {
-                            Err(e)
-                        }
-                    }
-                }
-            }
-            _ => crate::subscription::parser::parse_subscription(url),
-        };
-
-        // On HTTP/parse error: still bump updated_at so the frontend timer
-        // doesn't retry immediately. The user can manually refresh later.
-        let mut servers = match fetch_result {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!(
-                    target: "subscription",
-                    "Refresh failed, bumping updated_at: {e}",
-                );
-                self.profiles[idx].updated_at = chrono::Utc::now().to_rfc3339();
-                // If we have existing servers, enrich them with GeoIP while we wait
-                if !self.profiles[idx].servers.is_empty() {
-                    let existing = std::mem::take(&mut self.profiles[idx].servers);
-                    self.profiles[idx].servers = process_servers(
-                        app,
-                        existing
-                            .into_iter()
-                            .map(|mut s| {
-                                // Reset ping so it gets re-tested
-                                s.ping_ms = None;
-                                s
-                            })
-                            .collect(),
-                        id,
-                    )
-                    .await;
-                }
-                self.save()?;
-                return Err(e);
-            }
-        };
-
-        // Preserve server IDs across refresh — match by (protocol, server, port, uuid, password, method, transport_type)
-        let old_index: std::collections::HashMap<String, String> = self.profiles[idx]
-            .servers
-            .iter()
-            .map(|s| {
-                let key = format!(
-                    "{}://{}:{}@{}:{}:{}/{}",
-                    s.protocol,
-                    s.server,
-                    s.port,
-                    s.uuid.as_deref().unwrap_or(""),
-                    s.password.as_deref().unwrap_or(""),
-                    s.method.as_deref().unwrap_or(""),
-                    s.transport_type.as_deref().unwrap_or(""),
-                );
-                (key, s.id.clone())
-            })
-            .collect();
-        for server in &mut servers {
-            let key = format!(
-                "{}://{}:{}@{}:{}:{}/{}",
-                server.protocol,
-                server.server,
-                server.port,
-                server.uuid.as_deref().unwrap_or(""),
-                server.password.as_deref().unwrap_or(""),
-                server.method.as_deref().unwrap_or(""),
-                server.transport_type.as_deref().unwrap_or(""),
-            );
-            if let Some(old_id) = old_index.get(&key) {
-                server.id = old_id.clone();
-            }
-        }
-
-        // Preserve exit IP data from existing profiles before processing.
-        // Batch test (the only source of exit IP enrichment) is skipped when
-        // Proxy is running, so freshly parsed servers would lose exit data.
-        let old_servers = &self.profiles[idx].servers;
-        let old_exit: std::collections::HashMap<
-            String,
-            (
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            ),
-        > = old_servers
-            .iter()
-            .map(|s| {
-                (
-                    s.id.clone(),
-                    (
-                        s.exit_server.clone(),
-                        s.exit_flag.clone(),
-                        s.exit_country_name.clone(),
-                        s.exit_city_name.clone(),
-                    ),
-                )
-            })
-            .collect();
-        // Сброс rate-limit счётчика ip.guide для нового refresh-цикла.
-        // Вызываем ДО process_servers, чтобы ограничение действовало
-        // на текущий цикл GeoIP enrichment.
-        // 🚫 ANTI-REGRESSION: не удаляй этот вызов.
-        crate::proxy::geoip::reset_ipguide_rate_limit();
-
-        servers = process_servers(app, servers, id).await;
-
-        // Restore preserved exit data if batch test didn't update it.
-        // WARNING: for CDN servers, do NOT restore — process_servers explicitly
-        // cleared exit data (invariant I-CDN-1: behind_cdn ⇒ exit_* = None).
-        for server in &mut servers {
-            if server.behind_cdn {
-                continue;
-            }
-            if server.exit_server.is_none() {
-                if let Some(saved) = old_exit.get(&server.id) {
-                    server.exit_server = saved.0.clone();
-                    server.exit_flag = saved.1.clone();
-                    server.exit_country_name = saved.2.clone();
-                    server.exit_city_name = saved.3.clone();
-                }
-            }
-        }
-
-        // Guard: обновляем profiles ДО вызова handle_subscription_refresh,
-        // чтобы новые server IDs попали в all_active_ids.
-        if servers.is_empty() {
-            return Err(ProxyError::subscription(
-                ErrorCode::SubscriptionNoServers,
-                "Refresh returned 0 servers — keeping existing servers",
-            ));
-        }
-
-        self.profiles[idx].servers = servers;
-        self.profiles[idx].updated_at = chrono::Utc::now().to_rfc3339();
-
-        // Notify cache about subscription refresh: pass ALL current server IDs
-        // so the cache can remove entries for deleted servers across all profiles,
-        // not just the one being refreshed.
-        if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
-            let all_active_ids: std::collections::HashSet<String> = self
-                .profiles
-                .iter()
-                .flat_map(|p| p.servers.iter().map(|s| s.id.clone()))
-                .collect();
-            cache.handle_subscription_refresh(&all_active_ids).await;
-            cache.save_to_disk().await;
-        }
-
-        // Refresh traffic info
-        let traffic = crate::subscription::fetch_subscription_traffic(
-            &self.profiles[idx].url,
-            proxy_port_from_app(app),
-        )
-        .await;
-        if let Some((used, total, expiry)) = traffic {
-            self.profiles[idx].traffic_used = Some(used);
-            self.profiles[idx].traffic_total = Some(total);
-            self.profiles[idx].traffic_expiry = expiry;
-        }
-
-        self.deduplicate_profiles();
-        let profile = self.profiles[idx].clone();
-        self.save()?;
-        Ok(profile)
     }
 
     /// Phase 3 of lock-splitting refresh: commit new servers under write lock.
@@ -730,7 +540,7 @@ pub async fn process_servers_inner(
     // 1b. Fast keyword pre-check for serverless domains (workers.dev, pages.dev).
     //     Full CDN detection via ASN happens during batch latency test.
     for s in &mut unique {
-        s.behind_cdn = s.behind_cdn || crate::proxy::is_cdn_server(s).await;
+        s.behind_cdn = s.behind_cdn || crate::proxy::is_cdn_server(s);
         if s.behind_cdn {
             // Clear stale exit IP data from previous batch tests — CDN servers
             // must never retain exit data (their exit node is dynamic/unstable).
@@ -748,10 +558,8 @@ pub async fn process_servers_inner(
                 s.display_name(),
                 s.server,
             );
-            // Примечание: раньше здесь был warn! "[BUG] CDN server had stale exit IP data".
-            // Теперь логирование делает assert_no_cdn_exit_data (на уровне error!,
-            // с structured target "cdn-invariant"). Уровень повышен с warn! до error!,
-            // потому что нарушение инварианты — это всегда баг, не предупреждение.
+            // CDN servers keep exit-IP data cleared by assert_no_cdn_exit_data
+            // (logged at error! level, target &quot;cdn-invariant&quot;).
         }
     }
 
@@ -1030,6 +838,8 @@ pub async fn process_servers_inner(
                     successful: alive.len(),
                     failed: tcp_tested - alive.len(),
                     phase: "tcp_ping".into(),
+                    updated_at: String::new(),
+                    last_tested: None,
                 },
             );
         }
@@ -1090,10 +900,17 @@ pub async fn process_servers_inner(
                 // Skip batch test — use cached data directly.
                 server.behind_cdn = pos.behind_cdn;
                 if !server.behind_cdn {
-                    server.exit_server = pos.exit_ip;
-                    server.exit_flag = pos.exit_flag;
-                    server.exit_country_name = pos.exit_country;
-                    server.exit_city_name = pos.exit_city;
+                    // Only overwrite exit fields if cache actually has data.
+                    // A cache hit with exit_ip=None (transient outlet IP fetch
+                    // failure during previous batch test) would otherwise erase
+                    // previously valid exit data — critical since profiles.json
+                    // is the sole source of exit data.
+                    if pos.exit_ip.is_some() {
+                        server.exit_server = pos.exit_ip;
+                        server.exit_flag = pos.exit_flag;
+                        server.exit_country_name = pos.exit_country;
+                        server.exit_city_name = pos.exit_city;
+                    }
                 }
                 ready_servers.push(server);
             } else {

@@ -22,6 +22,9 @@ use thiserror::Error;
 
 /// Current Clash API port (0 = not running). Set by config.rs on each start.
 pub(crate) static CLASH_API_PORT: AtomicU16 = AtomicU16::new(0);
+/// Actual proxy SOCKS5 port. Written by start_proxy, cleared by stop_proxy/cancel_connect.
+/// Used by MCP omnitun://status to report the correct proxy port.
+pub(crate) static PROXY_PORT: AtomicU16 = AtomicU16::new(0);
 pub(crate) static PROXY_PID: AtomicU32 = AtomicU32::new(0);
 
 /// Last connected profile — stored for auto-reconnect on watchdog exit.
@@ -335,7 +338,6 @@ fn keyword_cdn_check(host: &str) -> bool {
         || lower.ends_with(".workers.dev")
         || lower.ends_with(".pages.dev")
         || lower.ends_with(".cfargotunnel.com")
-        || lower.contains(".worker.")
 }
 
 /// Lightweight initial CDN detection via keyword check on transport_host, sni.
@@ -349,7 +351,7 @@ fn keyword_cdn_check(host: &str) -> bool {
 /// but that was incorrect — a VPS behind Cloudflare CDN has a stable outlet IP
 /// and is NOT a CDN node in the problematic sense. Only Workers/WARP/Pages
 /// have unstable outlet IPs.
-pub async fn is_cdn_server(s: &ServerProfile) -> bool {
+pub fn is_cdn_server(s: &ServerProfile) -> bool {
     if let Some(ref host) = s.transport_host {
         if keyword_cdn_check(host) {
             return true;

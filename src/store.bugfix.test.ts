@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/require-await,@typescript-eslint/no-empty-function,@typescript-eslint/no-floating-promises,@typescript-eslint/no-unnecessary-condition,@typescript-eslint/no-unsafe-assignment */
 /**
  * Regression tests for the profile add/refresh UX-flow:
  *   - addProfile: pending profile appears immediately, _refreshingIds tracked,
@@ -16,12 +17,12 @@ import { describe, expect, it, vi } from 'vitest';
 // ── Tauri IPC mocks ──────────────────────────────────────────────────────
 
 type InvokeHandler = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
-type ListenHandler = <T>(
+type ListenHandler = (
   event: string,
-  handler: (event: { payload: T }) => void,
+  handler: (event: { payload: unknown }) => void,
 ) => Promise<() => void>;
 
-let invokeHandler: InvokeHandler = async () => undefined;
+let invokeHandler: InvokeHandler = () => Promise.resolve(undefined);
 let listenHandlers: Record<string, ((event: { payload: unknown }) => void)[]> = {};
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -33,7 +34,8 @@ vi.mock('@tauri-apps/api/event', () => ({
     if (!listenHandlers[event]) listenHandlers[event] = [];
     listenHandlers[event].push(handler);
     return Promise.resolve(() => {
-      listenHandlers[event] = listenHandlers[event]?.filter((h) => h !== handler) ?? [];
+      const idx = listenHandlers[event].indexOf(handler);
+      if (idx >= 0) listenHandlers[event].splice(idx, 1);
     });
   }) as ListenHandler,
 }));
@@ -212,9 +214,7 @@ describe('refreshProfile: error does not set future lastUpdated', () => {
       if (cmd === 'refresh_subscription') throw new Error('refresh failed');
       return undefined;
     });
-    await expect(
-      useAppStore.getState().refreshProfile(profile.id),
-    ).rejects.toThrow();
+    await expect(useAppStore.getState().refreshProfile(profile.id)).rejects.toThrow();
     const after = Date.now();
 
     const updatedProfile = useAppStore.getState().profiles.find((p) => p.id === profile.id);
@@ -239,9 +239,7 @@ describe('refreshProfile: error does not set future lastUpdated', () => {
       if (cmd === 'refresh_subscription') throw new Error('fail');
       return undefined;
     });
-    await expect(
-      useAppStore.getState().refreshProfile('p1'),
-    ).rejects.toThrow();
+    await expect(useAppStore.getState().refreshProfile('p1')).rejects.toThrow();
 
     const profile = useAppStore.getState().profiles[0];
     const timeAgo = profile.lastUpdated
@@ -255,33 +253,39 @@ describe('addProfile: passes profileId to backend', () => {
   it('invoke receives the pre-generated profileId', async () => {
     const { useAppStore } = await initStore();
 
-    const mockInvoke = vi.fn().mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === 'add_subscription') {
-        return makeRustProfile(args?.profileId as string, [makeRustServer('s1')]);
-      }
-      if (cmd === 'get_subscriptions') return [];
-      if (cmd === 'get_settings') return null;
-      if (cmd === 'get_status') return 'disconnected';
-      if (cmd === 'get_logs') return [];
-      if (cmd === 'get_real_ip') return null;
-      if (cmd === 'pick_replacement_server') return null;
-      return undefined;
-    });
+    const mockInvoke = vi
+      .fn()
+      .mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'add_subscription') {
+          return makeRustProfile(args?.profileId as string, [makeRustServer('s1')]);
+        }
+        if (cmd === 'get_subscriptions') return [];
+        if (cmd === 'get_settings') return null;
+        if (cmd === 'get_status') return 'disconnected';
+        if (cmd === 'get_logs') return [];
+        if (cmd === 'get_real_ip') return null;
+        if (cmd === 'pick_replacement_server') return null;
+        return undefined;
+      });
     invokeHandler = mockInvoke;
 
     await useAppStore.getState().addProfile({ name: 'WithId', url: 'https://example.com/id' });
 
-    expect(mockInvoke).toHaveBeenCalledWith('add_subscription', expect.objectContaining({
-      name: 'WithId',
-      url: 'https://example.com/id',
-      profileId: expect.any(String),
-    }));
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'add_subscription',
+      expect.objectContaining({
+        name: 'WithId',
+        url: 'https://example.com/id',
+        profileId: expect.any(String),
+      }),
+    );
 
     // The profile in the store should have the same ID as what was passed
     const storedProfile = useAppStore.getState().profiles[0];
-    const callArgs = mockInvoke.mock.calls.find(
-      (c) => c[0] === 'add_subscription',
-    )?.[1] as Record<string, unknown>;
+    const callArgs = mockInvoke.mock.calls.find((c) => c[0] === 'add_subscription')?.[1] as Record<
+      string,
+      unknown
+    >;
     expect(storedProfile.id).toBe(callArgs.profileId);
   });
 });
@@ -290,16 +294,18 @@ describe('addProfile success path', () => {
   it('pending profile is replaced with real one (same ID) on success', async () => {
     const { useAppStore } = await initStore();
 
-    invokeHandler = vi.fn().mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === 'add_subscription') {
-        return makeRustProfile(
-          args?.profileId as string,
-          [makeRustServer('s1'), makeRustServer('s2')],
-        );
-      }
-      if (cmd === 'pick_replacement_server') return null;
-      return undefined;
-    });
+    invokeHandler = vi
+      .fn()
+      .mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'add_subscription') {
+          return makeRustProfile(args?.profileId as string, [
+            makeRustServer('s1'),
+            makeRustServer('s2'),
+          ]);
+        }
+        if (cmd === 'pick_replacement_server') return null;
+        return undefined;
+      });
 
     await useAppStore.getState().addProfile({ name: 'Success', url: 'https://example.com/ok' });
 
@@ -374,22 +380,27 @@ describe('importProfileContent: pending-profile pattern', () => {
   it('passes profileId to backend import_subscription_content', async () => {
     const { useAppStore } = await initStore();
 
-    const mockInvoke = vi.fn().mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === 'import_subscription_content') {
-        return makeRustProfile(args?.profileId as string, [makeRustServer('s1')]);
-      }
-      if (cmd === 'pick_replacement_server') return null;
-      return undefined;
-    });
+    const mockInvoke = vi
+      .fn()
+      .mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+        if (cmd === 'import_subscription_content') {
+          return makeRustProfile(args?.profileId as string, [makeRustServer('s1')]);
+        }
+        if (cmd === 'pick_replacement_server') return null;
+        return undefined;
+      });
     invokeHandler = mockInvoke;
 
     await useAppStore.getState().importProfileContent({ name: 'WithId', content: 'vless://...' });
 
-    expect(mockInvoke).toHaveBeenCalledWith('import_subscription_content', expect.objectContaining({
-      name: 'WithId',
-      content: 'vless://...',
-      profileId: expect.any(String),
-    }));
+    expect(mockInvoke).toHaveBeenCalledWith(
+      'import_subscription_content',
+      expect.objectContaining({
+        name: 'WithId',
+        content: 'vless://...',
+        profileId: expect.any(String),
+      }),
+    );
   });
 
   it('servers-discovered during import updates profile.servers incrementally', async () => {

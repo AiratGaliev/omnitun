@@ -180,18 +180,6 @@ pub fn log_to_logger(
     }
 }
 
-/// Same as `log()` but without the Tauri event emit.
-/// Now identical to `log()` since broadcast/Tauri emit is decoupled.
-#[allow(dead_code)]
-pub(crate) fn log_to_file(
-    _app_handle: &tauri::AppHandle,
-    _logger: &std::sync::Mutex<Logger>,
-    _level: LogLevel,
-    _source: LogSource,
-    _message: String,
-) {
-}
-
 /// Tauri command: log a message from the frontend.
 #[tauri::command]
 pub fn log_message(
@@ -559,21 +547,6 @@ pub fn setup_logging(log_dir: &Path) -> (broadcast::Receiver<LogEntry>, PathBuf)
     }));
 
     (rx, log_file)
-}
-
-// ── Direct UI log helper (for non-tracing callers like log_frontend) ─────────
-
-/// Send a pre-formatted log entry to the UI broadcast channel directly.
-/// Used by the `log_frontend` command bridge.
-pub fn log_to_ui(message: String, level: LogLevel, source: LogSource) {
-    let entry = LogEntry {
-        id: uuid::Uuid::new_v4().to_string(),
-        timestamp: Utc::now().timestamp_millis(),
-        message,
-        level,
-        source,
-    };
-    let _ = get_ui_tx().send(entry);
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
