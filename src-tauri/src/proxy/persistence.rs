@@ -22,7 +22,7 @@ pub fn load_cache(data_dir: &Path) -> HashMap<String, CacheEntry> {
     match std::fs::read_to_string(&path) {
         Ok(json) => match serde_json::from_str::<HashMap<String, CacheEntry>>(&json) {
             Ok(map) => {
-                tracing::info!(target: "cache", 
+                tracing::info!(target: "cache",
                     "[Cache Persistence] loaded {} entries from {}",
                     map.len(),
                     path.display()
@@ -30,7 +30,7 @@ pub fn load_cache(data_dir: &Path) -> HashMap<String, CacheEntry> {
                 map
             }
             Err(e) => {
-                tracing::warn!(target: "cache", 
+                tracing::warn!(target: "cache",
                     "[Cache Persistence] failed to parse {}: {e} — starting fresh",
                     path.display()
                 );
@@ -38,14 +38,14 @@ pub fn load_cache(data_dir: &Path) -> HashMap<String, CacheEntry> {
             }
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::info!(target: "cache", 
+            tracing::info!(target: "cache",
                 "[Cache Persistence] no cache file at {} — starting fresh",
                 path.display()
             );
             HashMap::new()
         }
         Err(e) => {
-            tracing::warn!(target: "cache", 
+            tracing::warn!(target: "cache",
                 "[Cache Persistence] error reading {}: {e} — starting fresh",
                 path.display()
             );
@@ -68,14 +68,40 @@ pub fn save_cache(data_dir: &Path, entries: &HashMap<String, CacheEntry>) {
                 Ok(_) => {
                     match std::fs::rename(&tmp_path, &path) {
                         Ok(_) => {
-                            tracing::info!(target: "cache", 
+                            tracing::info!(target: "cache",
                                 "[Cache Persistence] saved {} entries to {}",
                                 entries.len(),
                                 path.display()
                             );
+                            // Post-write validation: re-read and parse. If corrupt, re-write.
+                            // Cheap insurance against power-loss/crash-during-rename.
+                            match std::fs::read_to_string(&path) {
+                                Ok(json) => {
+                                    if serde_json::from_str::<HashMap<String, CacheEntry>>(&json)
+                                        .is_err()
+                                    {
+                                        tracing::warn!(target:"cache",
+                                            "[Cache Persistence] post-write validation failed for {} — re-writing",
+                                            path.display());
+                                        let json_str =
+                                            serde_json::to_string(entries).unwrap_or_default();
+                                        let _ = std::fs::write(&tmp_path, &json_str);
+                                        let _ = std::fs::rename(&tmp_path, &path);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(target:"cache",
+                                        "[Cache Persistence] post-write read failed for {}: {e} — re-writing",
+                                        path.display());
+                                    let json_str =
+                                        serde_json::to_string(entries).unwrap_or_default();
+                                    let _ = std::fs::write(&tmp_path, &json_str);
+                                    let _ = std::fs::rename(&tmp_path, &path);
+                                }
+                            }
                         }
                         Err(e) => {
-                            tracing::error!(target: "cache", 
+                            tracing::error!(target: "cache",
                                 "[Cache Persistence] atomic rename failed: {e} — cache NOT saved"
                             );
                             // Try to clean up the temp file
@@ -104,7 +130,7 @@ pub fn clear_cache(data_dir: &Path) {
             // Already gone — nothing to do
         }
         Err(e) => {
-            tracing::warn!(target: "cache", 
+            tracing::warn!(target: "cache",
                 "[Cache Persistence] failed to delete {}: {e}",
                 path.display()
             );

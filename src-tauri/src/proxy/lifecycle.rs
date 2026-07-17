@@ -11,7 +11,7 @@
 //!   - Exit IP verification (needs Tauri events)
 //!   - Emitting status/progress events (environment-specific)
 //!
-//! DESIGN: the Tauri path is NOT changed by this patch. Only the MCP
+//! DESIGN: the Tauri path is NOT changed by this refactor. Only the MCP
 //! server calls start_proxy_core. A future refactor can migrate the
 //! Tauri path once the MCP path is validated in production.
 
@@ -166,6 +166,7 @@ const PROXY_POLL_MS: u64 = 300;
 async fn wait_for_proxy_ready_local(pid: u32, proxy_port: u16) -> Result<u32, ProxyError> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(PROXY_TIMEOUT_SECS);
     let mut attempts = 0u32;
+    let mut http_failures = 0u32;
 
     loop {
         attempts += 1;
@@ -195,8 +196,42 @@ async fn wait_for_proxy_ready_local(pid: u32, proxy_port: u16) -> Result<u32, Pr
         .await
         {
             Ok(Ok(_stream)) => {
-                tracing::info!(target: "proxy", "Proxy ready after {attempts} attempt(s)");
-                return Ok(attempts);
+                // Port is bound. But for UDP-based outbounds (hysteria2, tuic,
+                // wireguard), the inbound bind completes HUNDREDS of milliseconds
+                // before the outbound QUIC+TLS handshake finishes.
+                //
+                // Phase 2: HTTP-through-proxy probe (800ms timeout).
+                // After 3 consecutive HTTP failures, fall back to TCP-only.
+                // (handles test listeners and non-proxy TCP endpoints).
+                if http_failures >= 3 {
+                    tracing::info!(target: "proxy", "Proxy ready after {attempts} attempt(s) (TCP only, HTTP probe unavailable)");
+                    return Ok(attempts);
+                }
+                let probe_client = match reqwest::Client::builder()
+                    .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}"))
+                        .map_err(|e| format!("probe proxy build error: {e}"))?)
+                    .timeout(std::time::Duration::from_millis(800))
+                    .build()
+                {
+                    Ok(c) => c,
+                    Err(_) => {
+                        tracing::info!(target: "proxy", "Proxy ready after {attempts} attempt(s) (TCP only, probe client failed)");
+                        return Ok(attempts);
+                    }
+                };
+                match probe_client
+                    .get("http://cp.cloudflare.com/generate_204")
+                    .send().await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        tracing::info!(target: "proxy", "Proxy ready after {attempts} attempt(s) (TCP+HTTP)");
+                        return Ok(attempts);
+                    }
+                    _ => {
+                        // Port bound but outbound not ready. Keep polling.
+                        http_failures += 1;
+                    }
+                }
             }
             _ => {}
         }

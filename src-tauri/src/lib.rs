@@ -9,14 +9,14 @@ pub mod subscription;
 #[cfg(feature = "mcp-server")]
 pub mod mcp_server;
 
+use crate::events::emit_proxy_progress;
 use crate::events::emit_status;
 use crate::events::emit_traffic;
-use crate::events::emit_proxy_progress;
 use crate::logging::{log, LogLevel, LogSource, Logger};
 use crate::profile::ProfileManager;
 use crate::proxy::cache::ServerCache;
 use crate::proxy::port_pool::PortPool;
-use crate::proxy::{ConnectionStatus, ErrorCode, ProxyManager, ProxyError, ServerProfile};
+use crate::proxy::{ConnectionStatus, ErrorCode, ProxyError, ProxyManager, ServerProfile};
 use crate::settings::{AppSettings, SettingsManager};
 use crate::subscription::SubscriptionProfile;
 use serde::Serialize;
@@ -41,8 +41,7 @@ const IP_URLS: &[&str] = &[
 /// Prevents double GeoIP download, double cache save, etc.
 /// when the frontend calls initialize_app twice (React
 /// StrictMode in dev, or effect re-runs).
-static INITIALIZED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) struct ProxyState {
     pub(crate) manager: Arc<Mutex<ProxyManager>>,
@@ -61,6 +60,7 @@ pub(crate) struct ProxyCancelState(pub(crate) StdMutex<CancellationToken>);
 use tokio_util::sync::CancellationToken;
 
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip(
     app,
     state,
@@ -115,7 +115,6 @@ async fn start_proxy(
     }
 
     let manager_arc = state.manager.clone();
-    let manager = manager_arc.lock().await;
     let settings = settings_state.lock().await.clone();
 
     // Collect all servers for smart selector group.
@@ -177,91 +176,102 @@ async fn start_proxy(
         }
     };
 
-    match manager
-        .start(&app, proxy_port, &routing_mode, &all_servers, &settings)
-        .await
-    {
-        Ok(_) => {
-            crate::proxy::PROXY_PORT.store(proxy_port, std::sync::atomic::Ordering::Relaxed);
-            emit_proxy_progress(&app, "verifying", "Waiting for proxy to become ready…");
+    // Scope the manager lock to just .start() — release before long-running
+    // verification to avoid blocking concurrent commands.
+    let (pid_opt, proxy_port) = {
+        let manager = manager_arc.lock().await;
+        match manager
+            .start(&app, proxy_port, &routing_mode, &all_servers, &settings)
+            .await
+        {
+            Ok(_) => {
+                crate::proxy::PROXY_PORT.store(proxy_port, std::sync::atomic::Ordering::Relaxed);
+                (manager.process_pid(), proxy_port)
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    // Manager lock released here.
+
+    emit_proxy_progress(&app, "verifying", "Waiting for proxy to become ready…");
+    log(
+        &app,
+        &logger,
+        LogLevel::Info,
+        LogSource::Proxy,
+        "Verifying proxy connection...".into(),
+    );
+
+    let result = match pid_opt {
+        Some(pid) => wait_for_proxy_ready(pid, proxy_port)
+            .await
+            .map_err(|e| ProxyError::process(ErrorCode::ProcessNotReachable, e)),
+        None => Err(ProxyError::process(
+            ErrorCode::ProcessStartFailed,
+            "no PID after start",
+        )),
+    };
+    match result {
+        Ok(attempts) => {
             log(
                 &app,
                 &logger,
                 LogLevel::Info,
                 LogSource::Proxy,
-                "Verifying proxy connection...".into(),
+                format!("Proxy ready after {attempts} attempt(s)"),
             );
+            log(
+                &app,
+                &logger,
+                LogLevel::Success,
+                LogSource::Proxy,
+                format!("Proxy connected to {}", profile.display_name()),
+            );
+            emit_status(&app, ConnectionStatus::Connected);
 
-            let result = match manager.process_pid() {
-                Some(pid) => wait_for_proxy_ready(pid, proxy_port)
-                    .await
-                    .map_err(|e| ProxyError::process(ErrorCode::ProcessNotReachable, e)),
-                None => Err(ProxyError::process(
-                    ErrorCode::ProcessStartFailed,
-                    "no PID after start",
-                )),
+            // Verify proxy actually routes traffic — make real request through it.
+            // Check CDN status from the profile manager (where enrich_loaded
+            // sets it based on GeoIP/CIDR lookup), NOT from the frontend's
+            // profile which may have stale/missing behind_cdn.
+            let is_cdn = {
+                let pm = profile_state.manager.lock().await;
+                pm.list()
+                    .iter()
+                    .any(|p| p.servers.iter().any(|s| s.id == profile.id && s.behind_cdn))
             };
-            match result {
-                Ok(attempts) => {
-                    log(
-                        &app,
-                        &logger,
-                        LogLevel::Info,
-                        LogSource::Proxy,
-                        format!("Proxy ready after {attempts} attempt(s)"),
-                    );
-                    log(
-                        &app,
-                        &logger,
-                        LogLevel::Success,
-                        LogSource::Proxy,
-                        format!("Proxy connected to {}", profile.display_name()),
-                    );
-                    emit_status(&app, ConnectionStatus::Connected);
-
-                    // Verify proxy actually routes traffic — make real request through it.
-                    // Check CDN status from the profile manager (where enrich_loaded
-                    // sets it based on GeoIP/CIDR lookup), NOT from the frontend's
-                    // profile which may have stale/missing behind_cdn.
-                    let is_cdn = {
-                        let pm = profile_state.manager.lock().await;
-                        pm.list()
-                            .iter()
-                            .any(|p| p.servers.iter().any(|s| s.id == profile.id && s.behind_cdn))
-                    };
-                    if is_cdn {
-                        // 🚫 ANTI-REGRESSION: проверяем инварианту активного сервера.
-                        // Это единственная точка в runtime (между refresh-циклами),
-                        // где мы можем поймать нарушение. Если CDN-сервер имеет exit,
-                        // это означает, что баг произошёл где-то между enrich_loaded
-                        // и стартом прокси. Без этой проверки баг может существовать
-                        // часами, пока не сработает enrich_loaded при следующем старте.
-                        {
-                            let pm_check = profile_state.manager.lock().await;
-                            for p in pm_check.list() {
-                                for s in &p.servers {
-                                    if s.id == profile.id {
-                                        s.assert_no_cdn_exit_data("start_proxy::active_server");
-                                        break;
-                                    }
-                                }
+            if is_cdn {
+                // 🚫 ANTI-REGRESSION: проверяем инварианту активного сервера.
+                // Это единственная точка в runtime (между refresh-циклами),
+                // где мы можем поймать нарушение. Если CDN-сервер имеет exit,
+                // это означает, что баг произошёл где-то между enrich_loaded
+                // и стартом прокси. Без этой проверки баг может существовать
+                // часами, пока не сработает enrich_loaded при следующем старте.
+                {
+                    let pm_check = profile_state.manager.lock().await;
+                    for p in pm_check.list() {
+                        for s in &p.servers {
+                            if s.id == profile.id {
+                                s.assert_no_cdn_exit_data("start_proxy::active_server");
+                                break;
                             }
                         }
-                        log(
-                            &app,
-                            &logger,
-                            LogLevel::Info,
-                            LogSource::Proxy,
-                            format!(
-                                "CDN server {} — skipping outlet IP verification (dynamic exit IP)",
-                                profile.display_name(),
-                            ),
-                        );
-                        // Log confirmation that CDN was detected via profile manager
-                        // (the frontend deliberately doesn't send behind_cdn, so the
-                        // profile's `behind_cdn` field from JSON defaults to false).
-                        if !profile.behind_cdn {
-                            log(
+                    }
+                }
+                log(
+                    &app,
+                    &logger,
+                    LogLevel::Info,
+                    LogSource::Proxy,
+                    format!(
+                        "CDN server {} — skipping outlet IP verification (dynamic exit IP)",
+                        profile.display_name(),
+                    ),
+                );
+                // Log confirmation that CDN was detected via profile manager
+                // (the frontend deliberately doesn't send behind_cdn, so the
+                // profile's `behind_cdn` field from JSON defaults to false).
+                if !profile.behind_cdn {
+                    log(
                                 &app,
                                 &logger,
                                 LogLevel::Info,
@@ -271,32 +281,26 @@ async fn start_proxy(
                                     profile.display_name(),
                                 ),
                             );
-                        }
-                    } else {
-                        let mut cb = reqwest::Client::builder().timeout(Duration::from_secs(10));
-                        // In proxy modes traffic goes through the mixed inbound — route through proxy
-                        if let Ok(proxy) =
-                            reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}"))
-                        {
-                            cb = cb.proxy(proxy);
-                        }
-                        let check_client = cb.build().ok();
-                        if let Some(c) = check_client {
-                            let mut got_response = false;
-                            for url in IP_URLS {
-                                if let Ok(resp) = c.get(*url).send().await {
-                                    if resp.status().is_success() {
-                                        if let Ok(text) = resp.text().await {
-                                            let ip = text.trim().to_string();
-                                            if !ip.is_empty()
-                                                && ip
-                                                    .parse::<std::net::IpAddr>()
-                                                    .is_ok()
-                                            {
-                                                got_response = true;
+                }
+            } else {
+                let mut cb = reqwest::Client::builder().timeout(Duration::from_secs(10));
+                // In proxy modes traffic goes through the mixed inbound — route through proxy
+                if let Ok(proxy) = reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}")) {
+                    cb = cb.proxy(proxy);
+                }
+                let check_client = cb.build().ok();
+                if let Some(c) = check_client {
+                    let mut got_response = false;
+                    for url in IP_URLS {
+                        if let Ok(resp) = c.get(*url).send().await {
+                            if resp.status().is_success() {
+                                if let Ok(text) = resp.text().await {
+                                    let ip = text.trim().to_string();
+                                    if !ip.is_empty() && ip.parse::<std::net::IpAddr>().is_ok() {
+                                        got_response = true;
 
-                                                if crate::proxy::geoip::is_cdn_entry_ip(&ip) {
-                                                    log(
+                                        if crate::proxy::geoip::is_cdn_entry_ip(&ip) {
+                                            log(
                                                         &app,
                                                         &logger,
                                                         LogLevel::Info,
@@ -308,414 +312,384 @@ async fn start_proxy(
                                                             profile.id, profile.server, profile.port
                                                         )
                                                     );
-                                                } else {
-                                                    log(
-                                                        &app,
-                                                        &logger,
-                                                        LogLevel::Info,
-                                                        LogSource::Proxy,
-                                                        format!("Proxy verified (exit IP: {ip})"),
-                                                    );
-                                                }
-                                                // exit-ip-changed removed — exit IP comes from
-                                                // profiles.json via activeServer.exit*.
-                                                // Health check IP fetch stays (verifies proxy works).
-                                                break;
-                                            }
+                                        } else {
+                                            log(
+                                                &app,
+                                                &logger,
+                                                LogLevel::Info,
+                                                LogSource::Proxy,
+                                                format!("Proxy verified (exit IP: {ip})"),
+                                            );
                                         }
+                                        // exit-ip-changed removed — exit IP comes from
+                                        // profiles.json via activeServer.exit*.
+                                        // Health check IP fetch stays (verifies proxy works).
+                                        break;
                                     }
-                                }
-                            }
-                            if !got_response {
-                                // exit IP verification failed — server may be CDN.
-                                // Try alternative servers via Clash API switch.
-                                let mut switched = false;
-                                let stats_port = crate::proxy::CLASH_API_PORT
-                                    .load(std::sync::atomic::Ordering::Relaxed);
-                                if stats_port > 0 && all_servers.len() > 1 {
-                                    for idx in 1..all_servers.len() {
-                                        let tag = format!("proxy-{idx}");
-                                        log(
-                                            &app,
-                                            &logger,
-                                            LogLevel::Info,
-                                            LogSource::Proxy,
-                                            format!(
-                                                "Switching to {tag} ({})...",
-                                                all_servers[idx].display_name()
-                                            ),
-                                        );
-                                        let switch_url =
-                                            format!("http://127.0.0.1:{stats_port}/proxies/proxy");
-                                        let body = serde_json::json!({ "name": tag });
-                                        let client = reqwest::Client::new();
-                                        if client.put(&switch_url).json(&body).send().await.is_ok()
-                                        {
-                                            tokio::time::sleep(Duration::from_secs(2)).await;
-                                            // Re-verify exit IP through the new server
-                                            let mut cb = reqwest::Client::builder()
-                                                .timeout(Duration::from_secs(10));
-                                            if let Ok(proxy) = reqwest::Proxy::all(format!(
-                                                "http://127.0.0.1:{proxy_port}"
-                                            )) {
-                                                cb = cb.proxy(proxy);
-                                            }
-                                            if let Some(c) = cb.build().ok() {
-                                                for url in IP_URLS {
-                                                    if let Ok(resp) = c.get(*url).send().await {
-                                                        if resp.status().is_success() {
-                                                            if let Ok(text) = resp.text().await {
-                                                                let ip = text.trim().to_string();
-                                                                if !ip.is_empty()
-                                                                    && ip.parse::<std::net::IpAddr>().is_ok()
-                                                                {
-                                                                    if crate::proxy::geoip::is_cdn_entry_ip(&ip) {
-                                                                        tracing::info!(
-                                                                            target: "proxy",
-                                                                            "Proxy verified (exit IP: {ip}) via {tag} — outlet is in CDN ranges \
-                                                                             but entry IP was not CDN-marked. Keeping exit IP (outlet is egress, \
-                                                                             not entry). Server {} ({}:{}).",
-                                                                            all_servers[idx].id,
-                                                                            all_servers[idx].server,
-                                                                            all_servers[idx].port
-                                                                        );
-                                                                    } else {
-                                                                        tracing::info!(target: "proxy", "Proxy verified (exit IP: {ip}) via {tag}");
-                                                                    }
-                                                                    // Fallback: emit failover-occurred so frontend updates activeServer.
-                                                                    // Exit IP data comes from profiles.json (new active server's exit* fields).
-                                                                    let _ = app.emit(
-                                                                        "failover-occurred",
-                                                                        all_servers[idx].id.clone(),
-                                                                    );
-                                                                    switched = true;
-                                                                    break;
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            if switched {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                if !switched {
-                                    tracing::error!(target: "proxy", "Proxy connection verified but exit IP unavailable — traffic may not be routing through proxy");
                                 }
                             }
                         }
                     }
-
-                    // Save for auto-reconnect on unexpected exit
-                    {
-                        let mut last = crate::proxy::LAST_PROFILE
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        *last = Some(crate::proxy::LastConnection {
-                            all_servers: all_servers.clone(),
-                            routing_mode: routing_mode.clone(),
-                            proxy_port,
-                        });
-                    }
-
-                    // Watchdog: detect unexpected process exit → auto-reconnect
-                    let watch_pid = manager.process_pid();
-                    if let Some(pid) = watch_pid {
-                        let app_clone = app.clone();
-                        let mgr_arc = manager_arc.clone();
-                        let cancel_watch = cancel.clone();
-                        tokio::spawn(async move {
-                            loop {
-                                if cancel_watch.is_cancelled() {
-                                    break;
-                                }
-                                tokio::time::sleep(Duration::from_secs(2)).await;
-
-                                // Guard: If this watchdog is no longer tracking the active PID, exit.
-                                // This prevents obsolete watchdogs from triggering on old PIDs after a reconnect or manual disconnect.
-                                {
-                                    let mgr = mgr_arc.lock().await;
-                                    if mgr.process_pid() != Some(pid) {
+                    if !got_response {
+                        // exit IP verification failed — server may be CDN.
+                        // Try alternative servers via Clash API switch.
+                        let mut switched = false;
+                        let stats_port =
+                            crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                        if stats_port > 0 && all_servers.len() > 1 {
+                            for (idx, _alt_server) in all_servers.iter().enumerate().skip(1) {
+                                let tag = format!("proxy-{idx}");
+                                log(
+                                    &app,
+                                    &logger,
+                                    LogLevel::Info,
+                                    LogSource::Proxy,
+                                    format!(
+                                        "Switching to {tag} ({})...",
+                                        all_servers[idx].display_name()
+                                    ),
+                                );
+                                let switch_url =
+                                    format!("http://127.0.0.1:{stats_port}/proxies/proxy");
+                                let body = serde_json::json!({ "name": tag });
+                                let client = reqwest::Client::new();
+                                if client.put(&switch_url).json(&body).send().await.is_ok() {
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                    // Re-verify exit IP through the new server
+                                    let mut cb =
+                                        reqwest::Client::builder().timeout(Duration::from_secs(10));
+                                    if let Ok(proxy) = reqwest::Proxy::all(format!(
+                                        "http://127.0.0.1:{proxy_port}"
+                                    )) {
+                                        cb = cb.proxy(proxy);
+                                    }
+                                    if let Ok(c) = cb.build() {
+                                        for url in IP_URLS {
+                                            if let Ok(resp) = c.get(*url).send().await {
+                                                if resp.status().is_success() {
+                                                    if let Ok(text) = resp.text().await {
+                                                        let ip = text.trim().to_string();
+                                                        if !ip.is_empty()
+                                                            && ip
+                                                                .parse::<std::net::IpAddr>()
+                                                                .is_ok()
+                                                        {
+                                                            if crate::proxy::geoip::is_cdn_entry_ip(
+                                                                &ip,
+                                                            ) {
+                                                                tracing::info!(
+                                                                    target: "proxy",
+                                                                    "Proxy verified (exit IP: {ip}) via {tag} — outlet is in CDN ranges \
+                                                                     but entry IP was not CDN-marked. Keeping exit IP (outlet is egress, \
+                                                                     not entry). Server {} ({}:{}).",
+                                                                    all_servers[idx].id,
+                                                                    all_servers[idx].server,
+                                                                    all_servers[idx].port
+                                                                );
+                                                            } else {
+                                                                tracing::info!(target: "proxy", "Proxy verified (exit IP: {ip}) via {tag}");
+                                                            }
+                                                            // Fallback: emit failover-occurred so frontend updates activeServer.
+                                                            // Exit IP data comes from profiles.json (new active server's exit* fields).
+                                                            let _ = app.emit(
+                                                                "failover-occurred",
+                                                                all_servers[idx].id.clone(),
+                                                            );
+                                                            switched = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if switched {
                                         break;
                                     }
                                 }
+                            }
+                        }
+                        if !switched {
+                            tracing::error!(target: "proxy", "Proxy connection verified but exit IP unavailable — traffic may not be routing through proxy");
+                        }
+                    }
+                }
+            }
 
-                                if !is_process_alive(pid) {
-                                    // Stop if the user disconnected (LAST_PROFILE cleared)
+            // Save for auto-reconnect on unexpected exit
+            {
+                let mut last = crate::proxy::LAST_PROFILE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                *last = Some(crate::proxy::LastConnection {
+                    all_servers: all_servers.clone(),
+                    routing_mode: routing_mode.clone(),
+                    proxy_port,
+                });
+            }
+
+            // Watchdog: detect unexpected process exit → auto-reconnect
+            if let Some(pid) = pid_opt {
+                let app_clone = app.clone();
+                let mgr_arc = manager_arc.clone();
+                let cancel_watch = cancel.clone();
+                tokio::spawn(async move {
+                    loop {
+                        if cancel_watch.is_cancelled() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+
+                        // Guard: If this watchdog is no longer tracking the active PID, exit.
+                        // This prevents obsolete watchdogs from triggering on old PIDs after a reconnect or manual disconnect.
+                        {
+                            let mgr = mgr_arc.lock().await;
+                            if mgr.process_pid() != Some(pid) {
+                                break;
+                            }
+                        }
+
+                        if !is_process_alive(pid) {
+                            // Stop if the user disconnected (LAST_PROFILE cleared)
+                            {
+                                let lock = crate::proxy::LAST_PROFILE
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                if lock.is_none() {
+                                    break; // intentional stop
+                                }
+                            }
+
+                            tracing::warn!(target: "process", "Connection lost — reconnecting...");
+
+                            // Auto-reconnect up to 3 times.
+                            // Note: we do NOT call mgr.stop() here — the process is already dead,
+                            // and mgr.stop() would clear the PID guard causing mgr.status()
+                            // to always return Disconnected.
+                            let last = {
+                                let lock = crate::proxy::LAST_PROFILE
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                lock.clone()
+                            };
+                            let mut reconnected = false;
+                            if let Some(ref last) = last {
+                                for attempt in 1..=3 {
+                                    tokio::time::sleep(Duration::from_secs(attempt * 2)).await;
+
+                                    // User might have disconnected while we were sleeping
                                     {
                                         let lock = crate::proxy::LAST_PROFILE
                                             .lock()
                                             .unwrap_or_else(|e| e.into_inner());
                                         if lock.is_none() {
-                                            break; // intentional stop
+                                            break;
                                         }
                                     }
 
-                                    tracing::warn!(target: "process", "Connection lost — reconnecting...");
+                                    tracing::info!(target: "process", "Reconnect attempt {attempt}...");
 
-                                    // Auto-reconnect up to 3 times.
-                                    // Note: we do NOT call mgr.stop() here — the process is already dead,
-                                    // and mgr.stop() would clear the PID guard causing mgr.status()
-                                    // to always return Disconnected.
-                                    let last = {
-                                        let lock = crate::proxy::LAST_PROFILE
-                                            .lock()
-                                            .unwrap_or_else(|e| e.into_inner());
-                                        lock.clone()
-                                    };
-                                    let mut reconnected = false;
-                                    if let Some(ref last) = last {
-                                        for attempt in 1..=3 {
-                                            tokio::time::sleep(Duration::from_secs(attempt * 2))
-                                                .await;
+                                    let mgr = mgr_arc.lock().await;
+                                    let settings = app_clone
+                                        .state::<Mutex<crate::settings::AppSettings>>()
+                                        .lock()
+                                        .await
+                                        .clone();
+                                    let ok = mgr
+                                        .start(
+                                            &app_clone,
+                                            last.proxy_port,
+                                            &last.routing_mode,
+                                            &last.all_servers,
+                                            &settings,
+                                        )
+                                        .await
+                                        .is_ok();
+                                    drop(mgr);
 
-                                            // User might have disconnected while we were sleeping
-                                            {
-                                                let lock = crate::proxy::LAST_PROFILE
-                                                    .lock()
-                                                    .unwrap_or_else(|e| e.into_inner());
-                                                if lock.is_none() {
-                                                    break;
-                                                }
-                                            }
+                                    if ok {
+                                        tracing::info!(target: "process", "Reconnected successfully");
+                                        emit_status(&app_clone, ConnectionStatus::Connected);
+                                        reconnected = true;
+                                        break;
+                                    }
+                                }
+                            }
 
-                                            tracing::info!(target: "process", "Reconnect attempt {attempt}...");
+                            if !reconnected {
+                                tracing::error!(target: "process", "Auto-reconnect failed after 3 attempts");
 
+                                // Guard: if user disconnected during reconnect delay, don't activate kill switch
+                                let still_wants_connection = {
+                                    let lock = crate::proxy::LAST_PROFILE
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner());
+                                    lock.is_some()
+                                };
+
+                                if !still_wants_connection {
+                                    emit_status(&app_clone, ConnectionStatus::Disconnected);
+                                } else {
+                                    let settings = app_clone
+                                        .state::<Mutex<crate::settings::AppSettings>>()
+                                        .lock()
+                                        .await
+                                        .clone();
+
+                                    if settings.kill_switch {
+                                        if let Some(ref last) = last {
+                                            tracing::warn!(target: "process", "Activating Kill Switch: blocking all traffic on port {}", last.proxy_port);
                                             let mgr = mgr_arc.lock().await;
-                                            let settings = app_clone
-                                                .state::<Mutex<crate::settings::AppSettings>>()
-                                                .lock()
-                                                .await
-                                                .clone();
-                                            let ok = mgr
-                                                .start(
+                                            if let Err(e) = mgr
+                                                .activate_kill_switch(
                                                     &app_clone,
                                                     last.proxy_port,
                                                     &last.routing_mode,
-                                                    &last.all_servers,
-                                                    &settings,
                                                 )
                                                 .await
-                                                .is_ok();
-                                            drop(mgr);
-
-                                            if ok {
-                                                tracing::info!(target: "process", "Reconnected successfully");
-                                                emit_status(
-                                                    &app_clone,
-                                                    ConnectionStatus::Connected,
-                                                );
-                                                reconnected = true;
-                                                break;
+                                            {
+                                                tracing::error!(target: "process", "Kill Switch activation failed: {e}");
                                             }
                                         }
-                                    }
-
-                                    if !reconnected {
-                                        tracing::error!(target: "process", "Auto-reconnect failed after 3 attempts");
-
-                                        // Guard: if user disconnected during reconnect delay, don't activate kill switch
-                                        let still_wants_connection = {
-                                            let lock = crate::proxy::LAST_PROFILE
-                                                .lock()
-                                                .unwrap_or_else(|e| e.into_inner());
-                                            lock.is_some()
-                                        };
-
-                                        if !still_wants_connection {
-                                            emit_status(&app_clone, ConnectionStatus::Disconnected);
-                                        } else {
-                                            let settings = app_clone
-                                                .state::<Mutex<crate::settings::AppSettings>>()
-                                                .lock()
-                                                .await
-                                                .clone();
-
-                                            if settings.kill_switch {
-                                                if let Some(ref last) = last {
-                                                    tracing::warn!(target: "process", "Activating Kill Switch: blocking all traffic on port {}", last.proxy_port);
-                                                    let mgr = mgr_arc.lock().await;
-                                                    if let Err(e) = mgr
-                                                        .activate_kill_switch(
-                                                            &app_clone,
-                                                            last.proxy_port,
-                                                            &last.routing_mode,
-                                                        )
-                                                        .await
-                                                    {
-                                                        tracing::error!(target: "process", "Kill Switch activation failed: {e}");
-                                                    }
-                                                }
-                                                emit_status(&app_clone, ConnectionStatus::Error("Connection lost. Kill Switch active (Network blocked).".into()));
-                                            } else {
-                                                emit_status(
-                                                    &app_clone,
-                                                    ConnectionStatus::Disconnected,
-                                                );
-                                            }
-                                        }
-                                        break;
+                                        emit_status(&app_clone, ConnectionStatus::Error("Connection lost. Kill Switch active (Network blocked).".into()));
+                                    } else {
+                                        emit_status(&app_clone, ConnectionStatus::Disconnected);
                                     }
                                 }
+                                break;
                             }
-                        });
+                        }
                     }
-
-                    // ── Failover monitor ────────────────────────────────────────
-                    // Отдельный легковесный опрос Clash API (каждые 5 с).
-                    // При смене outbound передаёт фронту точный server ID.
-                    let fail_port =
-                        crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
-                    if fail_port > 0 && all_servers.len() > 1 {
-                        let app_fail = app.clone();
-                        let servers_fail = all_servers.clone();
-                        let mgr_fail = manager_arc.clone();
-                        let cancel_fail = cancel.clone();
-                        tokio::spawn(async move {
-                            let client = reqwest::Client::builder()
-                                .no_proxy()
-                                .timeout(Duration::from_secs(2))
-                                .build()
-                                .unwrap_or_default();
-                            let api_url = format!("http://127.0.0.1:{fail_port}/proxies/proxy");
-                            let mut current_tag = String::new();
-                            loop {
-                                if cancel_fail.is_cancelled() {
-                                    break;
-                                }
-                                tokio::time::sleep(Duration::from_secs(5)).await;
-                                {
-                                    let mgr = mgr_fail.lock().await;
-                                    if mgr.status() == crate::proxy::ConnectionStatus::Disconnected
-                                    {
-                                        break;
-                                    }
-                                }
-                                if let Ok(resp) = client.get(&api_url).send().await {
-                                    if let Ok(body) = resp.json::<serde_json::Value>().await {
-                                        if let Some(now_tag) =
-                                            body.get("now").and_then(|v| v.as_str())
-                                        {
-                                            if !current_tag.is_empty() && now_tag != current_tag {
-                                                tracing::info!(
-                                                    target: "proxy",
-                                                    "Seamless failover detected: {current_tag} -> {now_tag}",
-                                                );
-                                                if let Some(idx_str) =
-                                                    now_tag.strip_prefix("proxy-")
-                                                {
-                                                    if let Ok(idx) = idx_str.parse::<usize>() {
-                                                        if let Some(srv) = servers_fail.get(idx) {
-                                                            let _ = app_fail.emit(
-                                                                "failover-occurred",
-                                                                srv.id.clone(),
-                                                            );
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            current_tag = now_tag.to_string();
-                                        }
-                                    }
-                                }
-                            }
-                        });
-                    }
-
-                    // Traffic stats: poll Clash API every second
-                    // /traffic returns cumulative bytes — we compute speed as delta/timediff
-                    let stats_port =
-                        crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
-                    if stats_port > 0 {
-                        let app_clone = app.clone();
-                        let mgr_arc = manager_arc.clone();
-                        let cancel_stats = cancel.clone();
-                        tokio::spawn(async move {
-                            let client = reqwest::Client::builder()
-                                .no_proxy()
-                                .timeout(Duration::from_secs(2))
-                                .build()
-                                .unwrap_or_default();
-                            let url = format!("http://127.0.0.1:{stats_port}/traffic");
-                            loop {
-                                if cancel_stats.is_cancelled() {
-                                    break;
-                                }
-                                // Stop polling if proxy disconnected
-                                {
-                                    let mgr = mgr_arc.lock().await;
-                                    if mgr.status() == crate::proxy::ConnectionStatus::Disconnected
-                                    {
-                                        break;
-                                    }
-                                }
-                                if let Ok(mut resp) = client.get(&url).send().await {
-                                    let mut buf = String::new();
-                                    loop {
-                                        match resp.chunk().await {
-                                            Ok(Some(bytes)) => {
-                                                buf.push_str(&String::from_utf8_lossy(&bytes));
-                                                while let Some(newline) = buf.find('\n') {
-                                                    let line = buf[..newline].trim().to_string();
-                                                    buf = buf[newline + 1..].to_string();
-                                                    // Parse via serde — handles any JSON formatting
-                                                    if let Ok(traffic) =
-                                                        serde_json::from_str::<ClashTraffic>(&line)
-                                                    {
-                                                        // Clash API returns B/s; convert to MiB/s
-                                                        let speed_up = traffic.up / 1024.0 / 1024.0;
-                                                        let speed_down =
-                                                            traffic.down / 1024.0 / 1024.0;
-                                                        emit_traffic(
-                                                            &app_clone, speed_up, speed_down,
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            Ok(None) => break,
-                                            Err(_) => break,
-                                        }
-                                    }
-                                }
-                                tokio::time::sleep(Duration::from_millis(500)).await;
-                            }
-                        });
-                    }
-
-                    Ok(proxy_port)
-                }
-                Err(e) => {
-                    let _ = manager.stop(&app).await;
-                    let msg = format!("Proxy not reachable: {e}");
-                    // Downgrade to warn when the error is user-initiated cancellation.
-                    let is_cancelled = msg.contains("cancelled");
-                    if is_cancelled {
-                        tracing::warn!(target: "proxy", "{msg}");
-                    } else {
-                        tracing::error!(target: "proxy", "{msg}");
-                    }
-                    // Don't emit Error if the user cancelled — the
-                    // cancellation already emitted Disconnected.
-                    if !crate::proxy::CONNECTION_CANCELLING.load(std::sync::atomic::Ordering::SeqCst) {
-                        emit_status(&app, ConnectionStatus::Error(msg.clone()));
-                    }
-                    Err(ProxyError::process(ErrorCode::ProcessNotReachable, msg))
-                }
+                });
             }
+
+            // ── Failover monitor ────────────────────────────────────────
+            // Отдельный легковесный опрос Clash API (каждые 5 с).
+            // При смене outbound передаёт фронту точный server ID.
+            let fail_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+            if fail_port > 0 && all_servers.len() > 1 {
+                let app_fail = app.clone();
+                let servers_fail = all_servers.clone();
+                let mgr_fail = manager_arc.clone();
+                let cancel_fail = cancel.clone();
+                tokio::spawn(async move {
+                    let client = reqwest::Client::builder()
+                        .no_proxy()
+                        .timeout(Duration::from_secs(2))
+                        .build()
+                        .unwrap_or_default();
+                    let api_url = format!("http://127.0.0.1:{fail_port}/proxies/proxy");
+                    let mut current_tag = String::new();
+                    loop {
+                        if cancel_fail.is_cancelled() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        {
+                            let mgr = mgr_fail.lock().await;
+                            if mgr.status() == crate::proxy::ConnectionStatus::Disconnected {
+                                break;
+                            }
+                        }
+                        if let Ok(resp) = client.get(&api_url).send().await {
+                            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                                if let Some(now_tag) = body.get("now").and_then(|v| v.as_str()) {
+                                    if !current_tag.is_empty() && now_tag != current_tag {
+                                        tracing::info!(
+                                            target: "proxy",
+                                            "Seamless failover detected: {current_tag} -> {now_tag}",
+                                        );
+                                        if let Some(idx_str) = now_tag.strip_prefix("proxy-") {
+                                            if let Ok(idx) = idx_str.parse::<usize>() {
+                                                if let Some(srv) = servers_fail.get(idx) {
+                                                    let _ = app_fail
+                                                        .emit("failover-occurred", srv.id.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    current_tag = now_tag.to_string();
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Traffic stats: poll Clash API every second
+            // /traffic returns cumulative bytes — we compute speed as delta/timediff
+            let stats_port =
+                crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+            if stats_port > 0 {
+                let app_clone = app.clone();
+                let mgr_arc = manager_arc.clone();
+                let cancel_stats = cancel.clone();
+                tokio::spawn(async move {
+                    let client = reqwest::Client::builder()
+                        .no_proxy()
+                        .timeout(Duration::from_secs(2))
+                        .build()
+                        .unwrap_or_default();
+                    let url = format!("http://127.0.0.1:{stats_port}/traffic");
+                    loop {
+                        if cancel_stats.is_cancelled() {
+                            break;
+                        }
+                        // Stop polling if proxy disconnected
+                        {
+                            let mgr = mgr_arc.lock().await;
+                            if mgr.status() == crate::proxy::ConnectionStatus::Disconnected {
+                                break;
+                            }
+                        }
+                        if let Ok(mut resp) = client.get(&url).send().await {
+                            let mut buf = String::new();
+                            loop {
+                                match resp.chunk().await {
+                                    Ok(Some(bytes)) => {
+                                        buf.push_str(&String::from_utf8_lossy(&bytes));
+                                        while let Some(newline) = buf.find('\n') {
+                                            let line = buf[..newline].trim().to_string();
+                                            buf = buf[newline + 1..].to_string();
+                                            // Parse via serde — handles any JSON formatting
+                                            if let Ok(traffic) =
+                                                serde_json::from_str::<ClashTraffic>(&line)
+                                            {
+                                                // Clash API returns B/s; convert to MiB/s
+                                                let speed_up = traffic.up / 1024.0 / 1024.0;
+                                                let speed_down = traffic.down / 1024.0 / 1024.0;
+                                                emit_traffic(&app_clone, speed_up, speed_down);
+                                            }
+                                        }
+                                    }
+                                    Ok(None) => break,
+                                    Err(_) => break,
+                                }
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                });
+            }
+
+            Ok(proxy_port)
         }
         Err(e) => {
-            log(
-                &app,
-                &logger,
-                LogLevel::Error,
-                LogSource::Proxy,
-                format!("Connection failed: {e}"),
-            );
-            emit_status(&app, ConnectionStatus::Error(e.to_string()));
-            Err(e)
+            let _ = manager_arc.lock().await.stop(&app).await;
+            let msg = format!("Proxy not reachable: {e}");
+            // Downgrade to warn when the error is user-initiated cancellation.
+            let is_cancelled = msg.contains("cancelled");
+            if is_cancelled {
+                tracing::warn!(target: "proxy", "{msg}");
+            } else {
+                tracing::error!(target: "proxy", "{msg}");
+            }
+            // Don't emit Error if the user cancelled — the
+            // cancellation already emitted Disconnected.
+            if !crate::proxy::CONNECTION_CANCELLING.load(std::sync::atomic::Ordering::SeqCst) {
+                emit_status(&app, ConnectionStatus::Error(msg.clone()));
+            }
+            Err(ProxyError::process(ErrorCode::ProcessNotReachable, msg))
         }
     }
 }
@@ -755,7 +729,8 @@ async fn stop_proxy(
     // Clear ACTIVE_SERVER_ID so subsequent CDN checks don't target stale server.
     {
         let mut active = crate::proxy::ACTIVE_SERVER_ID
-            .lock().unwrap_or_else(|e| e.into_inner());
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *active = None;
     }
     log_stop(
@@ -874,10 +849,7 @@ async fn stop_proxy(
     // it with a fresh one so the next start_proxy gets a clean token.
     {
         let proxy_cancel = app.state::<ProxyCancelState>();
-        let mut guard = proxy_cancel
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = proxy_cancel.0.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::mem::replace(&mut *guard, CancellationToken::new());
         old.cancel();
     }
@@ -912,10 +884,7 @@ async fn cancel_connect(
     //    failover, traffic).
     {
         let proxy_cancel = app.state::<ProxyCancelState>();
-        let mut guard = proxy_cancel
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut guard = proxy_cancel.0.lock().unwrap_or_else(|e| e.into_inner());
         let old = std::mem::replace(&mut *guard, CancellationToken::new());
         old.cancel();
     }
@@ -934,7 +903,8 @@ async fn cancel_connect(
     // Clear ACTIVE_SERVER_ID so subsequent CDN checks don't target stale server.
     {
         let mut active = crate::proxy::ACTIVE_SERVER_ID
-            .lock().unwrap_or_else(|e| e.into_inner());
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *active = None;
     }
 
@@ -1111,13 +1081,12 @@ async fn add_subscription(
                 &logger,
                 LogLevel::Error,
                 LogSource::Subscription,
-                format!("Failed to add subscription: {e}"),
+                format!("Failed to add subscription '{name}': {e}"),
             );
             Err(e)
         }
     }
 }
-
 
 #[tauri::command]
 async fn remove_subscription(
@@ -1322,16 +1291,12 @@ async fn refresh_subscription(
     // ═══ Phase 1: Brief read lock — get URL + old servers ═══════════
     let (url, old_servers) = {
         let mgr = state.manager.lock().await;
-        let idx = mgr
-            .list()
-            .iter()
-            .position(|p| p.id == id)
-            .ok_or_else(|| {
-                ProxyError::subscription(
-                    crate::proxy::ErrorCode::SubscriptionNotFound,
-                    "Profile not found",
-                )
-            })?;
+        let idx = mgr.list().iter().position(|p| p.id == id).ok_or_else(|| {
+            ProxyError::subscription(
+                crate::proxy::ErrorCode::SubscriptionNotFound,
+                "Profile not found",
+            )
+        })?;
         (mgr.list()[idx].url.clone(), mgr.list()[idx].servers.clone())
     }; // lock released
 
@@ -1340,7 +1305,12 @@ async fn refresh_subscription(
 
     let fetch_result = match &url {
         u if u.starts_with("http://") || u.starts_with("https://") => {
-            match crate::subscription::fetch_subscription(u, crate::profile::proxy_port_from_app(&app)).await {
+            match crate::subscription::fetch_subscription(
+                u,
+                crate::profile::proxy_port_from_app(&app),
+            )
+            .await
+            {
                 Ok(s) => Ok(s),
                 Err(e) => {
                     if crate::profile::proxy_port_from_app(&app).is_some() {
@@ -1431,10 +1401,13 @@ async fn refresh_subscription(
     }
 
     // Preserve exit IP data
-    let old_exit: std::collections::HashMap<
-        String,
-        (Option<String>, Option<String>, Option<String>, Option<String>),
-    > = old_servers
+    type ExitData = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let old_exit: std::collections::HashMap<String, ExitData> = old_servers
         .iter()
         .map(|s| {
             (
@@ -1447,6 +1420,11 @@ async fn refresh_subscription(
                 ),
             )
         })
+        .collect();
+    // Also preserve ping_ms so the UI doesn't show "—" after refresh.
+    let old_ping: std::collections::HashMap<String, Option<u64>> = old_servers
+        .iter()
+        .map(|s| (s.id.clone(), s.ping_ms))
         .collect();
 
     // process_servers: TCP ping + batch_test + GeoIP (long, no lock)
@@ -1465,11 +1443,20 @@ async fn refresh_subscription(
                 server.exit_city_name = saved.3.clone();
             }
         }
+        // Restore ping_ms — don't overwrite if process_servers already set it.
+        if server.ping_ms.is_none() {
+            if let Some(ping) = old_ping.get(&server.id) {
+                server.ping_ms = *ping;
+            }
+        }
     }
 
     // Fetch traffic info (no lock, URL from Phase 1)
-    let traffic =
-        crate::subscription::fetch_subscription_traffic(&url, crate::profile::proxy_port_from_app(&app)).await;
+    let traffic = crate::subscription::fetch_subscription_traffic(
+        &url,
+        crate::profile::proxy_port_from_app(&app),
+    )
+    .await;
 
     if servers.is_empty() {
         return Err(ProxyError::subscription(
@@ -1485,7 +1472,7 @@ async fn refresh_subscription(
     }; // lock released
 
     let count = profile.servers.len();
-    let _ = crate::events::emit_refresh_progress(
+    crate::events::emit_refresh_progress(
         &app,
         crate::events::RefreshProgress {
             profile_id: id,
@@ -1532,6 +1519,7 @@ async fn test_servers(
     app: tauri::AppHandle,
     state: tauri::State<'_, ProfileState>,
     id: String,
+    force: Option<bool>,
 ) -> Result<SubscriptionProfile, ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
     log(
@@ -1545,16 +1533,25 @@ async fn test_servers(
     // Phase 1: brief read lock — get existing servers
     let servers = {
         let mgr = state.manager.lock().await;
-        let idx = mgr
-            .list()
-            .iter()
-            .position(|p| p.id == id)
-            .ok_or_else(|| {
-                ProxyError::subscription(
-                    crate::proxy::ErrorCode::SubscriptionNotFound,
-                    "Profile not found",
-                )
-            })?;
+        let idx = mgr.list().iter().position(|p| p.id == id).ok_or_else(|| {
+            ProxyError::subscription(
+                crate::proxy::ErrorCode::SubscriptionNotFound,
+                "Profile not found",
+            )
+        })?;
+        // Clear negative cache for this profile's servers if force=true.
+        // Without this, servers in exponential backoff (up to 30 days for
+        // never-worked servers) are silently skipped.
+        if force.unwrap_or(false) {
+            if let Some(cache) = app.try_state::<Arc<ServerCache>>() {
+                let ids: Vec<String> = mgr.list()[idx]
+                    .servers
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect();
+                cache.clear_negative_for_ids(&ids).await;
+            }
+        }
         // Clone servers, reset ping_ms so they get re-tested
         mgr.list()[idx]
             .servers
@@ -1609,9 +1606,28 @@ async fn test_servers(
         mgr.commit_test(&app, &id, servers_to_commit).await?
     };
 
+    // After a manual test, force sing-box's urltest group
+    // (if running) to re-select the lowest-latency member immediately
+    // instead of waiting for the next interval tick (3 minutes).
+    //
+    let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::SeqCst);
+    if stats_port > 0 {
+        if let Ok(c) = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+        {
+            let c = c.clone();
+            let url = format!("http://127.0.0.1:{stats_port}/proxies/proxy/delay?url=http://cp.cloudflare.com/generate_204&timeout=2000");
+            tokio::spawn(async move {
+                let _ = c.get(&url).send().await;
+            });
+        }
+    }
+
     // Emit done so the frontend updates last_tested.
     let count = profile.servers.len();
-    let _ = crate::events::emit_refresh_progress(
+    crate::events::emit_refresh_progress(
         &app,
         crate::events::RefreshProgress {
             profile_id: id,
@@ -1698,6 +1714,12 @@ async fn update_settings(
 
     // Apply the configured test URL so test_single_server
     // prepends it to the URL list on the next test.
+    // Sync batch-test settings so changes take effect without app restart.
+    crate::proxy::batcher::set_batch_settings(
+        new_settings.anti_dpi,
+        new_settings.tls_insecure,
+        new_settings.enable_mux,
+    );
     crate::proxy::batcher::set_configured_test_url(
         &new_settings.test_url,
         new_settings.test_use_tls,
@@ -1774,7 +1796,9 @@ async fn cancel_refresh(app: tauri::AppHandle) -> Result<(), String> {
         LogSource::Cache,
         "Cancelling refresh...".into(),
     );
-    if let Some(cancel_guard) = app.try_state::<StdMutex<tokio_util::sync::CancellationToken>>() {
+    if let Some(cancel_guard) =
+        app.try_state::<Arc<StdMutex<tokio_util::sync::CancellationToken>>>()
+    {
         if let Ok(mut token) = cancel_guard.lock() {
             let new_token = tokio_util::sync::CancellationToken::new();
             let old_token = std::mem::replace(&mut *token, new_token);
@@ -1807,13 +1831,13 @@ pub fn run() {
                 }
             };
 
-            if let Err(_) = std::fs::create_dir_all(&data_dir) {
+            if std::fs::create_dir_all(&data_dir).is_err() {
                 std::process::exit(1);
             }
 
             // Set up logging: tracing (file) + UI broadcast bridge
             let log_dir = data_dir.join("logs");
-            if let Err(_) = std::fs::create_dir_all(&log_dir) {
+            if std::fs::create_dir_all(&log_dir).is_err() {
                 std::process::exit(1);
             }
 
@@ -1851,16 +1875,24 @@ pub fn run() {
             let port_pool = Arc::new(PortPool::new());
             let cancel_token = tokio_util::sync::CancellationToken::new();
 
+            // Use Arc<Mutex<CancellationToken>> so the batcher engine can read
+            // the CURRENT token at the start of each process_batch. When
+            // cancel_refresh replaces the token, the engine's next batch
+            // gets the new (un-cancelled) token. The engine itself never
+            // exits on cancel — it runs until the channel closes.
+            let cancel_arc: Arc<std::sync::Mutex<CancellationToken>> =
+                Arc::new(std::sync::Mutex::new(cancel_token));
+
             // Start the background batching engine
             cache.start_batcher(
                 port_pool.clone(),
                 data_dir.clone(),
-                cancel_token.clone(),
+                cancel_arc.clone(),
             );
 
             app.manage(cache.clone());
             app.manage(port_pool.clone());
-            app.manage(StdMutex::new(cancel_token));
+            app.manage(cancel_arc);
 
             // Separate token for proxy lifecycle (watchdog / failover /
             // traffic). Decoupled from the refresh token above so
@@ -1957,10 +1989,10 @@ pub fn run() {
                         "quit" => {
                             // Cancel background tasks so AppHandle clones drop
                             // and WebView2 Manager can deallocate properly.
-                            if let Some(cancel) =
-                                app.try_state::<std::sync::Mutex<CancellationToken>>()
+                            if let Some(cancel_arc) =
+                                app.try_state::<Arc<std::sync::Mutex<CancellationToken>>>()
                             {
-                                if let Ok(cancel) = cancel.lock() {
+                                if let Ok(cancel) = cancel_arc.lock() {
                                     cancel.cancel();
                                 }
                             }
@@ -2035,10 +2067,10 @@ pub fn run() {
                         } else {
                             // User is closing the window — cancel background tasks so
                             // AppHandle clones drop and WebView2 Manager can deallocate.
-                            if let Some(cancel) =
-                                app_handle.try_state::<std::sync::Mutex<CancellationToken>>()
+                            if let Some(cancel_arc) =
+                                app_handle.try_state::<Arc<std::sync::Mutex<CancellationToken>>>()
                             {
-                                if let Ok(cancel) = cancel.lock() {
+                                if let Ok(cancel) = cancel_arc.lock() {
                                     cancel.cancel();
                                 }
                             }
@@ -2111,14 +2143,18 @@ pub fn run() {
                                     t.parse::<chrono::DateTime<chrono::FixedOffset>>()
                                         .ok()
                                         .map(|d| d.naive_utc().and_utc())
-                                })
-                                .unwrap_or(now);
-                            if now.signed_duration_since(tested) >= interval {
+                                });
+                            let needs_test = match tested {
+                                Some(t) => now.signed_duration_since(t) >= interval,
+                                None => true, // never tested — test now
+                            };
+                            if needs_test {
                                 tracing::info!(target: "cache", "Auto-testing profile '{}'", p.name);
                                 let result = test_servers(
                                     scheduler_app.clone(),
                                     scheduler_app.state::<ProfileState>(),
                                     p.id.clone(),
+                                    None, // auto-test doesn't force bypass cache
                                 )
                                 .await;
                                 match result {
@@ -2173,6 +2209,7 @@ pub fn run() {
             download_ipinfo_db,
             get_geoip_status,
             pick_replacement_server,
+            get_delay_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -2239,7 +2276,6 @@ async fn get_real_ip(_app: tauri::AppHandle) -> Result<RealIpInfo, String> {
     fetch_real_ip().await
 }
 
-
 /// Clash API /traffic line-delimited JSON: instantaneous B/s.
 /// Converted to MB/s before sending to the frontend.
 #[derive(serde::Deserialize)]
@@ -2288,9 +2324,10 @@ async fn check_proxy_health(app: tauri::AppHandle) -> Result<bool, String> {
             e.to_string()
         })?;
 
-    let delay_url = format!(
-        "http://127.0.0.1:{stats_port}/proxies/proxy/delay?url=http://cp.cloudflare.com/generate_204&timeout=5000"
-    );
+    let test_url = crate::proxy::batcher::configured_test_url()
+        .unwrap_or_else(|| "http://cp.cloudflare.com/generate_204".to_string());
+    let delay_url =
+        format!("http://127.0.0.1:{stats_port}/proxies/proxy/delay?url={test_url}&timeout=5000");
 
     match client.get(&delay_url).send().await {
         Ok(resp) if resp.status().is_success() => Ok(true),
@@ -2373,7 +2410,8 @@ async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
         })?;
 
     let api_url = format!("http://127.0.0.1:{stats_port}");
-    let test_url = "http://cp.cloudflare.com/generate_204";
+    let test_url = crate::proxy::batcher::configured_test_url()
+        .unwrap_or_else(|| "http://cp.cloudflare.com/generate_204".to_string());
 
     // First get all proxies
     let groups_resp = client
@@ -2385,18 +2423,17 @@ async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
             format!("Clash API error: {e}")
         })?;
 
-    let groups: serde_json::Value = groups_resp
-        .json()
-        .await
-        .map_err(|e| {
-            tracing::error!(target: "proxy", "speed_test: failed to parse Clash response: {e}");
-            format!("Parse error: {e}")
-        })?;
+    let groups: serde_json::Value = groups_resp.json().await.map_err(|e| {
+        tracing::error!(target: "proxy", "speed_test: failed to parse Clash response: {e}");
+        format!("Parse error: {e}")
+    })?;
 
     let mut results = Vec::new();
 
     // Find all proxy outbounds (not direct, block, or groups)
     if let Some(proxies) = groups.get("proxies").and_then(|p| p.as_object()) {
+        // Collect names first, then test in parallel
+        let mut test_names: Vec<String> = Vec::new();
         for (name, proxy) in proxies {
             let ptype = proxy.get("type").and_then(|t| t.as_str()).unwrap_or("");
             if ptype == "Direct"
@@ -2407,14 +2444,26 @@ async fn speed_test() -> Result<Vec<serde_json::Value>, String> {
             {
                 continue;
             }
-            // Test each proxy
-            let delay_url = format!("{api_url}/proxies/{name}/delay?url={test_url}&timeout=5000");
-            if let Ok(resp) = client.get(&delay_url).send().await {
-                if let Ok(body) = resp.text().await {
-                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&body) {
-                        results.push(data);
-                    }
-                }
+            test_names.push(name.clone());
+        }
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+        let mut set = tokio::task::JoinSet::new();
+        for name in test_names {
+            let sem = sem.clone();
+            let client = client.clone();
+            let api_url = api_url.clone();
+            let test_url = test_url.to_string();
+            set.spawn(async move {
+                let _permit = sem.acquire().await.ok()?;
+                let url = format!("{api_url}/proxies/{name}/delay?url={test_url}&timeout=5000");
+                let resp = client.get(&url).send().await.ok()?;
+                let body = resp.text().await.ok()?;
+                serde_json::from_str::<serde_json::Value>(&body).ok()
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            if let Ok(Some(v)) = res {
+                results.push(v);
             }
         }
     }
@@ -2489,17 +2538,16 @@ async fn import_subscription_content(
         format!("Importing subscription content: {name}"),
     );
 
-    let servers = crate::subscription::parser::parse_subscription(&content)
-        .map_err(|e| {
-            log(
-                &app,
-                &logger,
-                LogLevel::Error,
-                LogSource::Subscription,
-                format!("Failed to parse imported content: {e}"),
-            );
-            e
-        })?;
+    let servers = crate::subscription::parser::parse_subscription(&content).map_err(|e| {
+        log(
+            &app,
+            &logger,
+            LogLevel::Error,
+            LogSource::Subscription,
+            format!("Failed to parse imported content: {e}"),
+        );
+        e
+    })?;
 
     if servers.is_empty() {
         log(
@@ -2532,7 +2580,7 @@ async fn import_subscription_content(
         url: format!("content://{}", uuid::Uuid::new_v4()),
         servers,
         updated_at: chrono::Utc::now().to_rfc3339(),
-        last_tested: None,
+        last_tested: Some(chrono::Utc::now().to_rfc3339()),
         traffic_used: None,
         traffic_total: None,
         traffic_expiry: None,
@@ -2570,31 +2618,28 @@ async fn import_subscription_file(
     );
 
     // Read file content
-    let content = tokio::fs::read_to_string(&file_path)
-        .await
-        .map_err(|e| {
-            log(
-                &app,
-                &logger,
-                LogLevel::Error,
-                LogSource::Subscription,
-                format!("Failed to read import file: {e}"),
-            );
-            e
-        })?;
+    let content = tokio::fs::read_to_string(&file_path).await.map_err(|e| {
+        log(
+            &app,
+            &logger,
+            LogLevel::Error,
+            LogSource::Subscription,
+            format!("Failed to read import file: {e}"),
+        );
+        e
+    })?;
 
     // Try to parse as subscription data
-    let servers = crate::subscription::parser::parse_subscription(&content)
-        .map_err(|e| {
-            log(
-                &app,
-                &logger,
-                LogLevel::Error,
-                LogSource::Subscription,
-                format!("Failed to parse imported file content: {e}"),
-            );
-            e
-        })?;
+    let servers = crate::subscription::parser::parse_subscription(&content).map_err(|e| {
+        log(
+            &app,
+            &logger,
+            LogLevel::Error,
+            LogSource::Subscription,
+            format!("Failed to parse imported file content: {e}"),
+        );
+        e
+    })?;
 
     if servers.is_empty() {
         log(
@@ -2636,7 +2681,7 @@ async fn import_subscription_file(
         url,
         servers,
         updated_at: chrono::Utc::now().to_rfc3339(),
-        last_tested: None,
+        last_tested: Some(chrono::Utc::now().to_rfc3339()),
         traffic_used: None,
         traffic_total: None,
         traffic_expiry: None,
@@ -2700,25 +2745,36 @@ async fn initialize_app(
     std::fs::create_dir_all(&geo_dir).map_err(|e| e.to_string())?;
     let ipinfo_token = app
         .try_state::<Mutex<crate::settings::AppSettings>>()
-        .map(|s| s.try_lock().ok().map(|g| g.ipinfo_token.clone()))
-        .flatten()
+        .and_then(|s| s.try_lock().ok().map(|g| g.ipinfo_token.clone()))
         .unwrap_or_default();
     // Set locale for city name localisation (MaxMind City supports en/ru/etc.)
-    let test_url_host = if let Some(settings_state) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
-        if let Ok(guard) = settings_state.try_lock() {
-            crate::proxy::geoip::set_locale(&guard.language);
-            // Load saved test URL so test_single_server uses it
-            let url = guard.test_url.clone();
-            let use_tls = guard.test_use_tls;
-            Some((url, use_tls))
+    let test_url_host =
+        if let Some(settings_state) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
+            if let Ok(guard) = settings_state.try_lock() {
+                crate::proxy::geoip::set_locale(&guard.language);
+                // Load saved test URL so test_single_server uses it
+                let url = guard.test_url.clone();
+                let use_tls = guard.test_use_tls;
+                Some((url, use_tls))
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
     if let Some((test_url, use_tls)) = test_url_host {
         crate::proxy::batcher::set_configured_test_url(&test_url, use_tls);
+    }
+    // Sync batch-test settings to global statics so generate_batch_config
+    // can read them without a Tauri app handle.
+    if let Some(settings_state) = app.try_state::<Mutex<crate::settings::AppSettings>>() {
+        if let Ok(guard) = settings_state.try_lock() {
+            crate::proxy::batcher::set_batch_settings(
+                guard.anti_dpi,
+                guard.tls_insecure,
+                guard.enable_mux,
+            );
+        }
     }
     // U7: Cleanup stale tmp files from previous sessions before downloading.
     crate::proxy::geoip::cleanup_stale_tmp_files();
@@ -2766,8 +2822,7 @@ async fn initialize_app(
                     if resp.status().is_success() {
                         if let Ok(text) = resp.text().await {
                             let ip = text.trim().to_string();
-                            if !ip.is_empty()
-                            {
+                            if !ip.is_empty() {
                                 log(
                                     &app,
                                     &logger,
@@ -2883,8 +2938,7 @@ async fn download_ipinfo_db(app: tauri::AppHandle) -> Result<String, String> {
 
     let ipinfo_token = app
         .try_state::<Mutex<crate::settings::AppSettings>>()
-        .map(|s| s.try_lock().ok().map(|g| g.ipinfo_token.clone()))
-        .flatten()
+        .and_then(|s| s.try_lock().ok().map(|g| g.ipinfo_token.clone()))
         .unwrap_or_default();
 
     if ipinfo_token.is_empty() {
@@ -2944,6 +2998,42 @@ async fn download_ipinfo_db(app: tauri::AppHandle) -> Result<String, String> {
             Err(e)
         }
     }
+}
+
+/// Fetch cached delay history for ALL outbounds in one round-trip.
+/// The sing-box urltest outbound probes members on its interval (3 min),
+/// and this endpoint returns the cached delays — so the UI can display
+/// latencies instantly with zero active testing load.
+#[tauri::command]
+async fn get_delay_history() -> Result<serde_json::Value, String> {
+    let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::SeqCst);
+    if stats_port == 0 {
+        return Ok(serde_json::json!({"history": {}}));
+    }
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(format!("http://127.0.0.1:{stats_port}/proxies"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let mut history = serde_json::Map::new();
+    if let Some(proxies) = body.get("proxies").and_then(|p| p.as_object()) {
+        for (name, info) in proxies {
+            if let Some(hist) = info.get("history").and_then(|h| h.as_array()) {
+                if let Some(last) = hist.last() {
+                    if let Some(delay) = last.get("delay").and_then(|d| d.as_u64()) {
+                        history.insert(name.clone(), serde_json::json!({"delay": delay}));
+                    }
+                }
+            }
+        }
+    }
+    Ok(serde_json::json!({"history": history}))
 }
 
 /// Return download metadata for all GeoIP databases.
@@ -3025,6 +3115,9 @@ async fn wait_for_proxy_ready(pid: u32, proxy_port: u16) -> Result<u32, String> 
     let mut attempts = 0u32;
 
     // Poll TCP connect to the mixed inbound port.
+    // Tracks consecutive HTTP probe failures to fall back to TCP-only mode
+    // for non-HTTP endpoints (test listeners, non-proxy TCP servers).
+    let mut http_failures = 0u32;
     loop {
         attempts += 1;
 
@@ -3050,8 +3143,46 @@ async fn wait_for_proxy_ready(pid: u32, proxy_port: u16) -> Result<u32, String> 
         .await
         {
             Ok(Ok(_stream)) => {
-                // Port is accepting connections. sing-box is ready.
-                return Ok(attempts);
+                // Port is bound. But for UDP-based outbounds (hysteria2, tuic,
+                // wireguard), the inbound bind completes HUNDREDS of milliseconds
+                // before the outbound QUIC+TLS handshake finishes. Returning Ok
+                // here caused start_proxy's IP-verification to fire 3 HTTP
+                // requests that all failed in ~5ms (sing-box returns SOCKS5
+                // errors while the outbound is still establishing).
+                //
+                // Phase 2: HTTP-through-proxy probe (800ms timeout).
+                // After 3 consecutive HTTP failures, fall back to TCP-only
+                // (handles test listeners and non-proxy TCP endpoints).
+                if http_failures >= 3 {
+                    return Ok(attempts);
+                }
+                let probe_client = match reqwest::Client::builder()
+                    .proxy(
+                        reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}"))
+                            .map_err(|e| format!("probe proxy build error: {e}"))?,
+                    )
+                    .timeout(Duration::from_millis(800))
+                    .build()
+                {
+                    Ok(c) => c,
+                    Err(_) => {
+                        // Fall back to old behaviour if client build fails.
+                        return Ok(attempts);
+                    }
+                };
+                match probe_client
+                    .get("http://cp.cloudflare.com/generate_204")
+                    .send()
+                    .await
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        return Ok(attempts);
+                    }
+                    _ => {
+                        // Port bound but outbound not ready. Keep polling.
+                        http_failures += 1;
+                    }
+                }
             }
             _ => {
                 // Not ready yet (connection refused / timeout). Keep polling
@@ -3072,14 +3203,13 @@ async fn wait_for_proxy_ready(pid: u32, proxy_port: u16) -> Result<u32, String> 
 /// Removes orphaned batch/latency/outlet/test dirs older than 1 hour.
 pub(crate) fn cleanup_stale_temp_dirs() {
     let tmp_dir = std::env::temp_dir();
-    let cutoff = std::time::SystemTime::now()
-        - std::time::Duration::from_secs(3600); // 1 hour
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3600); // 1 hour
     let mut total = 0u32;
     let prefixes = [
         "omnitun-batch-",
         "omnitun-latency-",
         "omnitun-outlet-",
-        "omnitun-settings-test-",  // safe: only used by settings tests, which always clean up
+        "omnitun-settings-test-", // safe: only used by settings tests, which always clean up
     ];
     if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
         for entry in entries.flatten() {
@@ -3209,8 +3339,7 @@ mod tests {
         use tokio::sync::Mutex;
 
         // Simulate ProfileState.manager
-        let manager: Arc<Mutex<Vec<String>>> =
-            Arc::new(Mutex::new(vec!["profile1".to_string()]));
+        let manager: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec!["profile1".to_string()]));
 
         // Phase 1: brief read lock
         let snapshot = {
@@ -3259,8 +3388,7 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::Mutex;
 
-        let manager: Arc<Mutex<Vec<String>>> =
-            Arc::new(Mutex::new(vec!["profile1".to_string()]));
+        let manager: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(vec!["profile1".to_string()]));
 
         // Simulate the OLD refresh: hold the lock for the entire duration
         let manager_clone = manager.clone();

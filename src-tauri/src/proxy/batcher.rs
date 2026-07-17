@@ -45,7 +45,9 @@ const TEST_TIMEOUT_SECS: u64 = 8;
 const SINGBOX_STARTUP_MS: u64 = 600;
 
 /// Number of parallel testing tasks per batch.
-const MAX_CONCURRENT_TESTS: usize = 50;
+/// Reduced from 50 to 20: 50 concurrent TLS handshakes overwhelmed
+/// mobile/low-end systems.
+const MAX_CONCURRENT_TESTS: usize = 20;
 
 // ── BatchingEngine ──────────────────────────────────────────────────────────
 
@@ -71,35 +73,30 @@ pub async fn run(
     cache: ServerCache,
     port_pool: Arc<PortPool>,
     data_dir: PathBuf,
-    cancel: CancellationToken,
+    cancel: Arc<std::sync::Mutex<CancellationToken>>,
 ) {
     tracing::info!(target: "cache", "[Batcher] engine started");
 
     loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                tracing::info!(target: "cache", "[Batcher] cancelled — shutting down");
+        // NO select! cancel arm — the engine runs until the channel closes.
+        // Cancel is handled per-batch inside process_batch by reading the
+        // CURRENT token from the Arc<Mutex>.
+        let batch = match collect_batch(&mut rx).await {
+            Some(b) => b,
+            None => {
+                tracing::info!(target: "cache", "[Batcher] channel closed — shutting down");
                 return;
             }
-            result = collect_batch(&mut rx) => {
-                let batch = match result {
-                    Some(b) => b,
-                    None => {
-                        tracing::info!(target: "cache", "[Batcher] channel closed — shutting down");
-                        return;
-                    }
-                };
+        };
 
-                if batch.is_empty() {
-                    continue;
-                }
-
-                let count = batch.len();
-                tracing::info!(target: "cache", "[Batcher] processing batch of {count} server(s)");
-
-                process_batch(batch, &cache, &port_pool, &data_dir, &cancel).await;
-            }
+        if batch.is_empty() {
+            continue;
         }
+
+        let count = batch.len();
+        tracing::info!(target: "cache", "[Batcher] processing batch of {count} server(s)");
+
+        process_batch(batch, &cache, &port_pool, &data_dir, &cancel).await;
     }
 }
 
@@ -137,8 +134,14 @@ async fn process_batch(
     cache: &ServerCache,
     port_pool: &PortPool,
     data_dir: &Path,
-    cancel: &CancellationToken,
+    cancel: &Arc<std::sync::Mutex<CancellationToken>>,
 ) {
+    // Read the CURRENT token at the start of this batch. If cancel_refresh
+    // fired during a previous batch, the old token is cancelled but this
+    // call reads the NEW (un-cancelled) token.
+    // StdMutex is held for microseconds (just a clone) — no await while locked.
+    let token = cancel.lock().unwrap_or_else(|e| e.into_inner()).clone();
+
     let count = batch.len();
     tracing::info!(target: "cache", "[Batcher] processing {count} server(s)");
 
@@ -156,10 +159,12 @@ async fn process_batch(
                 guard = Some(g);
                 break;
             }
-            if attempt == 10 {
-                tracing::warn!(target: "cache", "[Batcher] port pool exhausted after 10 retries");
+            if attempt < 10 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if guard.is_none() {
+            tracing::warn!(target: "cache", "[Batcher] port pool exhausted after 10 attempts");
         }
         match guard {
             Some(g) => guards.push(g),
@@ -177,7 +182,7 @@ async fn process_batch(
     let port_list: Vec<u16> = guards.iter().map(|g| g.port).collect();
 
     // Check cancellation
-    if cancel.is_cancelled() {
+    if token.is_cancelled() {
         for req in batch {
             let _ = req.reply.send(Err("Cancelled".into()));
         }
@@ -435,7 +440,7 @@ async fn process_batch(
     for (idx, req) in batch.into_iter().enumerate() {
         let port = port_list[idx];
         let sem = semaphore.clone();
-        let cancel = cancel.clone();
+        let cancel = token.clone();
 
         set.spawn(async move {
             let _permit = sem.acquire().await;
@@ -445,10 +450,21 @@ async fn process_batch(
     }
 
     // 5. Collect results
+    // Per-batch deadline — guards against a single stuck batch blocking
+    // the engine indefinitely. 90s accommodates the UDP worst case:
+    // 6s timeout × 6 URLs × 2 attempts = 72s per server, with 20-way
+    // concurrency a wave's wall-clock = max(per-server) ≈ 72s.
+    // 90s gives headroom while still catching truly stuck batches.
+    let batch_deadline = tokio::time::Instant::now() + Duration::from_secs(90);
     let mut success_count = 0usize;
     let mut fail_count = 0usize;
 
     while let Some(res) = set.join_next().await {
+        if tokio::time::Instant::now() >= batch_deadline {
+            tracing::warn!(target:"cache", "[Batcher] batch deadline (90s) exceeded — aborting {} remaining task(s)", set.len());
+            set.abort_all();
+            break;
+        }
         match res {
             Ok((req, Ok(result))) => {
                 // Log any diagnostics caught during the test (e.g. outlet IP in CDN ranges)
@@ -540,16 +556,33 @@ const TEST_URLS: &[&str] = &[
     "http://cp.cloudflare.com/generate_204",
 ];
 
-/// Per-URL timeout для test_single_server: 4s на URL, без retry.
-const PER_URL_TIMEOUT_SECS: u64 = 4;
-/// Timeout for exit IP fetch (per-URL). Longer than PER_URL_TIMEOUT_SECS because
-/// TCP ping already confirmed the server is alive — just need a response from
-/// any one of the IP echo services.
-const EXIT_IP_TIMEOUT_SECS: u64 = 30;
+/// Default per-URL timeout for TCP-based protocols.
+/// TCP handshake + TLS + HTTP 204 ≈ 1-2s on a healthy server; 3s gives
+/// ample headroom without wasting time on dead servers.
+const PER_URL_TIMEOUT_TCP_SECS: u64 = 3;
+/// Per-URL timeout for UDP-based protocols (hysteria2, tuic, wireguard).
+/// QUIC handshake takes longer than TCP TLS; 6s is conservative.
+const PER_URL_TIMEOUT_UDP_SECS: u64 = 6;
 
-static CONFIGURED_TEST_URL: std::sync::LazyLock<std::sync::RwLock<String>> = std::sync::LazyLock::new(|| {
-    std::sync::RwLock::new("https://cp.cloudflare.com/generate_204".to_string())
-});
+fn per_url_timeout_secs(server: &ServerProfile) -> Duration {
+    if server.is_udp_protocol() {
+        Duration::from_secs(PER_URL_TIMEOUT_UDP_SECS)
+    } else {
+        Duration::from_secs(PER_URL_TIMEOUT_TCP_SECS)
+    }
+}
+
+/// Timeout for exit IP fetch. Reduced from 30s to 8s:
+/// fetch_outlet_ip_through_port races 3 services in parallel and returns on
+/// the first Some, so worst case is bounded by the slowest service.
+/// Empirically <5s when the proxy works. 30s meant a single flaky server
+/// could hang a 50-server batch for half a minute.
+const EXIT_IP_TIMEOUT_SECS: u64 = 8;
+
+static CONFIGURED_TEST_URL: std::sync::LazyLock<std::sync::RwLock<String>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::RwLock::new("https://cp.cloudflare.com/generate_204".to_string())
+    });
 
 /// Update the configured test URL from user preferences.
 pub fn set_configured_test_url(host_path: &str, use_tls: bool) {
@@ -558,6 +591,50 @@ pub fn set_configured_test_url(host_path: &str, use_tls: bool) {
     if let Ok(mut locked) = CONFIGURED_TEST_URL.write() {
         *locked = url;
     }
+}
+
+// ── Batch settings (mirrors AppSettings for the batcher subsystem) ──────────
+// The batcher runs in a background task without direct access to the Tauri
+// app handle or the AppSettings managed state. To apply user-configured
+// anti-DPI / TLS / mux settings in generate_batch_config, we mirror the
+// relevant fields into global statics (same pattern as CONFIGURED_TEST_URL).
+// set_batch_settings() is called on app start and on every settings change.
+
+static BATCH_ANTI_DPI: std::sync::LazyLock<std::sync::RwLock<bool>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(true));
+static BATCH_TLS_INSECURE: std::sync::LazyLock<std::sync::RwLock<bool>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(true));
+static BATCH_ENABLE_MUX: std::sync::LazyLock<std::sync::RwLock<bool>> =
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(false));
+
+pub fn set_batch_settings(anti_dpi: bool, tls_insecure: bool, enable_mux: bool) {
+    if let Ok(mut g) = BATCH_ANTI_DPI.write() {
+        *g = anti_dpi;
+    }
+    if let Ok(mut g) = BATCH_TLS_INSECURE.write() {
+        *g = tls_insecure;
+    }
+    if let Ok(mut g) = BATCH_ENABLE_MUX.write() {
+        *g = enable_mux;
+    }
+}
+pub fn batch_anti_dpi() -> bool {
+    BATCH_ANTI_DPI.read().map(|g| *g).unwrap_or(true)
+}
+pub fn batch_tls_insecure() -> bool {
+    BATCH_TLS_INSECURE.read().map(|g| *g).unwrap_or(true)
+}
+pub fn batch_enable_mux() -> bool {
+    BATCH_ENABLE_MUX.read().map(|g| *g).unwrap_or(false)
+}
+
+/// Read the currently configured test URL.
+pub fn configured_test_url() -> Option<String> {
+    CONFIGURED_TEST_URL
+        .read()
+        .ok()
+        .map(|u| u.clone())
+        .filter(|u| !u.is_empty())
 }
 
 /// Test a single server through its dedicated proxy port.
@@ -572,7 +649,7 @@ async fn test_single_server(
         .map_err(|e| format!("Proxy build error: {e}"))?;
     let client = reqwest::Client::builder()
         .proxy(proxy)
-        .timeout(Duration::from_secs(PER_URL_TIMEOUT_SECS))
+        .timeout(per_url_timeout_secs(server))
         .build()
         .map_err(|e| format!("Client build error: {e}"))?;
 
@@ -581,7 +658,8 @@ async fn test_single_server(
     //    Prepend the user-configured test URL (from settings) as the
     //    first URL to try. If it fails, fall back to the hardcoded TEST_URLS.
     //    Previously, CONFIGURED_TEST_URL was completely ignored here.
-    let configured = CONFIGURED_TEST_URL.read()
+    let configured = CONFIGURED_TEST_URL
+        .read()
         .map(|u| u.clone())
         .unwrap_or_default();
     let urls: Vec<&str> = if configured.is_empty() {
@@ -639,16 +717,11 @@ async fn test_single_server(
         // Fetch outlet IP only if server is NOT marked as CDN.
         // behind_cdn is finalized at the process_servers stage via entry-IP
         // + keyword checks; we do NOT override it here.
-        // Build a separate client for exit IP fetch with a longer timeout.
-        // TCP ping already confirmed the server is alive — just wait for
-        // the first IP echo service to respond.
-        let exit_client = reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(format!("socks5h://127.0.0.1:{port}"))
-                .map_err(|e| format!("Exit proxy build error: {e}"))?)
-            .timeout(Duration::from_secs(EXIT_IP_TIMEOUT_SECS))
-            .build()
-            .map_err(|e| format!("Exit client build error: {e}"))?;
-        let fetched = fetch_outlet_ip_through_port(&exit_client).await;
+        // Reuse the existing `client` (warm connection pool) with a
+        // per-request timeout.
+        let fetched =
+            fetch_outlet_ip_through_port(&client, Some(Duration::from_secs(EXIT_IP_TIMEOUT_SECS)))
+                .await;
 
         if let Some(ref ip) = fetched {
             outlet_ip = Some(ip.clone());
@@ -665,11 +738,7 @@ async fn test_single_server(
                      behind_cdn=false (outlet is egress, not entry). If this fires \
                      repeatedly for the same server, investigate CDN list coverage \
                      or process_servers entry-IP classification.",
-                    server.id,
-                    server.server,
-                    server.port,
-                    server.original_name,
-                    ip,
+                    server.id, server.server, server.port, server.original_name, ip,
                 ));
             }
         }
@@ -725,7 +794,10 @@ async fn test_single_server(
 
 /// Fetch outlet IP through the sing‑box proxy port with multiple fallback URLs concurrently.
 /// Returns `None` if all services fail / time out.
-async fn fetch_outlet_ip_through_port(client: &reqwest::Client) -> Option<String> {
+async fn fetch_outlet_ip_through_port(
+    client: &reqwest::Client,
+    per_request_timeout: Option<Duration>,
+) -> Option<String> {
     let services = [
         "https://www.cloudflare.com/cdn-cgi/trace",
         "https://api64.ipify.org",
@@ -735,10 +807,15 @@ async fn fetch_outlet_ip_through_port(client: &reqwest::Client) -> Option<String
     let mut set = tokio::task::JoinSet::new();
     for &url in &services {
         let client = client.clone();
+        let t = per_request_timeout;
         set.spawn(async move {
-            let resp = client.get(url).send().await.ok()?;
+            let req = client.get(url);
+            let req = if let Some(t) = t { req.timeout(t) } else { req };
+            let resp = req.send().await.ok()?;
             // Must check status — 403/50x returns HTML, not an IP.
-            if !resp.status().is_success() { return None; }
+            if !resp.status().is_success() {
+                return None;
+            }
             let text = resp.text().await.ok()?;
             // cloudflare.com/cdn-cgi/trace returns key=value pairs (ip=... loc=...)
             // Extract the IP line. Other services return just the IP.
@@ -748,11 +825,19 @@ async fn fetch_outlet_ip_through_port(client: &reqwest::Client) -> Option<String
                 .map(|s| s.trim().to_string())
                 .or_else(|| {
                     let trimmed = text.trim().to_string();
-                    if !trimmed.is_empty() { Some(trimmed) } else { None }
+                    if !trimmed.is_empty() {
+                        Some(trimmed)
+                    } else {
+                        None
+                    }
                 })?;
             // Validate that the response is actually an IP address.
             // Without this, HTML error pages (403 Forbidden etc.) get stored as exit IP.
-            if candidate.parse::<std::net::IpAddr>().is_ok() { Some(candidate) } else { None }
+            if candidate.parse::<std::net::IpAddr>().is_ok() {
+                Some(candidate)
+            } else {
+                None
+            }
         });
     }
 
@@ -902,7 +987,7 @@ mod tests {
     async fn test_fetch_outlet_ip_all_services_fail() {
         // With a dead proxy, all 3 services should fail → None
         let client = dead_client();
-        let result = fetch_outlet_ip_through_port(&client).await;
+        let result = fetch_outlet_ip_through_port(&client, None).await;
         assert!(
             result.is_none(),
             "fetch_outlet_ip should return None when all services fail"
@@ -917,7 +1002,7 @@ mod tests {
             .timeout(Duration::from_millis(1))
             .build()
             .unwrap();
-        let result = fetch_outlet_ip_through_port(&client).await;
+        let result = fetch_outlet_ip_through_port(&client, None).await;
         assert!(
             result.is_none(),
             "fetch_outlet_ip should return None even with very short timeout"

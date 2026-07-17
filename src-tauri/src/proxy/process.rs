@@ -25,7 +25,6 @@ use std::os::unix::process::CommandExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 // ── PID file management ──────────────────────────────────────────────
@@ -118,7 +117,7 @@ pub fn cleanup_stale_pid(_app: &tauri::AppHandle) {
 pub(crate) mod orphan_guard {
     use std::os::windows::io::RawHandle;
 
-    type HANDLE = *mut std::ffi::c_void;
+    type Handle = *mut std::ffi::c_void;
 
     const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x00002000;
 
@@ -169,7 +168,7 @@ pub(crate) mod orphan_guard {
     impl Drop for JobObject {
         fn drop(&mut self) {
             unsafe {
-                CloseHandle(self.0 as HANDLE);
+                CloseHandle(self.0 as Handle);
             }
         }
     }
@@ -216,21 +215,21 @@ pub(crate) mod orphan_guard {
 
     /// Assign a process to the job object. Returns true on success.
     pub(crate) fn assign(job: &JobObject, process_handle: RawHandle) -> bool {
-        unsafe { AssignProcessToJobObject(job.0 as HANDLE, process_handle as HANDLE) != 0 }
+        unsafe { AssignProcessToJobObject(job.0 as Handle, process_handle as Handle) != 0 }
     }
 
     extern "system" {
         fn CreateJobObjectW(lpJobAttributes: *const std::ffi::c_void, lpName: *const u16)
-            -> HANDLE;
-        fn CloseHandle(hObject: HANDLE) -> i32;
+            -> Handle;
+        fn CloseHandle(hObject: Handle) -> i32;
         fn GetLastError() -> u32;
         fn SetInformationJobObject(
-            hJob: HANDLE,
+            hJob: Handle,
             JobObjectInformationClass: i32,
             lpJobObjectInformation: *mut std::ffi::c_void,
             cbJobObjectInformationLength: u32,
         ) -> i32;
-        fn AssignProcessToJobObject(hJob: HANDLE, hProcess: HANDLE) -> i32;
+        fn AssignProcessToJobObject(hJob: Handle, hProcess: Handle) -> i32;
     }
 }
 
@@ -293,12 +292,9 @@ impl ProcessManager {
             }
         }
 
-        let config_str = config_path
-            .to_str()
-            .ok_or_else(|| ProxyError::process(
-                ErrorCode::ProcessStartFailed,
-                "Invalid config path",
-            ))?;
+        let config_str = config_path.to_str().ok_or_else(|| {
+            ProxyError::process(ErrorCode::ProcessStartFailed, "Invalid config path")
+        })?;
 
         let new_pid = self.launch(config_str, app).await?;
         *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(new_pid);
@@ -323,20 +319,13 @@ impl ProcessManager {
             }
         }
 
-        let config_str = config_path
-            .to_str()
-            .ok_or_else(|| ProxyError::process(
-                ErrorCode::ProcessStartFailed,
-                "Invalid config path",
-            ))?;
+        let config_str = config_path.to_str().ok_or_else(|| {
+            ProxyError::process(ErrorCode::ProcessStartFailed, "Invalid config path")
+        })?;
 
-        let binary = self
-            .binary_path
-            .to_str()
-            .ok_or_else(|| ProxyError::process(
-                ErrorCode::ProcessStartFailed,
-                "Invalid binary path",
-            ))?;
+        let binary = self.binary_path.to_str().ok_or_else(|| {
+            ProxyError::process(ErrorCode::ProcessStartFailed, "Invalid binary path")
+        })?;
 
         let stderr_path = std::path::Path::new(config_str)
             .parent()
@@ -371,27 +360,27 @@ impl ProcessManager {
 
             let child = match cmd_breakaway.spawn() {
                 Ok(c) => c,
-                Err(_) => {
-                    std::process::Command::new(binary)
-                        .args(["run", "-c", config_str])
-                        .stdout(std::process::Stdio::null())
-                        .stderr({
-                            match std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(&stderr_path)
-                            {
-                                Ok(f) => std::process::Stdio::from(f),
-                                Err(_) => std::process::Stdio::null(),
-                            }
-                        })
-                        .creation_flags(CREATE_NO_WINDOW)
-                        .spawn()
-                        .map_err(|e| ProxyError::process(
+                Err(_) => std::process::Command::new(binary)
+                    .args(["run", "-c", config_str])
+                    .stdout(std::process::Stdio::null())
+                    .stderr({
+                        match std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&stderr_path)
+                        {
+                            Ok(f) => std::process::Stdio::from(f),
+                            Err(_) => std::process::Stdio::null(),
+                        }
+                    })
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn()
+                    .map_err(|e| {
+                        ProxyError::process(
                             ErrorCode::ProcessStartFailed,
                             format!("Failed to start sing-box: {e}"),
-                        ))?
-                }
+                        )
+                    })?,
             };
 
             use std::os::windows::io::AsRawHandle;
@@ -429,12 +418,12 @@ impl ProcessManager {
                 });
             }
 
-            let child = cmd
-                .spawn()
-                .map_err(|e| ProxyError::process(
+            let child = cmd.spawn().map_err(|e| {
+                ProxyError::process(
                     ErrorCode::ProcessStartFailed,
                     format!("Failed to start sing-box: {e}"),
-                ))?;
+                )
+            })?;
 
             let new_pid = child.id();
             *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(new_pid);
@@ -508,10 +497,12 @@ impl ProcessManager {
             std::process::Command::new("kill")
                 .args(["-9", &p.to_string()])
                 .output()
-                .map_err(|e| ProxyError::process(
-                    ErrorCode::ProcessKillFailed,
-                    format!("Failed to kill process {p}: {e}"),
-                ))?;
+                .map_err(|e| {
+                    ProxyError::process(
+                        ErrorCode::ProcessKillFailed,
+                        format!("Failed to kill process {p}: {e}"),
+                    )
+                })?;
 
             tokio::time::sleep(Duration::from_millis(500)).await;
             if crate::is_process_alive(p) {
@@ -526,13 +517,9 @@ impl ProcessManager {
     }
 
     async fn launch(&self, config_path: &str, _app: &tauri::AppHandle) -> Result<u32, ProxyError> {
-        let binary = self
-            .binary_path
-            .to_str()
-            .ok_or_else(|| ProxyError::process(
-                ErrorCode::ProcessStartFailed,
-                "Invalid binary path",
-            ))?;
+        let binary = self.binary_path.to_str().ok_or_else(|| {
+            ProxyError::process(ErrorCode::ProcessStartFailed, "Invalid binary path")
+        })?;
 
         // Open stderr log file next to config.json for diagnostics.
         let stderr_path = std::path::Path::new(config_path)
@@ -638,12 +625,12 @@ impl ProcessManager {
                 });
             }
 
-            let child = cmd
-                .spawn()
-                .map_err(|e| ProxyError::process(
+            let child = cmd.spawn().map_err(|e| {
+                ProxyError::process(
                     ErrorCode::ProcessStartFailed,
                     format!("Failed to start sing-box: {e}"),
-                ))?;
+                )
+            })?;
 
             Ok(child.id())
         }

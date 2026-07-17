@@ -18,8 +18,11 @@ pub fn parse_subscription(data: &str) -> Result<Vec<ServerProfile>, ProxyError> 
             continue;
         }
 
-        if let Some(profile) = parse_uri(line) {
-            servers.push(profile);
+        if let Some(mut profile) = parse_uri(line) {
+            // Validate schema — drop servers with fatal issues (empty uuid, port 0, etc.)
+            if validate_server_profile(&mut profile) {
+                servers.push(profile);
+            }
         }
     }
 
@@ -37,6 +40,79 @@ fn try_base64_decode(data: &str) -> Result<String, anyhow::Error> {
         .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&clean))?;
 
     Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// Validate SNI — must be a bare hostname, not a URL.
+/// profiles.json contained "sni": "https://t.me/WangCai2" for some servers,
+/// which broke TLS SNI on strict parsers.
+fn validate_sni(sni: &str) -> Option<String> {
+    if sni.is_empty() {
+        return None;
+    }
+    if sni.contains("://") {
+        tracing::warn!(target:"subscription", "SNI {sni:?} looks like a URL — stripping scheme");
+        if let Ok(url) = url::Url::parse(sni) {
+            return url.host_str().map(|h| h.to_string());
+        }
+        return None;
+    }
+    if sni
+        .chars()
+        .any(|c| c.is_whitespace() || c == '/' || c == ':')
+    {
+        tracing::warn!(target:"subscription", "SNI {sni:?} contains invalid characters — dropping");
+        return None;
+    }
+    Some(sni.to_string())
+}
+
+/// Validate a parsed ServerProfile. Returns false for fatal issues
+/// (server should be dropped), true otherwise.
+pub fn validate_server_profile(profile: &mut crate::proxy::ServerProfile) -> bool {
+    if profile.server.is_empty() {
+        tracing::warn!(target:"subscription", "dropping server: empty server address");
+        return false;
+    }
+    if profile.server.contains("://") {
+        tracing::warn!(target:"subscription", "dropping server: address looks like URL: {}", profile.server);
+        return false;
+    }
+    if profile.port == 0 {
+        tracing::warn!(target:"subscription", "dropping server: port 0 for {}", profile.server);
+        return false;
+    }
+    match profile.protocol.as_str() {
+        "vmess" | "vless" => {
+            if profile
+                .uuid
+                .as_deref()
+                .map(|u| u.is_empty())
+                .unwrap_or(true)
+            {
+                tracing::warn!(target:"subscription", "dropping {} server: empty uuid for {}", profile.protocol, profile.server);
+                return false;
+            }
+        }
+        "trojan" | "shadowsocks"
+            if profile
+                .password
+                .as_deref()
+                .map(|p| p.is_empty())
+                .unwrap_or(true) =>
+        {
+            tracing::warn!(target:"subscription", "dropping {} server: empty password for {}", profile.protocol, profile.server);
+            return false;
+        }
+        _ => {}
+    }
+    if let Some(ref sni) = profile.sni {
+        if let Some(validated) = validate_sni(sni) {
+            profile.sni = Some(validated);
+        } else {
+            profile.sni = None;
+        }
+    }
+    true
 }
 
 fn parse_uri(uri: &str) -> Option<ServerProfile> {
@@ -98,7 +174,7 @@ fn parse_vless(data: &str) -> Option<ServerProfile> {
         uuid: Some(uuid.to_string()),
         password: None,
         method: None,
-        sni: params.get("sni").cloned(),
+        sni: params.get("sni").and_then(|s| validate_sni(s)),
         flow: params.get("flow").cloned(),
         public_key: None,
         private_key: None,
@@ -320,7 +396,7 @@ fn parse_trojan(data: &str) -> Option<ServerProfile> {
         uuid: None,
         password: Some(urlencoding_decode(password)),
         method: None,
-        sni: params.get("sni").cloned(),
+        sni: params.get("sni").and_then(|s| validate_sni(s)),
         flow: params.get("flow").cloned(),
         public_key: None,
         private_key: None,
@@ -369,7 +445,7 @@ fn parse_hysteria2(data: &str) -> Option<ServerProfile> {
         uuid: None,
         password: Some(urlencoding_decode(password)),
         method: None,
-        sni: params.get("sni").cloned(),
+        sni: params.get("sni").and_then(|s| validate_sni(s)),
         flow: None,
         public_key: None,
         private_key: None,
@@ -424,7 +500,7 @@ fn parse_tuic(data: &str) -> Option<ServerProfile> {
             Some(urlencoding_decode(password))
         },
         method: None,
-        sni: params.get("sni").cloned(),
+        sni: params.get("sni").and_then(|s| validate_sni(s)),
         flow: None,
         public_key: None,
         private_key: None,

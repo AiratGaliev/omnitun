@@ -238,10 +238,7 @@ impl serde::Serialize for ProxyError {
     {
         let mut st = serializer.serialize_struct("ProxyError", 2)?;
         match self {
-            Self::Config(d)
-            | Self::Process(d)
-            | Self::Subscription(d)
-            | Self::Install(d) => {
+            Self::Config(d) | Self::Process(d) | Self::Subscription(d) | Self::Install(d) => {
                 st.serialize_field("code", &d.code)?;
                 st.serialize_field("message", &d.message)?;
             }
@@ -335,6 +332,8 @@ fn keyword_cdn_check(host: &str) -> bool {
         || lower.contains("cloudfront")
         || lower.contains("akamai")
         || lower.contains("cdn.")
+        || lower.contains(".worker.")
+        || lower.starts_with("worker.")
         || lower.ends_with(".workers.dev")
         || lower.ends_with(".pages.dev")
         || lower.ends_with(".cfargotunnel.com")
@@ -403,10 +402,7 @@ impl ServerProfile {
     /// UDP-based" — used by both `process_servers_inner` (TCP ping skip) and
     /// `test_single_server` (latency test degradation).
     pub fn is_udp_protocol(&self) -> bool {
-        matches!(
-            self.protocol.as_str(),
-            "hysteria2" | "tuic" | "wireguard"
-        )
+        matches!(self.protocol.as_str(), "hysteria2" | "tuic" | "wireguard")
     }
 
     /// ═══════════════════════════════════════════════════════════════════
@@ -838,9 +834,13 @@ mod tests {
         ];
         for (cdn, ip, flag, country, city) in cases {
             let server = make_test_server(cdn, ip, flag, country, city);
-            assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                server.assert_no_cdn_exit_data("panic_test");
-            })).is_ok(), "assert_no_cdn_exit_data MUST NOT panic");
+            assert!(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    server.assert_no_cdn_exit_data("panic_test");
+                }))
+                .is_ok(),
+                "assert_no_cdn_exit_data MUST NOT panic"
+            );
         }
     }
 
@@ -879,7 +879,13 @@ mod tests {
     /// Test: simulate B4 regression — violation + recovery (no panic).
     #[test]
     fn test_regression_simulate_b4_violation_and_recovery() {
-        let mut server = make_test_server(true, Some("151.115.75.222"), Some("FR"), Some("France"), Some("Paris"));
+        let mut server = make_test_server(
+            true,
+            Some("151.115.75.222"),
+            Some("FR"),
+            Some("France"),
+            Some("Paris"),
+        );
         // Step 1: violation — must not panic
         server.assert_no_cdn_exit_data("regression_b4_step1");
         // Step 2: clear (as production code does)
@@ -921,7 +927,9 @@ mod tests {
             fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
                 self.0.lock().unwrap().write(b)
             }
-            fn flush(&mut self) -> std::io::Result<()> { self.0.lock().unwrap().flush() }
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.0.lock().unwrap().flush()
+            }
         }
 
         let subscriber = tracing_subscriber::fmt()
@@ -968,7 +976,13 @@ mod tests {
     #[test]
     fn test_assert_no_cdn_exit_data_silent_when_not_cdn_traced() {
         let output = with_captured_logs(|| {
-            let server = make_test_server(false, Some("151.115.75.222"), Some("FR"), Some("France"), Some("Paris"));
+            let server = make_test_server(
+                false,
+                Some("151.115.75.222"),
+                Some("FR"),
+                Some("France"),
+                Some("Paris"),
+            );
             server.assert_no_cdn_exit_data("test_not_cdn");
         });
         assert!(!output.contains("[BUG]"), "output: {output}");
@@ -979,7 +993,13 @@ mod tests {
     #[test]
     fn test_assert_no_cdn_exit_data_logs_all_violating_fields() {
         let output = with_captured_logs(|| {
-            let server = make_test_server(true, Some("1.1.1.1"), Some("US"), Some("United States"), Some("Test City"));
+            let server = make_test_server(
+                true,
+                Some("1.1.1.1"),
+                Some("US"),
+                Some("United States"),
+                Some("Test City"),
+            );
             server.assert_no_cdn_exit_data("test_all_fields");
         });
         assert!(output.contains("exit_server"), "output: {output}");
@@ -1008,7 +1028,10 @@ mod tests {
             let server = make_test_server(true, Some("1.2.3.4"), None, None, None);
             server.assert_no_cdn_exit_data("UNIQUE_CONTEXT_MARKER_42");
         });
-        assert!(output.contains("UNIQUE_CONTEXT_MARKER_42"), "output: {output}");
+        assert!(
+            output.contains("UNIQUE_CONTEXT_MARKER_42"),
+            "output: {output}"
+        );
     }
 
     /// ТЕСТ: server id в сообщении.
@@ -1019,7 +1042,10 @@ mod tests {
             server.id = "CUSTOM_ID_FOR_TEST_12345".to_string();
             server.assert_no_cdn_exit_data("id_test");
         });
-        assert!(output.contains("CUSTOM_ID_FOR_TEST_12345"), "output: {output}");
+        assert!(
+            output.contains("CUSTOM_ID_FOR_TEST_12345"),
+            "output: {output}"
+        );
     }
 
     /// ТЕСТ: server:port в сообщении.
@@ -1064,6 +1090,9 @@ mod tests {
             let server = make_test_server(true, Some("1.2.3.4"), None, None, None);
             server.assert_no_cdn_exit_data("target_test");
         });
-        assert!(output.contains("cdn-invariant"), "target 'cdn-invariant' should appear in log output: {output}");
+        assert!(
+            output.contains("cdn-invariant"),
+            "target 'cdn-invariant' should appear in log output: {output}"
+        );
     }
 }

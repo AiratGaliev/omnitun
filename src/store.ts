@@ -1122,7 +1122,13 @@ export const useAppStore = create<ProxyStore>((set, get) => {
             const prog = buffered.get(p.id);
             if (prog?.phase === 'done' && prog.updated_at) {
               profilesUpdated = true;
-              return { ...p, lastUpdated: Date.parse(prog.updated_at), lastTested: prog.last_tested ? Date.parse(prog.last_tested) || undefined : undefined };
+              return {
+                ...p,
+                lastUpdated: Date.parse(prog.updated_at),
+                lastTested: prog.last_tested
+                  ? Date.parse(prog.last_tested) || undefined
+                  : undefined,
+              };
             }
             return p;
           });
@@ -1130,7 +1136,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
             next[id] = prog?.phase === 'done' ? null : prog;
           }
           // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-          return profilesUpdated ? { refreshProgress: next, profiles: updatedProfiles } : { refreshProgress: next };
+          return profilesUpdated
+            ? { refreshProgress: next, profiles: updatedProfiles }
+            : { refreshProgress: next };
         });
       };
 

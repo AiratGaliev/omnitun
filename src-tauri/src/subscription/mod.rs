@@ -79,10 +79,12 @@ pub async fn fetch_subscription(
         }
     }
 
-    Err(last_err.unwrap_or_else(|| ProxyError::subscription(
-        crate::proxy::ErrorCode::SubscriptionFetchFailed,
-        "All fetch URLs failed",
-    )))
+    Err(last_err.unwrap_or_else(|| {
+        ProxyError::subscription(
+            crate::proxy::ErrorCode::SubscriptionFetchFailed,
+            "All fetch URLs failed",
+        )
+    }))
 }
 
 /// Fetch subscription traffic usage via HEAD request.

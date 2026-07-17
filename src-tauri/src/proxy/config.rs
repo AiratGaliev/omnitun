@@ -51,11 +51,8 @@ pub fn generate_config(
     settings: &AppSettings,
 ) -> Result<(String, u16), ProxyError> {
     let base_template = include_str!("../../config/base.json");
-    let mut config: Value =
-        serde_json::from_str(base_template).map_err(|e| ProxyError::config(
-            ErrorCode::ConfigGenerationFailed,
-            e.to_string(),
-        ))?;
+    let mut config: Value = serde_json::from_str(base_template)
+        .map_err(|e| ProxyError::config(ErrorCode::ConfigGenerationFailed, e.to_string()))?;
 
     if server_profiles.is_empty() {
         return Err(ProxyError::config(
@@ -147,6 +144,21 @@ pub fn generate_config(
         inbound["tcp_fast_open"] = json!(true);
         if routing_mode == "system-proxy" {
             inbound["set_system_proxy"] = json!(true);
+        }
+    }
+
+    // Honour allow_lan: bind mixed inbound to 0.0.0.0 when true.
+    // When allow_lan is false, the base template default (127.0.0.1) is used.
+    let listen_addr = if settings.allow_lan {
+        "0.0.0.0"
+    } else {
+        "127.0.0.1"
+    };
+    if let Some(inbounds) = config["inbounds"].as_array_mut() {
+        for inbound in inbounds.iter_mut() {
+            if inbound.get("type").and_then(|t| t.as_str()) == Some("mixed") {
+                inbound["listen"] = json!(listen_addr);
+            }
         }
     }
 
@@ -349,8 +361,8 @@ pub fn generate_config(
         }
     }
 
-    let json_string =
-        serde_json::to_string_pretty(&config).map_err(|e| ProxyError::config(ErrorCode::ConfigGenerationFailed, e.to_string()))?;
+    let json_string = serde_json::to_string_pretty(&config)
+        .map_err(|e| ProxyError::config(ErrorCode::ConfigGenerationFailed, e.to_string()))?;
 
     Ok((json_string, stats_port))
 }
@@ -388,7 +400,8 @@ pub fn generate_kill_switch_config(
         }
     });
 
-    serde_json::to_string_pretty(&config).map_err(|e| ProxyError::config(ErrorCode::ConfigGenerationFailed, e.to_string()))
+    serde_json::to_string_pretty(&config)
+        .map_err(|e| ProxyError::config(ErrorCode::ConfigGenerationFailed, e.to_string()))
 }
 
 pub fn write_config(json: &str, config_dir: &Path) -> Result<std::path::PathBuf, ProxyError> {
@@ -647,7 +660,7 @@ fn build_tuic(profile: &ServerProfile) -> Value {
 }
 
 /// Apply anti-DPI measures to outbounds with TLS enabled.
-/// Uses utls fingerprint randomization (equivalent to karing's TLS fragment / mixed-case SNI).
+/// Uses utls fingerprint randomization.
 fn apply_anti_dpi(outbound: &mut Value) {
     // Only apply to outbounds with TLS
     if outbound
@@ -749,7 +762,11 @@ pub fn generate_batch_config(
     if servers.len() != ports.len() {
         return Err(ProxyError::config(
             ErrorCode::ConfigGenerationFailed,
-            format!("servers.len()={} != ports.len()={}", servers.len(), ports.len()),
+            format!(
+                "servers.len()={} != ports.len()={}",
+                servers.len(),
+                ports.len()
+            ),
         ));
     }
 
@@ -778,7 +795,19 @@ pub fn generate_batch_config(
         proxy_tags.push(tag.clone());
         let mut ob = build_outbound(profile)?;
         ob["tag"] = json!(tag);
-        // Custom tag prefix for debugging
+        // Apply the same per-outbound transformations as generate_config:
+        // anti-DPI (uTLS fingerprint), TLS insecure override, and mux.
+        if crate::proxy::batcher::batch_anti_dpi() {
+            apply_anti_dpi(&mut ob);
+        }
+        if !crate::proxy::batcher::batch_tls_insecure() {
+            if let Some(tls) = ob.get_mut("tls") {
+                tls["insecure"] = json!(false);
+            }
+        }
+        if crate::proxy::batcher::batch_enable_mux() {
+            apply_mux(&mut ob);
+        }
         outbounds.push(ob);
     }
 
@@ -796,7 +825,7 @@ pub fn generate_batch_config(
         "outbound": "direct",
     }));
 
-    let mut config = json!({
+    let config = json!({
         "log": {
             "level": "warn",
             "output": log_str,
@@ -807,6 +836,7 @@ pub fn generate_batch_config(
                 {"type": "local", "tag": "local"}
             ],
             "final": "local",
+            "strategy": "prefer_ipv4"
         },
         "inbounds": inbounds,
         "outbounds": outbounds,
@@ -817,16 +847,17 @@ pub fn generate_batch_config(
             "default_domain_resolver": "local",
         },
         "experimental": {
-            "cache_file": { "enabled": false },
-            "clash_api": { "external_controller": "127.0.0.1:0", "secret": "" },
+            // Enable cache_file so TLS sessions are persisted for the
+            // lifetime of the batch temp dir. Benefits: sing-box's
+            // ClientSessionCache is persisted, so the 2nd+ requests per
+            // server (retry attempts, exit IP fetch) reuse TLS sessions
+            // instead of doing full handshakes.
+            "cache_file": {
+                "enabled": true,
+                "path": test_dir.join("cache.db").to_string_lossy().to_string(),
+            },
         },
     });
-
-    // Remove entire experimental section — clash_api with port 0 causes
-    // sing-box 1.13+ to exit with code 1, and batch testing doesn't need it.
-    if let Some(parent) = config.as_object_mut() {
-        parent.remove("experimental");
-    }
 
     Ok(config)
 }
@@ -1275,11 +1306,25 @@ mod tests {
             );
         }
 
-        // No clash_api section
+        // cache_file should be enabled for TLS session persistence
+        let experimental = config.get("experimental");
         assert!(
-            config.get("experimental").is_none(),
-            "experimental section should be removed"
+            experimental.is_some(),
+            "experimental section should exist with cache_file"
         );
+        if let Some(exp) = experimental {
+            assert!(
+                exp.get("cache_file")
+                    .and_then(|c| c.get("enabled"))
+                    .and_then(|e| e.as_bool())
+                    .unwrap_or(false),
+                "cache_file.enabled should be true"
+            );
+            assert!(
+                exp.get("clash_api").is_none(),
+                "clash_api should not be in experimental section"
+            );
+        }
         let _ = std::fs::remove_dir_all(&test_dir);
     }
 

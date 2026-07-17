@@ -4,18 +4,16 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use rmcp::{
-    ErrorData,
     model::{
-        self, CallToolRequestParams, CallToolResult, ContentBlock,
-        Implementation, ListResourcesResult,
-        ListToolsResult, PaginatedRequestParams,
-        ReadResourceResult, Resource, ResourceContents,
-        ServerCapabilities, ServerInfo, Tool, ToolsCapability,
-        ResourcesCapability,
+        self, CallToolRequestParams, CallToolResult, ContentBlock, Implementation,
+        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ReadResourceResult, Resource,
+        ResourceContents, ResourcesCapability, ServerCapabilities, ServerInfo, Tool,
+        ToolsCapability,
     },
+    serve_server,
     service::{MaybeSendFuture, RequestContext, RoleServer},
     transport::{self, async_rw::AsyncRwTransport},
-    ServerHandler, serve_server,
+    ErrorData, ServerHandler,
 };
 
 use crate::logging::{log_to_logger, LogLevel, LogSource, Logger};
@@ -41,7 +39,7 @@ struct ServerState {
     _logger: Arc<Mutex<Logger>>,
     cache: Arc<ServerCache>,
     port_pool: Arc<PortPool>,
-    cancel_token: tokio_util::sync::CancellationToken,
+    cancel_token: Arc<std::sync::Mutex<tokio_util::sync::CancellationToken>>,
 }
 
 struct Handler {
@@ -49,8 +47,14 @@ struct Handler {
 }
 
 fn binary_name() -> &'static str {
-    #[cfg(target_os = "windows")] { "sing-box.exe" }
-    #[cfg(not(target_os = "windows"))] { "sing-box" }
+    #[cfg(target_os = "windows")]
+    {
+        "sing-box.exe"
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        "sing-box"
+    }
 }
 
 fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
@@ -67,14 +71,27 @@ fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
     // Create cache, port pool, and cancellation token
     let cache = Arc::new(ServerCache::new(&data_dir));
     let port_pool = Arc::new(PortPool::new());
-    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let cancel_token = Arc::new(std::sync::Mutex::new(
+        tokio_util::sync::CancellationToken::new(),
+    ));
 
-    log_to_logger(&*logger, LogLevel::Info, LogSource::System,
-        format!("MCP server starting (data_dir: {:?})", data_dir));
+    log_to_logger(
+        &*logger,
+        LogLevel::Info,
+        LogSource::System,
+        format!("MCP server starting (data_dir: {:?})", data_dir),
+    );
 
     Ok(ServerState {
-        process_mgr, profile_mgr, settings_mgr, bin_path, data_dir, _logger: logger,
-        cache, port_pool, cancel_token,
+        process_mgr,
+        profile_mgr,
+        settings_mgr,
+        bin_path,
+        data_dir,
+        _logger: logger,
+        cache,
+        port_pool,
+        cancel_token,
     })
 }
 
@@ -84,7 +101,10 @@ fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
 // This ensures the same server always gets the same ID (cache re-use across calls).
 // the key used by ProfileManager::refresh for cross-refresh ID preservation.
 fn profile_from_args(args: &serde_json::Value) -> ServerProfile {
-    let protocol = args.get("protocol").and_then(|v| v.as_str()).unwrap_or("vless");
+    let protocol = args
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .unwrap_or("vless");
     let server = args.get("server").and_then(|v| v.as_str()).unwrap_or("");
     let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
     let uuid = args.get("uuid").and_then(|v| v.as_str()).unwrap_or("");
@@ -106,25 +126,76 @@ fn profile_from_args(args: &serde_json::Value) -> ServerProfile {
         protocol: protocol.into(),
         server: server.into(),
         port,
-        uuid: if uuid.is_empty() { None } else { Some(uuid.into()) },
-        password: if password.is_empty() { None } else { Some(password.into()) },
-        method: if method.is_empty() { None } else { Some(method.into()) },
+        uuid: if uuid.is_empty() {
+            None
+        } else {
+            Some(uuid.into())
+        },
+        password: if password.is_empty() {
+            None
+        } else {
+            Some(password.into())
+        },
+        method: if method.is_empty() {
+            None
+        } else {
+            Some(method.into())
+        },
         sni: args.get("sni").and_then(|v| v.as_str()).map(String::from),
         flow: args.get("flow").and_then(|v| v.as_str()).map(String::from),
-        public_key: args.get("public_key").and_then(|v| v.as_str()).map(String::from),
-        private_key: args.get("private_key").and_then(|v| v.as_str()).map(String::from),
-        transport_type: args.get("transport_type").and_then(|v| v.as_str()).map(String::from),
-        transport_path: args.get("transport_path").and_then(|v| v.as_str()).map(String::from),
-        transport_host: args.get("transport_host").and_then(|v| v.as_str()).map(String::from),
-        reality_pbk: args.get("reality_pbk").and_then(|v| v.as_str()).map(String::from),
-        reality_sid: args.get("reality_sid").and_then(|v| v.as_str()).map(String::from),
-        username: args.get("username").and_then(|v| v.as_str()).map(String::from),
+        public_key: args
+            .get("public_key")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        private_key: args
+            .get("private_key")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        transport_type: args
+            .get("transport_type")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        transport_path: args
+            .get("transport_path")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        transport_host: args
+            .get("transport_host")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        reality_pbk: args
+            .get("reality_pbk")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        reality_sid: args
+            .get("reality_sid")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        username: args
+            .get("username")
+            .and_then(|v| v.as_str())
+            .map(String::from),
         // WireGuard fields for profile construction.
-        wg_local_address: args.get("wg_local_address").and_then(|v| v.as_str()).map(String::from),
-        wg_allowed_ips: args.get("wg_allowed_ips").and_then(|v| v.as_str()).map(String::from),
-        wg_dns: args.get("wg_dns").and_then(|v| v.as_str()).map(String::from),
-        wg_mtu: args.get("wg_mtu").and_then(|v| v.as_u64()).map(|n| n as u16),
-        wg_keepalive: args.get("wg_keepalive").and_then(|v| v.as_u64()).map(|n| n as u16),
+        wg_local_address: args
+            .get("wg_local_address")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        wg_allowed_ips: args
+            .get("wg_allowed_ips")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        wg_dns: args
+            .get("wg_dns")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        wg_mtu: args
+            .get("wg_mtu")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u16),
+        wg_keepalive: args
+            .get("wg_keepalive")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u16),
         ..Default::default()
     }
 }
@@ -192,7 +263,8 @@ async fn launch_sing_box(
         routing_mode,
         profiles,
         &settings,
-    ).map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+    )
+    .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
     let cpath = crate::proxy::config::write_config(&cfg, &state.data_dir.join("config"))
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
@@ -203,7 +275,10 @@ async fn launch_sing_box(
     //   - Unix process_group(0) — clean group kill
     //   - Linux PR_SET_PDEATHSIG — sing-box killed when MCP parent dies
     //   - Stale PID detection — won't double-spawn
-    let pid = state.process_mgr.start_headless(&cpath).await
+    let pid = state
+        .process_mgr
+        .start_headless(&cpath)
+        .await
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
     // Fire-and-forget: don't wait for port readiness here.
@@ -217,15 +292,30 @@ async fn launch_sing_box(
 
 impl Handler {
     async fn cmd_start(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
-        let server = args.get("server").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+        let server = args
+            .get("server")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
             .ok_or_else(|| ErrorData::invalid_params("'server' is required", None))?;
-        let port = args.get("port").and_then(|v| v.as_u64())
-            .ok_or_else(|| ErrorData::invalid_params("'port' is required", None))? as u16;
-        let proxy_port = args.get("proxy_port").and_then(|v| v.as_u64()).unwrap_or(5055) as u16;
-        let routing_mode = args.get("routing_mode").and_then(|v| v.as_str()).unwrap_or("system-proxy");
+        let port = args
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| ErrorData::invalid_params("'port' is required", None))?
+            as u16;
+        let proxy_port = args
+            .get("proxy_port")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5055) as u16;
+        let routing_mode = args
+            .get("routing_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("system-proxy");
         // auto_reconnect defaults to false for QA — the agent
         // should observe crashes, not have them silently fixed.
-        let auto_reconnect = args.get("auto_reconnect").and_then(|v| v.as_bool()).unwrap_or(false);
+        let auto_reconnect = args
+            .get("auto_reconnect")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let mut profile = profile_from_args(&args);
         profile.server = server.into();
@@ -239,7 +329,8 @@ impl Handler {
         }
 
         let state = self.state.lock().await;
-        let (pid, actual_port) = launch_sing_box(&state, proxy_port, routing_mode, &[profile.clone()], None).await?;
+        let (pid, actual_port) =
+            launch_sing_box(&state, proxy_port, routing_mode, &[profile.clone()], None).await?;
         state.process_mgr.set_pid(pid);
         // Store LAST_PROFILE for auto-reconnect on sing-box crash.
         {
@@ -254,9 +345,9 @@ impl Handler {
         }
         // Spawn watchdog (crash detector + optional auto-reconnect).
         spawn_proxy_watchdog(self.state.clone(), pid, actual_port, auto_reconnect);
-        Ok(CallToolResult::success(vec![
-            ContentBlock::text(format!("Proxy started (PID {pid}) on port {actual_port}"))
-        ]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Proxy started (PID {pid}) on port {actual_port}"
+        ))]))
     }
 
     async fn cmd_stop(&self) -> Result<CallToolResult, ErrorData> {
@@ -275,9 +366,14 @@ impl Handler {
                 .unwrap_or_else(|e| e.into_inner());
             *last = None;
         }
-        state.process_mgr.stop().await
+        state
+            .process_mgr
+            .stop()
+            .await
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text("Proxy stopped")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "Proxy stopped",
+        )]))
     }
 
     async fn cmd_status(&self) -> Result<CallToolResult, ErrorData> {
@@ -297,8 +393,8 @@ impl Handler {
         };
 
         // Read supplementary state from the same globals the Tauri version uses.
-        let clash_api_port = crate::proxy::CLASH_API_PORT
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let clash_api_port =
+            crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
         let active_server_id = crate::proxy::ACTIVE_SERVER_ID
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -314,28 +410,64 @@ impl Handler {
             "binary_installed": binary_installed,
             "uptime_secs": null,
         });
-        Ok(CallToolResult::success(vec![ContentBlock::text(info.to_string())]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            info.to_string(),
+        )]))
     }
 
     async fn cmd_profiles(&self) -> Result<CallToolResult, ErrorData> {
         let state = self.state.lock().await;
-        let j = serde_json::to_string_pretty(state.profile_mgr.list())
-            .unwrap_or_else(|_| "[]".into());
+        let j =
+            serde_json::to_string_pretty(state.profile_mgr.list()).unwrap_or_else(|_| "[]".into());
         Ok(CallToolResult::success(vec![ContentBlock::text(j)]))
     }
 
     async fn cmd_add_sub(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
-        let url = args.get("url").and_then(|v| v.as_str())
+        let url = args
+            .get("url")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| ErrorData::invalid_params("'url' is required", None))?;
         let name = args.get("name").and_then(|v| v.as_str()).unwrap_or(url);
+        let url_owned = url.to_string();
+        let profile_id = uuid::Uuid::new_v4().to_string();
+
+        // Fetch + parse + process_servers (TCP ping + batch test), same as Tauri path.
+        // Servers only appear in the profile AFTER full testing (no raw saves).
+        let (data_dir, settings, cache) = {
+            let state = self.state.lock().await;
+            (
+                state.data_dir.clone(),
+                state.settings_mgr.load().unwrap_or_default(),
+                state.cache.clone(),
+            )
+        };
+
+        let servers = if url.starts_with("http://") || url.starts_with("https://") {
+            crate::subscription::fetch_subscription(&url_owned, None)
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+        } else {
+            crate::subscription::parser::parse_subscription(&url_owned)
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+        };
+
+        let servers = crate::profile::process_servers_inner(
+            &data_dir,
+            &settings,
+            servers,
+            &profile_id,
+            Some(&cache),
+            None,
+        )
+        .await;
 
         let profile = crate::subscription::SubscriptionProfile {
-            id: uuid::Uuid::new_v4().to_string(),
-            url: url.into(),
+            id: profile_id,
+            url: url_owned,
             name: name.into(),
-            servers: Vec::new(),
+            servers,
             updated_at: chrono::Utc::now().to_rfc3339(),
-            last_tested: None,
+            last_tested: Some(chrono::Utc::now().to_rfc3339()),
             traffic_used: None,
             traffic_total: None,
             traffic_expiry: None,
@@ -343,7 +475,9 @@ impl Handler {
 
         let mut state = self.state.lock().await;
         state.profile_mgr.list_mut().push(profile.clone());
-        state.profile_mgr.save()
+        state
+            .profile_mgr
+            .save()
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
 
         let j = serde_json::to_string_pretty(&profile).unwrap_or_default();
@@ -351,21 +485,27 @@ impl Handler {
     }
 
     async fn cmd_refresh_sub(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
-        let id = args.get("id").and_then(|v| v.as_str())
+        let id = args
+            .get("id")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| ErrorData::invalid_params("'id' is required", None))?
             .to_string();
 
         // Phase 1: read lock — get URL + settings + data_dir
         let (url, data_dir, settings, cache) = {
             let state = self.state.lock().await;
-            let url = state.profile_mgr.list().iter()
+            let url = state
+                .profile_mgr
+                .list()
+                .iter()
                 .find(|p| p.id == id)
-                .ok_or_else(|| ErrorData::invalid_params(format!("Profile '{id}' not found"), None))?
+                .ok_or_else(|| {
+                    ErrorData::invalid_params(format!("Profile '{id}' not found"), None)
+                })?
                 .url
                 .clone();
             let data_dir = state.data_dir.clone();
-            let settings = state.settings_mgr.load()
-                .unwrap_or_default();
+            let settings = state.settings_mgr.load().unwrap_or_default();
             let cache = state.cache.clone();
             (url, data_dir, settings, cache)
         }; // lock released
@@ -377,14 +517,23 @@ impl Handler {
             match crate::subscription::fetch_subscription(&url, None).await {
                 Ok(servers) => {
                     let enriched = crate::profile::process_servers_inner(
-                        &data_dir, &settings, servers, &bg_id, Some(&cache), None,
-                    ).await;
+                        &data_dir,
+                        &settings,
+                        servers,
+                        &bg_id,
+                        Some(&cache),
+                        None,
+                    )
+                    .await;
                     let count = enriched.len();
                     {
                         let mut state = bg_state.lock().await;
-                        if let Some(idx) = state.profile_mgr.list().iter().position(|p| p.id == bg_id) {
+                        if let Some(idx) =
+                            state.profile_mgr.list().iter().position(|p| p.id == bg_id)
+                        {
                             state.profile_mgr.list_mut()[idx].servers = enriched;
-                            state.profile_mgr.list_mut()[idx].updated_at = chrono::Utc::now().to_rfc3339();
+                            state.profile_mgr.list_mut()[idx].updated_at =
+                                chrono::Utc::now().to_rfc3339();
                             let _ = state.profile_mgr.save();
                             tracing::info!(target: "subscription",
                                 "Background refresh completed: {count} server(s) for profile {bg_id}");
@@ -398,16 +547,20 @@ impl Handler {
             }
         });
 
-        Ok(CallToolResult::success(vec![
-            ContentBlock::text(format!("Refresh started in background for profile '{id}'"))
-        ]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Refresh started in background for profile '{id}'"
+        ))]))
     }
 
     async fn cmd_remove_sub(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
         // Accept both "id" and "subscription_id" for backward compat.
-        let id = args.get("id").and_then(|v| v.as_str())
+        let id = args
+            .get("id")
+            .and_then(|v| v.as_str())
             .or_else(|| args.get("subscription_id").and_then(|v| v.as_str()))
-            .ok_or_else(|| ErrorData::invalid_params("'id' (or 'subscription_id') is required", None))?;
+            .ok_or_else(|| {
+                ErrorData::invalid_params("'id' (or 'subscription_id') is required", None)
+            })?;
 
         // If the proxy is currently connected to a server in this
         // profile, stop it first to avoid leaving a stale proxy running.
@@ -418,7 +571,10 @@ impl Handler {
                 .clone();
             if let Some(ref active) = active_id {
                 let state = self.state.lock().await;
-                let in_profile = state.profile_mgr.list().iter()
+                let in_profile = state
+                    .profile_mgr
+                    .list()
+                    .iter()
                     .find(|p| p.id == id)
                     .map(|p| p.servers.iter().any(|s| &s.id == active))
                     .unwrap_or(false);
@@ -446,11 +602,17 @@ impl Handler {
         state.profile_mgr.list_mut().retain(|p| p.id != id);
         let removed = len_before.saturating_sub(state.profile_mgr.list().len());
         if removed == 0 {
-            return Err(ErrorData::invalid_params(format!("Profile '{id}' not found"), None));
+            return Err(ErrorData::invalid_params(
+                format!("Profile '{id}' not found"),
+                None,
+            ));
         }
 
         // Prune cache entries for removed servers.
-        let remaining_ids: std::collections::HashSet<String> = state.profile_mgr.list().iter()
+        let remaining_ids: std::collections::HashSet<String> = state
+            .profile_mgr
+            .list()
+            .iter()
             .flat_map(|p| p.servers.iter().map(|s| s.id.clone()))
             .collect();
         let cache = state.cache.clone();
@@ -459,27 +621,53 @@ impl Handler {
         cache.save_to_disk().await;
 
         let state = self.state.lock().await;
-        state.profile_mgr.save()
+        state
+            .profile_mgr
+            .save()
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(format!("Removed {removed} profile(s)"))]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Removed {removed} profile(s)"
+        ))]))
     }
 
     async fn cmd_start_server(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
-        let sub_id = args.get("subscription_id").and_then(|v| v.as_str())
+        let sub_id = args
+            .get("subscription_id")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| ErrorData::invalid_params("'subscription_id' is required", None))?;
-        let server_id = args.get("server_id").and_then(|v| v.as_str())
+        let server_id = args
+            .get("server_id")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| ErrorData::invalid_params("'server_id' is required", None))?;
-        let proxy_port = args.get("proxy_port").and_then(|v| v.as_u64()).unwrap_or(5055) as u16;
-        let routing_mode = args.get("routing_mode").and_then(|v| v.as_str()).unwrap_or("system-proxy");
-        let auto_reconnect = args.get("auto_reconnect").and_then(|v| v.as_bool()).unwrap_or(false);
+        let proxy_port = args
+            .get("proxy_port")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5055) as u16;
+        let routing_mode = args
+            .get("routing_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("system-proxy");
+        let auto_reconnect = args
+            .get("auto_reconnect")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let state = self.state.lock().await;
-        let profile = state.profile_mgr.list().iter()
+        let profile = state
+            .profile_mgr
+            .list()
+            .iter()
             .find(|p| p.id == sub_id)
-            .ok_or_else(|| ErrorData::invalid_params(format!("Subscription '{sub_id}' not found"), None))?;
-        let server = profile.servers.iter()
+            .ok_or_else(|| {
+                ErrorData::invalid_params(format!("Subscription '{sub_id}' not found"), None)
+            })?;
+        let server = profile
+            .servers
+            .iter()
             .find(|s| s.id == server_id)
-            .ok_or_else(|| ErrorData::invalid_params(format!("Server '{server_id}' not found"), None))?;
+            .ok_or_else(|| {
+                ErrorData::invalid_params(format!("Server '{server_id}' not found"), None)
+            })?;
 
         // Track the active server ID for this subscription server too.
         {
@@ -489,7 +677,8 @@ impl Handler {
             *active = Some(server.id.clone());
         }
 
-        let (pid, actual_port) = launch_sing_box(&state, proxy_port, routing_mode, &[server.clone()], None).await?;
+        let (pid, actual_port) =
+            launch_sing_box(&state, proxy_port, routing_mode, &[server.clone()], None).await?;
         state.process_mgr.set_pid(pid);
         // Store LAST_PROFILE for auto-reconnect.
         {
@@ -503,9 +692,10 @@ impl Handler {
             });
         }
         spawn_proxy_watchdog(self.state.clone(), pid, actual_port, auto_reconnect);
-        Ok(CallToolResult::success(vec![
-            ContentBlock::text(format!("Proxy started (PID {pid}) via server '{}' on port {actual_port}", server.server))
-        ]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Proxy started (PID {pid}) via server '{}' on port {actual_port}",
+            server.server
+        ))]))
     }
 
     async fn cmd_settings(&self) -> Result<CallToolResult, ErrorData> {
@@ -519,35 +709,67 @@ impl Handler {
 
     /// Return recent log entries from the Logger ring buffer.
     async fn cmd_get_logs(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
-        let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-        let source = args.get("source").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
-        let max_lines = args.get("max_lines").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+        let level = args
+            .get("level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let source = args
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let max_lines = args
+            .get("max_lines")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100) as usize;
         let state = self.state.lock().await;
-        let entries = state._logger.lock().unwrap_or_else(|e| e.into_inner()).entries();
-        let filtered: Vec<_> = entries.iter()
-            .filter(|e| level.is_empty() || format!("{:?}", e.level).to_lowercase().contains(&level))
-            .filter(|e| source.is_empty() || format!("{:?}", e.source).to_lowercase().contains(&source))
+        let entries = state
+            ._logger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entries();
+        let filtered: Vec<_> = entries
+            .iter()
+            .filter(|e| {
+                level.is_empty() || format!("{:?}", e.level).to_lowercase().contains(&level)
+            })
+            .filter(|e| {
+                source.is_empty() || format!("{:?}", e.source).to_lowercase().contains(&source)
+            })
             .rev()
             .take(max_lines)
-            .map(|e| serde_json::json!({
-                "timestamp": e.timestamp,
-                "level": format!("{:?}", e.level),
-                "source": format!("{:?}", e.source),
-                "message": e.message,
-            }))
+            .map(|e| {
+                serde_json::json!({
+                    "timestamp": e.timestamp,
+                    "level": format!("{:?}", e.level),
+                    "source": format!("{:?}", e.source),
+                    "message": e.message,
+                })
+            })
             .collect();
         Ok(CallToolResult::success(vec![ContentBlock::json(filtered)?]))
     }
 
     /// Read the last N bytes of sing-box's stderr log (for crash diagnosis).
-    async fn cmd_get_singbox_stderr(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
-        let max_bytes = args.get("max_bytes").and_then(|v| v.as_u64()).unwrap_or(4096) as usize;
+    async fn cmd_get_singbox_stderr(
+        &self,
+        args: serde_json::Value,
+    ) -> Result<CallToolResult, ErrorData> {
+        let max_bytes = args
+            .get("max_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(4096) as usize;
         let state = self.state.lock().await;
         let stderr_path = state.data_dir.join("config").join("sing-box-stderr.log");
         let content = match std::fs::read_to_string(&stderr_path) {
             Ok(s) => {
                 if s.len() > max_bytes {
-                    format!("... (showing last {max_bytes} of {} bytes)\n{}", s.len(), &s[s.len().saturating_sub(max_bytes)..])
+                    format!(
+                        "... (showing last {max_bytes} of {} bytes)\n{}",
+                        s.len(),
+                        &s[s.len().saturating_sub(max_bytes)..]
+                    )
                 } else {
                     s
                 }
@@ -559,11 +781,19 @@ impl Handler {
 
     /// Batch-test a single server: ping latency + exit IP detection.
     /// Does NOT start the main proxy — runs a standalone sing-box instance.
-    async fn cmd_test_single_server(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
-        let server_host = args.get("server").and_then(|v| v.as_str())
+    async fn cmd_test_single_server(
+        &self,
+        args: serde_json::Value,
+    ) -> Result<CallToolResult, ErrorData> {
+        let server_host = args
+            .get("server")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| ErrorData::invalid_params("'server' is required", None))?;
-        let server_port = args.get("port").and_then(|v| v.as_u64())
-            .ok_or_else(|| ErrorData::invalid_params("'port' is required", None))? as u16;
+        let server_port = args
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| ErrorData::invalid_params("'port' is required", None))?
+            as u16;
         let mut profile = profile_from_args(&args);
         profile.server = server_host.into();
         profile.port = server_port;
@@ -605,7 +835,9 @@ impl Handler {
         let state = self.state.lock().await;
         crate::proxy::persistence::clear_cache(&state.data_dir);
         state.cache.load_from_disk().await;
-        Ok(CallToolResult::success(vec![ContentBlock::text("Cache cleared")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "Cache cleared",
+        )]))
     }
 
     /// Download ipinfo.io Lite GeoIP database.
@@ -617,65 +849,140 @@ impl Handler {
             (s, d)
         };
         if settings.ipinfo_token.is_empty() {
-            return Err(ErrorData::invalid_params("IPinfo API token not set in settings", None));
+            return Err(ErrorData::invalid_params(
+                "IPinfo API token not set in settings",
+                None,
+            ));
         }
         let geo_dir = data_dir.join("geoip");
         match crate::proxy::geoip::download_ipinfo_db(&geo_dir, &settings.ipinfo_token).await {
-            Ok(true) => Ok(CallToolResult::success(vec![ContentBlock::text("downloaded")])),
-            Ok(false) => Ok(CallToolResult::success(vec![ContentBlock::text("skipped (rate-limited or up-to-date)")])),
+            Ok(true) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                "downloaded",
+            )])),
+            Ok(false) => Ok(CallToolResult::success(vec![ContentBlock::text(
+                "skipped (rate-limited or up-to-date)",
+            )])),
             Err(e) => Err(ErrorData::internal_error(e, None)),
         }
     }
 
     /// Update application settings (partial update). Accepts routing_mode, proxy_port, bypass_ru, etc.
-    async fn cmd_update_settings(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
+    async fn cmd_update_settings(
+        &self,
+        args: serde_json::Value,
+    ) -> Result<CallToolResult, ErrorData> {
         let mut settings = {
             let state = self.state.lock().await;
             state.settings_mgr.load().unwrap_or_default()
         };
-        if let Some(v) = args.get("routing_mode").and_then(|v| v.as_str()) { settings.routing_mode = v.into(); }
-        if let Some(v) = args.get("proxy_port").and_then(|v| v.as_u64()) { settings.proxy_port = v as u16; }
-        if let Some(v) = args.get("bypass_ru").and_then(|v| v.as_bool()) { settings.bypass_ru = v; }
-        if let Some(v) = args.get("allow_lan").and_then(|v| v.as_bool()) { settings.allow_lan = v; }
-        if let Some(v) = args.get("kill_switch").and_then(|v| v.as_bool()) { settings.kill_switch = v; }
-        if let Some(v) = args.get("anti_dpi").and_then(|v| v.as_bool()) { settings.anti_dpi = v; }
-        if let Some(v) = args.get("enable_mux").and_then(|v| v.as_bool()) { settings.enable_mux = v; }
-        if let Some(v) = args.get("block_cdn_nodes").and_then(|v| v.as_bool()) { settings.block_cdn_nodes = v; }
-        if let Some(v) = args.get("auto_update_interval").and_then(|v| v.as_u64()) { settings.auto_update_interval = v as u32; }
-        if let Some(v) = args.get("auto_test_interval").and_then(|v| v.as_u64()) { settings.auto_test_interval = v as u32; }
-        if let Some(v) = args.get("test_url").and_then(|v| v.as_str()) { settings.test_url = v.into(); }
-        if let Some(v) = args.get("test_use_tls").and_then(|v| v.as_bool()) { settings.test_use_tls = v; }
+        if let Some(v) = args.get("routing_mode").and_then(|v| v.as_str()) {
+            settings.routing_mode = v.into();
+        }
+        if let Some(v) = args.get("proxy_port").and_then(|v| v.as_u64()) {
+            settings.proxy_port = v as u16;
+        }
+        if let Some(v) = args.get("bypass_ru").and_then(|v| v.as_bool()) {
+            settings.bypass_ru = v;
+        }
+        if let Some(v) = args.get("allow_lan").and_then(|v| v.as_bool()) {
+            settings.allow_lan = v;
+        }
+        if let Some(v) = args.get("kill_switch").and_then(|v| v.as_bool()) {
+            settings.kill_switch = v;
+        }
+        if let Some(v) = args.get("anti_dpi").and_then(|v| v.as_bool()) {
+            settings.anti_dpi = v;
+        }
+        if let Some(v) = args.get("enable_mux").and_then(|v| v.as_bool()) {
+            settings.enable_mux = v;
+        }
+        if let Some(v) = args.get("block_cdn_nodes").and_then(|v| v.as_bool()) {
+            settings.block_cdn_nodes = v;
+        }
+        if let Some(v) = args.get("auto_update_interval").and_then(|v| v.as_u64()) {
+            settings.auto_update_interval = v as u32;
+        }
+        if let Some(v) = args.get("auto_test_interval").and_then(|v| v.as_u64()) {
+            settings.auto_test_interval = v as u32;
+        }
+        if let Some(v) = args.get("test_url").and_then(|v| v.as_str()) {
+            settings.test_url = v.into();
+        }
+        if let Some(v) = args.get("test_use_tls").and_then(|v| v.as_bool()) {
+            settings.test_use_tls = v;
+        }
         settings.normalize();
         crate::proxy::batcher::set_configured_test_url(&settings.test_url, settings.test_use_tls);
         let state = self.state.lock().await;
-        state.settings_mgr.save(&settings).map_err(|e| ErrorData::internal_error(e, None))?;
+        state
+            .settings_mgr
+            .save(&settings)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
         let json = serde_json::to_string_pretty(&settings).unwrap_or_default();
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     /// Import subscription from raw content (base64 or URI list).
-    async fn cmd_import_subscription_content(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
-        let name = args.get("name").and_then(|v| v.as_str())
+    async fn cmd_import_subscription_content(
+        &self,
+        args: serde_json::Value,
+    ) -> Result<CallToolResult, ErrorData> {
+        let name = args
+            .get("name")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| ErrorData::invalid_params("'name' is required", None))?;
-        let content = args.get("content").and_then(|v| v.as_str())
+        let content = args
+            .get("content")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| ErrorData::invalid_params("'content' is required", None))?;
         let servers = crate::subscription::parser::parse_subscription(content)
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         if servers.is_empty() {
-            return Err(ErrorData::invalid_params("No servers found in content", None));
+            return Err(ErrorData::invalid_params(
+                "No servers found in content",
+                None,
+            ));
         }
+        let profile_id = uuid::Uuid::new_v4().to_string();
+
+        // Extract cache + data_dir, run process_servers, then save
+        let (processed, _data_dir, cache) = {
+            let state = self.state.lock().await;
+            let data_dir = state.data_dir.clone();
+            let cache = state.cache.clone();
+            drop(state);
+            let processed = crate::profile::process_servers_inner(
+                &data_dir,
+                &crate::settings::AppSettings::default(),
+                servers,
+                &profile_id,
+                Some(&cache),
+                None,
+            )
+            .await;
+            (processed, data_dir, cache)
+        };
+
+        // Persist cache to disk
+        cache.save_to_disk().await;
+
         let profile = crate::subscription::SubscriptionProfile {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: profile_id,
             name: name.into(),
             url: format!("content://{}", uuid::Uuid::new_v4()),
-            servers,
+            servers: processed,
             updated_at: chrono::Utc::now().to_rfc3339(),
             last_tested: None,
-            traffic_used: None, traffic_total: None, traffic_expiry: None,
+            traffic_used: None,
+            traffic_total: None,
+            traffic_expiry: None,
         };
         let mut state = self.state.lock().await;
         state.profile_mgr.list_mut().push(profile.clone());
-        state.profile_mgr.save().map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        state
+            .profile_mgr
+            .save()
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&profile).unwrap_or_default();
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
@@ -686,7 +993,9 @@ impl Handler {
         let geo_dir = state.data_dir.join("geoip");
         let meta = crate::proxy::geoip::get_geoip_meta(&geo_dir);
         let j = serde_json::to_value(&meta).unwrap_or_default();
-        Ok(CallToolResult::success(vec![ContentBlock::text(j.to_string())]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            j.to_string(),
+        )]))
     }
 
     /// Get real IP (before proxy) via ipify / ip.sb / ifconfig.me.
@@ -698,7 +1007,9 @@ impl Handler {
                     "country_code": info.flag,
                     "country_name": info.country_name,
                 });
-                Ok(CallToolResult::success(vec![ContentBlock::text(j.to_string())]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    j.to_string(),
+                )]))
             }
             Err(e) => Err(ErrorData::internal_error(e, None)),
         }
@@ -727,7 +1038,10 @@ impl Handler {
                 let text = resp.text().await.unwrap_or_default();
                 Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
             }
-            Err(e) => Err(ErrorData::internal_error(format!("Proxy route check failed: {e}",), None)),
+            Err(e) => Err(ErrorData::internal_error(
+                format!("Proxy route check failed: {e}",),
+                None,
+            )),
         }
     }
 
@@ -739,8 +1053,10 @@ impl Handler {
                 serde_json::json!({"healthy": false, "delay_ms": null, "reason": "proxy not connected"}).to_string()
             )]));
         }
-        let client = reqwest::Client::builder().no_proxy()
-            .timeout(std::time::Duration::from_secs(7)).build()
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(7))
+            .build()
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         let url = format!(
             "http://127.0.0.1:{stats_port}/proxies/proxy/delay?url=http://cp.cloudflare.com/generate_204&timeout=5000"
@@ -766,21 +1082,36 @@ impl Handler {
     async fn cmd_speed_test(&self) -> Result<CallToolResult, ErrorData> {
         let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
         if stats_port == 0 {
-            return Err(ErrorData::internal_error("Proxy not connected".to_string(), None));
+            return Err(ErrorData::internal_error(
+                "Proxy not connected".to_string(),
+                None,
+            ));
         }
-        let client = reqwest::Client::builder().no_proxy()
-            .timeout(std::time::Duration::from_secs(10)).build()
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         let api_url = format!("http://127.0.0.1:{stats_port}");
-        let groups_resp = client.get(format!("{api_url}/proxies")).send().await
+        let groups_resp = client
+            .get(format!("{api_url}/proxies"))
+            .send()
+            .await
             .map_err(|e| ErrorData::internal_error(format!("Clash API: {e}"), None))?;
-        let groups: serde_json::Value = groups_resp.json().await
+        let groups: serde_json::Value = groups_resp
+            .json()
+            .await
             .map_err(|e| ErrorData::internal_error(format!("Parse error: {e}"), None))?;
         let mut results = Vec::new();
         if let Some(proxies) = groups.get("proxies").and_then(|p| p.as_object()) {
             for (name, proxy) in proxies {
                 let ptype = proxy.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                if matches!(ptype, "Direct" | "Reject" | "Selector" | "URLTest" | "Fallback") { continue; }
+                if matches!(
+                    ptype,
+                    "Direct" | "Reject" | "Selector" | "URLTest" | "Fallback"
+                ) {
+                    continue;
+                }
                 let delay_url = format!("{api_url}/proxies/{name}/delay?url=http://cp.cloudflare.com/generate_204&timeout=5000");
                 if let Ok(resp) = client.get(&delay_url).send().await {
                     if let Ok(body) = resp.text().await {
@@ -797,20 +1128,34 @@ impl Handler {
 
     /// Switch the active outbound to a specific tag via Clash API.
     async fn cmd_switch_proxy(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
-        let proxy_tag = args.get("proxy_tag").and_then(|v| v.as_str())
+        let proxy_tag = args
+            .get("proxy_tag")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| ErrorData::invalid_params("'proxy_tag' is required", None))?;
         let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
-        if stats_port == 0 { return Err(ErrorData::internal_error("Proxy not connected".to_string(), None)); }
-        let client = reqwest::Client::builder().no_proxy()
-            .timeout(std::time::Duration::from_secs(5)).build()
+        if stats_port == 0 {
+            return Err(ErrorData::internal_error(
+                "Proxy not connected".to_string(),
+                None,
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         let url = format!("http://127.0.0.1:{stats_port}/proxies/proxy");
         let body = serde_json::json!({ "name": proxy_tag });
         match client.put(&url).json(&body).send().await {
             Ok(resp) if resp.status().is_success() => {
-                Ok(CallToolResult::success(vec![ContentBlock::text(format!("Switched to {proxy_tag}"))]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                    "Switched to {proxy_tag}"
+                ))]))
             }
-            Ok(resp) => Err(ErrorData::internal_error(format!("Clash API HTTP {}", resp.status()), None)),
+            Ok(resp) => Err(ErrorData::internal_error(
+                format!("Clash API HTTP {}", resp.status()),
+                None,
+            )),
             Err(e) => Err(ErrorData::internal_error(format!("Clash API: {e}"), None)),
         }
     }
@@ -818,13 +1163,25 @@ impl Handler {
     /// Return active connections from the Clash API.
     async fn cmd_get_connections(&self) -> Result<CallToolResult, ErrorData> {
         let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
-        if stats_port == 0 { return Err(ErrorData::internal_error("Proxy not connected".to_string(), None)); }
-        let client = reqwest::Client::builder().no_proxy()
-            .timeout(std::time::Duration::from_secs(3)).build()
+        if stats_port == 0 {
+            return Err(ErrorData::internal_error(
+                "Proxy not connected".to_string(),
+                None,
+            ));
+        }
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        let resp = client.get(format!("http://127.0.0.1:{stats_port}/connections")).send().await
+        let resp = client
+            .get(format!("http://127.0.0.1:{stats_port}/connections"))
+            .send()
+            .await
             .map_err(|e| ErrorData::internal_error(format!("Clash API: {e}"), None))?;
-        let data: serde_json::Value = resp.json().await
+        let data: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| ErrorData::internal_error(format!("Parse error: {e}"), None))?;
         let connections = data["connections"].as_array().cloned().unwrap_or_default();
         let json = serde_json::to_string_pretty(&connections).unwrap_or_else(|_| "[]".into());
@@ -837,13 +1194,24 @@ impl Handler {
         let state = self.state.lock().await;
         let _ = state.process_mgr.stop().await;
         crate::proxy::CONNECTION_CANCELLING.store(false, std::sync::atomic::Ordering::SeqCst);
-        Ok(CallToolResult::success(vec![ContentBlock::text("Cancelled")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            "Cancelled",
+        )]))
     }
 
     /// Activate kill switch on a given port.
-    async fn cmd_activate_kill_switch(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
-        let proxy_port = args.get("proxy_port").and_then(|v| v.as_u64()).unwrap_or(5055) as u16;
-        let routing_mode = args.get("routing_mode").and_then(|v| v.as_str()).unwrap_or("system-proxy");
+    async fn cmd_activate_kill_switch(
+        &self,
+        args: serde_json::Value,
+    ) -> Result<CallToolResult, ErrorData> {
+        let proxy_port = args
+            .get("proxy_port")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5055) as u16;
+        let routing_mode = args
+            .get("routing_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("system-proxy");
         let state = self.state.lock().await;
         let _ = state.process_mgr.stop().await;
         let ks_cfg = crate::proxy::config::generate_kill_switch_config(proxy_port, routing_mode)
@@ -859,9 +1227,10 @@ impl Handler {
             .spawn()
             .map_err(|e| ErrorData::internal_error(format!("kill switch spawn: {e}"), None))?;
         state.process_mgr.set_pid(child.id());
-        Ok(CallToolResult::success(vec![
-            ContentBlock::text(format!("Kill switch active on port {proxy_port} (PID {})", child.id()))
-        ]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Kill switch active on port {proxy_port} (PID {})",
+            child.id()
+        ))]))
     }
 
     /// Deactivate kill switch (alias for stop_proxy).
@@ -890,7 +1259,9 @@ fn spawn_proxy_watchdog(
 ) {
     let cancel = {
         let s = state.blocking_lock();
-        s.cancel_token.clone()
+        let guard = s.cancel_token.lock().unwrap_or_else(|e| e.into_inner());
+        let token = guard.clone();
+        token
     };
     tokio::spawn(async move {
         loop {
@@ -960,7 +1331,15 @@ fn spawn_proxy_watchdog(
                 let s = state.lock().await;
                 let settings = s.settings_mgr.load().unwrap_or_default();
                 let last = last.clone().unwrap();
-                match launch_sing_box(&s, last.proxy_port, &last.routing_mode, &last.all_servers, Some(&settings)).await {
+                match launch_sing_box(
+                    &s,
+                    last.proxy_port,
+                    &last.routing_mode,
+                    &last.all_servers,
+                    Some(&settings),
+                )
+                .await
+                {
                     Ok((new_pid, _)) => {
                         s.process_mgr.set_pid(new_pid);
                         reconnected = true;
@@ -984,7 +1363,8 @@ fn spawn_proxy_watchdog(
                             "Activating Kill Switch on port {}", last.proxy_port
                         );
                         let ks_cfg = match crate::proxy::config::generate_kill_switch_config(
-                            last.proxy_port, &last.routing_mode
+                            last.proxy_port,
+                            &last.routing_mode,
                         ) {
                             Ok(c) => c,
                             Err(e) => {
@@ -993,7 +1373,8 @@ fn spawn_proxy_watchdog(
                             }
                         };
                         let cpath = match crate::proxy::config::write_config(
-                            &ks_cfg, &s.data_dir.join("config")
+                            &ks_cfg,
+                            &s.data_dir.join("config"),
                         ) {
                             Ok(p) => p,
                             Err(e) => {
@@ -1058,7 +1439,12 @@ fn define_tools() -> Vec<Tool> {
     // Per MCP spec: absent hints default to false. We set them explicitly
     // so clients can make informed decisions about confirmation prompts.
     use rmcp::model::ToolAnnotations;
-    fn tool_ann(read_only: bool, destructive: bool, idempotent: bool, open_world: bool) -> ToolAnnotations {
+    fn tool_ann(
+        read_only: bool,
+        destructive: bool,
+        idempotent: bool,
+        open_world: bool,
+    ) -> ToolAnnotations {
         ToolAnnotations::from_raw(
             None,
             Some(read_only),
@@ -1318,7 +1704,8 @@ impl ServerHandler for Handler {
         &self,
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListToolsResult, ErrorData>> + MaybeSendFuture + '_ {
+    ) -> impl std::future::Future<Output = Result<ListToolsResult, ErrorData>> + MaybeSendFuture + '_
+    {
         async {
             let mut r = ListToolsResult::default();
             r.tools = define_tools();
@@ -1330,7 +1717,8 @@ impl ServerHandler for Handler {
         &self,
         _: Option<PaginatedRequestParams>,
         _: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListResourcesResult, ErrorData>> + MaybeSendFuture + '_ {
+    ) -> impl std::future::Future<Output = Result<ListResourcesResult, ErrorData>> + MaybeSendFuture + '_
+    {
         async {
             let mut r = ListResourcesResult::default();
             r.resources = vec![
@@ -1367,55 +1755,75 @@ impl ServerHandler for Handler {
         &self,
         request: model::ReadResourceRequestParams,
         _: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ReadResourceResult, ErrorData>> + MaybeSendFuture + '_ {
+    ) -> impl std::future::Future<Output = Result<ReadResourceResult, ErrorData>> + MaybeSendFuture + '_
+    {
         async move {
             match request.uri.as_str() {
                 "omnitun://status" => {
                     let pid = crate::proxy::PROXY_PID.load(std::sync::atomic::Ordering::Relaxed);
-                    let port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                    let port =
+                        crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
                     let status = serde_json::json!({
                         "connected": pid > 0,
                         "pid": pid,
                         "proxy_port": crate::proxy::PROXY_PORT.load(std::sync::atomic::Ordering::Relaxed),
                         "clash_api_port": port,
                     });
-                    let json = serde_json::to_string_pretty(&status).unwrap_or_else(|_| "{}".into());
-                    Ok(ReadResourceResult::new(vec![
-                        ResourceContents::text(json, "omnitun://status")
-                            .with_mime_type("application/json")
-                    ]))
+                    let json =
+                        serde_json::to_string_pretty(&status).unwrap_or_else(|_| "{}".into());
+                    Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                        json,
+                        "omnitun://status",
+                    )
+                    .with_mime_type("application/json")]))
                 }
                 "omnitun://logs/recent" => {
                     let s = self.state.lock().await;
-                    let entries = s._logger.lock().unwrap_or_else(|e| e.into_inner()).entries();
-                    let recent: Vec<_> = entries.iter().rev().take(200).map(|e| serde_json::json!({
-                        "timestamp": e.timestamp, "level": format!("{:?}", e.level),
-                        "source": format!("{:?}", e.source), "message": e.message,
-                    }))
-                    .collect();
-                    let json = serde_json::to_string_pretty(&recent).unwrap_or_else(|_| "[]".into());
-                    Ok(ReadResourceResult::new(vec![
-                        ResourceContents::text(json, "omnitun://logs/recent")
-                            .with_mime_type("application/json")
-                    ]))
+                    let entries = s
+                        ._logger
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .entries();
+                    let recent: Vec<_> = entries
+                        .iter()
+                        .rev()
+                        .take(200)
+                        .map(|e| {
+                            serde_json::json!({
+                                "timestamp": e.timestamp, "level": format!("{:?}", e.level),
+                                "source": format!("{:?}", e.source), "message": e.message,
+                            })
+                        })
+                        .collect();
+                    let json =
+                        serde_json::to_string_pretty(&recent).unwrap_or_else(|_| "[]".into());
+                    Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                        json,
+                        "omnitun://logs/recent",
+                    )
+                    .with_mime_type("application/json")]))
                 }
                 "omnitun://settings" => {
                     let s = self.state.lock().await;
                     let settings = s.settings_mgr.load().unwrap_or_default();
-                    let json = serde_json::to_string_pretty(&settings).unwrap_or_else(|_| "{}".into());
-                    Ok(ReadResourceResult::new(vec![
-                        ResourceContents::text(json, "omnitun://settings")
-                            .with_mime_type("application/json")
-                    ]))
+                    let json =
+                        serde_json::to_string_pretty(&settings).unwrap_or_else(|_| "{}".into());
+                    Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                        json,
+                        "omnitun://settings",
+                    )
+                    .with_mime_type("application/json")]))
                 }
                 "omnitun://profiles" => {
                     let s = self.state.lock().await;
                     let profiles = s.profile_mgr.list();
-                    let json = serde_json::to_string_pretty(&profiles).unwrap_or_else(|_| "[]".into());
-                    Ok(ReadResourceResult::new(vec![
-                        ResourceContents::text(json, "omnitun://profiles")
-                            .with_mime_type("application/json")
-                    ]))
+                    let json =
+                        serde_json::to_string_pretty(&profiles).unwrap_or_else(|_| "[]".into());
+                    Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                        json,
+                        "omnitun://profiles",
+                    )
+                    .with_mime_type("application/json")]))
                 }
                 "omnitun://cache" => {
                     let s = self.state.lock().await;
@@ -1427,40 +1835,49 @@ impl ServerHandler for Handler {
                         "total_count": positive + negative,
                     });
                     let json = serde_json::to_string_pretty(&info).unwrap_or_else(|_| "{}".into());
-                    Ok(ReadResourceResult::new(vec![
-                        ResourceContents::text(json, "omnitun://cache")
-                            .with_mime_type("application/json")
-                    ]))
+                    Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                        json,
+                        "omnitun://cache",
+                    )
+                    .with_mime_type("application/json")]))
                 }
                 "omnitun://geoip/status" => {
                     let state = self.state.lock().await;
                     let geo_dir = state.data_dir.join("geoip");
                     let meta = crate::proxy::geoip::get_geoip_meta(&geo_dir);
                     let json = serde_json::to_string_pretty(&meta).unwrap_or_else(|_| "{}".into());
-                    Ok(ReadResourceResult::new(vec![
-                        ResourceContents::text(json, "omnitun://geoip/status")
-                            .with_mime_type("application/json")
-                    ]))
+                    Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                        json,
+                        "omnitun://geoip/status",
+                    )
+                    .with_mime_type("application/json")]))
                 }
                 "omnitun://singbox/stderr" => {
                     let s = self.state.lock().await;
                     let stderr_path = s.data_dir.join("config").join("sing-box-stderr.log");
                     let tail = std::fs::read_to_string(&stderr_path).unwrap_or_default();
                     let max = 8192usize;
-                    let truncated = if tail.len() > max { tail[tail.len()-max..].to_string() } else { tail };
-                    Ok(ReadResourceResult::new(vec![
-                        ResourceContents::text(truncated, "omnitun://singbox/stderr")
-                            .with_mime_type("text/plain")
-                    ]))
+                    let truncated = if tail.len() > max {
+                        tail[tail.len() - max..].to_string()
+                    } else {
+                        tail
+                    };
+                    Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                        truncated,
+                        "omnitun://singbox/stderr",
+                    )
+                    .with_mime_type("text/plain")]))
                 }
                 "omnitun://singbox/config" => {
                     let s = self.state.lock().await;
                     let config_path = s.data_dir.join("config").join("config.json");
-                    let config_text = std::fs::read_to_string(&config_path).unwrap_or_else(|_| "{}".into());
-                    Ok(ReadResourceResult::new(vec![
-                        ResourceContents::text(config_text, "omnitun://singbox/config")
-                            .with_mime_type("application/json")
-                    ]))
+                    let config_text =
+                        std::fs::read_to_string(&config_path).unwrap_or_else(|_| "{}".into());
+                    Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                        config_text,
+                        "omnitun://singbox/config",
+                    )
+                    .with_mime_type("application/json")]))
                 }
                 _ => Err(ErrorData::new(
                     rmcp::model::ErrorCode::INVALID_PARAMS,
@@ -1475,39 +1892,44 @@ impl ServerHandler for Handler {
         &self,
         request: CallToolRequestParams,
         _: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResult, ErrorData>> + MaybeSendFuture + '_ {
+    ) -> impl std::future::Future<Output = Result<CallToolResult, ErrorData>> + MaybeSendFuture + '_
+    {
         async move {
             let args = serde_json::Value::Object(request.arguments.unwrap_or_default());
             match request.name.as_ref() {
-                "start_proxy"                 => self.cmd_start(args).await,
-                "stop_proxy"                  => self.cmd_stop().await,
-                "get_status"                  => self.cmd_status().await,
-                "list_profiles"               => self.cmd_profiles().await,
-                "add_subscription"            => self.cmd_add_sub(args).await,
-                "refresh_subscription"        => self.cmd_refresh_sub(args).await,
-                "remove_subscription"         => self.cmd_remove_sub(args).await,
+                "start_proxy" => self.cmd_start(args).await,
+                "stop_proxy" => self.cmd_stop().await,
+                "get_status" => self.cmd_status().await,
+                "list_profiles" => self.cmd_profiles().await,
+                "add_subscription" => self.cmd_add_sub(args).await,
+                "refresh_subscription" => self.cmd_refresh_sub(args).await,
+                "remove_subscription" => self.cmd_remove_sub(args).await,
                 "start_server_from_subscription" => self.cmd_start_server(args).await,
-                "get_settings"                => self.cmd_settings().await,
+                "get_settings" => self.cmd_settings().await,
                 // QA tools
-                "get_logs"                    => self.cmd_get_logs(args).await,
-                "get_singbox_stderr"          => self.cmd_get_singbox_stderr(args).await,
-                "test_single_server"          => self.cmd_test_single_server(args).await,
-                "get_cache_stats"             => self.cmd_get_cache_stats().await,
-                "clear_cache"                 => self.cmd_clear_cache().await,
-                "get_geoip_status"            => self.cmd_get_geoip_status().await,
-                "get_real_ip"                 => self.cmd_get_real_ip().await,
-                "verify_proxy_routes"         => self.cmd_verify_proxy_routes().await,
-                "download_geoip_db"           => self.cmd_download_geoip_db().await,
-                "update_settings"             => self.cmd_update_settings(args).await,
+                "get_logs" => self.cmd_get_logs(args).await,
+                "get_singbox_stderr" => self.cmd_get_singbox_stderr(args).await,
+                "test_single_server" => self.cmd_test_single_server(args).await,
+                "get_cache_stats" => self.cmd_get_cache_stats().await,
+                "clear_cache" => self.cmd_clear_cache().await,
+                "get_geoip_status" => self.cmd_get_geoip_status().await,
+                "get_real_ip" => self.cmd_get_real_ip().await,
+                "verify_proxy_routes" => self.cmd_verify_proxy_routes().await,
+                "download_geoip_db" => self.cmd_download_geoip_db().await,
+                "update_settings" => self.cmd_update_settings(args).await,
                 "import_subscription_content" => self.cmd_import_subscription_content(args).await,
-                "check_proxy_health"          => self.cmd_check_proxy_health().await,
-                "speed_test"                  => self.cmd_speed_test().await,
-                "switch_proxy"                => self.cmd_switch_proxy(args).await,
-                "get_connections"             => self.cmd_get_connections().await,
-                "cancel_connect"              => self.cmd_cancel_connect().await,
-                "activate_kill_switch"        => self.cmd_activate_kill_switch(args).await,
-                "deactivate_kill_switch"      => self.cmd_deactivate_kill_switch().await,
-                n => Err(ErrorData::new(rmcp::model::ErrorCode::METHOD_NOT_FOUND, format!("Unknown tool: {n}"), None)),
+                "check_proxy_health" => self.cmd_check_proxy_health().await,
+                "speed_test" => self.cmd_speed_test().await,
+                "switch_proxy" => self.cmd_switch_proxy(args).await,
+                "get_connections" => self.cmd_get_connections().await,
+                "cancel_connect" => self.cmd_cancel_connect().await,
+                "activate_kill_switch" => self.cmd_activate_kill_switch(args).await,
+                "deactivate_kill_switch" => self.cmd_deactivate_kill_switch().await,
+                n => Err(ErrorData::new(
+                    rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                    format!("Unknown tool: {n}"),
+                    None,
+                )),
             }
         }
     }
@@ -1531,7 +1953,9 @@ pub fn run(data_dir: PathBuf) -> Result<(), String> {
             batcher_cancel.clone(),
         );
 
-        let handler = Handler { state: Arc::new(tokio::sync::Mutex::new(state)) };
+        let handler = Handler {
+            state: Arc::new(tokio::sync::Mutex::new(state)),
+        };
         let (r, w) = transport::io::stdio();
         let transport = AsyncRwTransport::new_server(r, w);
         serve_server(handler, transport)

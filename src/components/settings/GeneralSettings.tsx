@@ -364,7 +364,9 @@ export function GeneralSettings() {
             <div className="mt-3 flex items-center gap-3">
               <span className="text-xs text-zinc-500">{t('testProtocol')}</span>
               <button
-                onClick={() => { updateSettings({ testUseTls: !settings.testUseTls }); }}
+                onClick={() => {
+                  updateSettings({ testUseTls: !settings.testUseTls });
+                }}
                 className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-all ${
                   settings.testUseTls
                     ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
@@ -375,7 +377,9 @@ export function GeneralSettings() {
               </button>
               <span className="text-xs text-zinc-600">/</span>
               <button
-                onClick={() => { updateSettings({ testUseTls: !settings.testUseTls }); }}
+                onClick={() => {
+                  updateSettings({ testUseTls: !settings.testUseTls });
+                }}
                 className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-all ${
                   !settings.testUseTls
                     ? 'bg-amber-500/10 border-amber-500/30 text-amber-400'

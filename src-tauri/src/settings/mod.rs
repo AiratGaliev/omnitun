@@ -50,10 +50,18 @@ pub struct AppSettings {
     pub test_use_tls: bool,
 }
 
-fn default_tls_insecure() -> bool { true }
-fn default_test_url() -> String { "cp.cloudflare.com/generate_204".to_string() }
-fn default_test_use_tls() -> bool { true }
-fn default_auto_test_interval() -> u32 { 3 }
+fn default_tls_insecure() -> bool {
+    true
+}
+fn default_test_url() -> String {
+    "cp.cloudflare.com/generate_204".to_string()
+}
+fn default_test_use_tls() -> bool {
+    true
+}
+fn default_auto_test_interval() -> u32 {
+    3
+}
 
 /// Available test URLs for latency measurement.
 /// User picks one via the `test_url` setting.

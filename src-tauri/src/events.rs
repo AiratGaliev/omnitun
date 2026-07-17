@@ -115,6 +115,25 @@ pub fn emit_proxy_progress(app_handle: &AppHandle, phase: &str, message: impl In
     }
 }
 
+/// Per-server test result — emitted immediately when each server's test
+/// completes, so the frontend can update rows incrementally instead of
+/// waiting for the whole batch.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerTestedEvent {
+    pub profile_id: String,
+    pub server_id: String,
+    pub ping_ms: Option<u64>,
+    pub outlet_ip: Option<String>,
+    pub exit_country: Option<String>,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+pub fn emit_server_tested(app: &AppHandle, event: ServerTestedEvent) {
+    let _ = app.emit("server-tested", event);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -123,21 +123,41 @@ pub struct GeoIpResult {
 ///
 /// Возвращает (country, country_code, asn, as_name, as_type).
 /// Любое поле может быть None, если его нет в mmdb.
-pub(crate) fn ipinfo_lite_extract(v: &serde_json::Value) -> (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>) {
-    let country = v.get("country").and_then(|x| x.as_str()).map(|s| s.to_string());
-    let country_code = v.get("country_code").and_then(|x| x.as_str()).map(|s| s.to_string());
+#[allow(clippy::type_complexity)]
+pub(crate) fn ipinfo_lite_extract(
+    v: &serde_json::Value,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    let country = v
+        .get("country")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    let country_code = v
+        .get("country_code")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
 
     // ASN может быть плоским полем или вложенным объектом "ASN"
     // Плоский: { asn: "AS13335", as_name: "Cloudflare", as_type: "hosting" }
     // Вложенный: { ASN: { asn: "AS13335", name: "Cloudflare", type: "hosting", domain: "...", route: "..." } }
     let asn_obj = v.get("ASN").or_else(|| v.get("asn_obj"));
     let (asn, as_name, as_type) = if let Some(obj) = asn_obj {
-        let asn = obj.get("asn").and_then(|x| x.as_str()).map(|s| s.to_string());
-        let as_name = obj.get("name")
+        let asn = obj
+            .get("asn")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        let as_name = obj
+            .get("name")
             .or_else(|| obj.get("as_name"))
             .and_then(|x| x.as_str())
             .map(|s| s.to_string());
-        let as_type = obj.get("type")
+        let as_type = obj
+            .get("type")
             .or_else(|| obj.get("as_type"))
             .and_then(|x| x.as_str())
             .map(|s| s.to_string());
@@ -145,11 +165,13 @@ pub(crate) fn ipinfo_lite_extract(v: &serde_json::Value) -> (Option<String>, Opt
     } else {
         // Плоский формат
         let asn = v.get("asn").and_then(|x| x.as_str()).map(|s| s.to_string());
-        let as_name = v.get("as_name")
+        let as_name = v
+            .get("as_name")
             .or_else(|| v.get("name"))
             .and_then(|x| x.as_str())
             .map(|s| s.to_string());
-        let as_type = v.get("as_type")
+        let as_type = v
+            .get("as_type")
             .or_else(|| v.get("type"))
             .and_then(|x| x.as_str())
             .map(|s| s.to_string());
@@ -206,10 +228,12 @@ const IPGUIDE_MAX_REQUESTS_PER_CYCLE: usize = 10;
 static IPGUIDE_SEMAPHORE: Semaphore = Semaphore::const_new(3);
 
 /// In-memory cache: IP → cache entry.
-static IPGUIDE_CACHE: OnceLock<AsyncMutex<std::collections::HashMap<String, IpGuideCacheEntry>>> = OnceLock::new();
+static IPGUIDE_CACHE: OnceLock<AsyncMutex<std::collections::HashMap<String, IpGuideCacheEntry>>> =
+    OnceLock::new();
 
 /// Rate-limit counter (resets per refresh-cycle).
-static IPGUIDE_REQUESTS_THIS_CYCLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static IPGUIDE_REQUESTS_THIS_CYCLE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Get or init the ip.guide cache.
 fn ipguide_cache() -> &'static AsyncMutex<std::collections::HashMap<String, IpGuideCacheEntry>> {
@@ -229,9 +253,7 @@ fn is_private_or_mock_ip(ip: &str) -> bool {
             IpAddr::V4(v4) => {
                 v4.is_private() || v4.is_loopback() || v4.is_link_local() || v4.is_unspecified()
             }
-            IpAddr::V6(v6) => {
-                v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local()
-            }
+            IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local(),
         }
     } else {
         true
@@ -267,7 +289,7 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
     // Rate-limit check
     let current = IPGUIDE_REQUESTS_THIS_CYCLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if current >= IPGUIDE_MAX_REQUESTS_PER_CYCLE {
-        tracing::warn!(target: "system", 
+        tracing::warn!(target: "system",
             "GeoIP: ip.guide rate limit exceeded (max {}/cycle), skipping {}",
             IPGUIDE_MAX_REQUESTS_PER_CYCLE, ip
         );
@@ -363,7 +385,7 @@ pub async fn resolve_via_ip_guide(ip: &str) -> Option<GeoIpResult> {
         return None;
     }
 
-    tracing::info!(target: "system", 
+    tracing::info!(target: "system",
         "GeoIP: country resolved via ip.guide for {} → {} (ASN {} {}). \
          country_name will be filled by frontend via i18n-iso-countries.",
         ip, country_code,
@@ -600,7 +622,7 @@ pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
     let tmp_name = format!("omnitun-cdn-srs-{tmp_uuid}.json");
     let tmp_json = tmp_dir.join(&tmp_name);
 
-    tracing::debug!(target: "system", 
+    tracing::debug!(target: "system",
         "parse_srs_file: decompiling {} → {}",
         path.display(),
         tmp_json.display()
@@ -668,7 +690,7 @@ pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
     // Cleanup: best-effort, log on failure (could indicate filesystem
     // issues worth knowing about).
     if let Err(e) = std::fs::remove_file(&tmp_json) {
-        tracing::warn!(target: "system", 
+        tracing::warn!(target: "system",
             "Failed to clean up tmp file {}: {e} (non-fatal — file will be \
              removed at next OS temp cleanup)",
             tmp_json.display()
@@ -707,7 +729,7 @@ pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
 /// Load a .srs file and set CDN_RANGES.
 pub fn init_cdn_ranges(path: &Path) -> Result<(), String> {
     let ranges = parse_srs_file(path)?;
-    tracing::info!(target: "system", 
+    tracing::info!(target: "system",
         "Loaded {} CDN CIDR entries from {}",
         ranges.len(),
         path.display()
@@ -862,7 +884,7 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
     // но без country_code — это anycast IP или специальный случай.
     if country_code.is_empty() {
         if let Some(ref asn) = ipinfo_asn {
-            tracing::debug!(target: "system", 
+            tracing::debug!(target: "system",
                 "GeoIP: ipinfo Lite has ASN for {} but no country_code (anycast?): \
                  asn={}, as_name={:?}",
                 ip, asn, ipinfo_as_name
@@ -914,7 +936,7 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
                 let asn_num = entry.autonomous_system_number;
                 let asn_org = entry.autonomous_system_organization;
                 if asn_num.is_some() || asn_org.is_some() {
-                    tracing::debug!(target: "system", 
+                    tracing::debug!(target: "system",
                         "GeoIP: MaxMind ASN has data for {} (no country in City): \
                          asn={:?}, org={:?}. Will try ip.guide fallback.",
                         ip, asn_num, asn_org
@@ -934,7 +956,7 @@ pub fn resolve(ip: &str) -> Option<GeoIpResult> {
     // почти всегда содержит country для IP с city), а для anycast IP
     // ip.guide — единственный источник country.
     if country_code.is_empty() && !city.is_empty() {
-        tracing::debug!(target: "system", 
+        tracing::debug!(target: "system",
             "GeoIP: MaxMind City has city ({}) for {} but no country — will try ip.guide",
             city, ip
         );
@@ -1078,7 +1100,7 @@ pub(crate) fn should_download_ipinfo(path: &Path) -> bool {
     };
 
     if elapsed < IPINFO_REFRESH_INTERVAL {
-        tracing::info!(target: "system", 
+        tracing::info!(target: "system",
             "ipinfo Lite database refreshed {:.0?} ago — skipping download (interval: {:.0?})",
             elapsed,
             IPINFO_REFRESH_INTERVAL,
@@ -1118,7 +1140,7 @@ async fn validate_ipinfo_token(client: &reqwest::Client, token: &str) -> Result<
         _ => {
             // 200 or other success code without redirect is also unexpected
             // for the HEAD endpoint, but treat as valid rather than block
-            tracing::info!(target: "system", 
+            tracing::info!(target: "system",
                 "IPinfo token validation returned HTTP {status} (expected 302) — proceeding anyway"
             );
             Ok(())
@@ -1161,7 +1183,7 @@ async fn check_latest_release(client: &reqwest::Client, db_dir: &Path) -> Option
     let url = "https://api.github.com/repos/P3TERX/GeoLite.mmdb/releases/latest";
     let resp = client.get(url).send().await.ok()?;
     if !resp.status().is_success() {
-        tracing::warn!(target: "system", 
+        tracing::warn!(target: "system",
             "GitHub API returned HTTP {} for release check",
             resp.status().as_u16()
         );
@@ -1373,7 +1395,9 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
                             downloaded = true;
                             break;
                         }
-                        Err(e) => tracing::warn!(target: "system", "CDN .srs {name} download from {url} failed: {e}"),
+                        Err(e) => {
+                            tracing::warn!(target: "system", "CDN .srs {name} download from {url} failed: {e}")
+                        }
                     }
                 }
             }
@@ -1880,14 +1904,11 @@ mod tests {
         // Ensure SINGBOX_BIN is set so parse_srs_file doesn't bail early
         let _ = SINGBOX_BIN.set(sb);
 
-        let result = parse_srs_file(std::path::Path::new(
-            "/nonexistent/path/file.srs",
-        ));
+        let result = parse_srs_file(std::path::Path::new("/nonexistent/path/file.srs"));
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            err.contains("sing-box decompile failed")
-                || err.contains("did not create output file"),
+            err.contains("sing-box decompile failed") || err.contains("did not create output file"),
             "unexpected error: {err}"
         );
     }
@@ -1912,7 +1933,11 @@ mod tests {
         };
 
         let result = parse_srs_file(&srs).expect("parse_srs_file should succeed");
-        assert!(result.len() >= 2, "expected >=2 CIDRs, got {}", result.len());
+        assert!(
+            result.len() >= 2,
+            "expected >=2 CIDRs, got {}",
+            result.len()
+        );
 
         let has_v4_10 = result.iter().any(|(ip, _)| ip.to_string() == "10.0.0.0");
         let has_v4_192 = result.iter().any(|(ip, _)| ip.to_string() == "192.168.0.0");

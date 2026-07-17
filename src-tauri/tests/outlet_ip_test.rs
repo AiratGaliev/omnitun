@@ -33,13 +33,36 @@ fn free_port(skip: &[u16]) -> Option<u16> {
 
 fn load_servers() -> Vec<serde_json::Value> {
     let p = app_data_dir().join("profiles.json");
-    let d: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
-    d[0]["servers"].as_array().unwrap().clone()
+    let content = match std::fs::read_to_string(&p) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("SKIP: cannot read profiles.json at {}: {e}", p.display());
+            return Vec::new();
+        }
+    };
+    let d: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("SKIP: invalid JSON in profiles.json: {e}");
+            return Vec::new();
+        }
+    };
+    match d[0]["servers"].as_array() {
+        Some(arr) => arr.clone(),
+        None => {
+            eprintln!("SKIP: no servers in profiles.json");
+            Vec::new()
+        }
+    }
 }
 
 #[tokio::test]
 async fn outlet_vs_entry_country() {
     let servers = load_servers();
+    if servers.is_empty() {
+        eprintln!("SKIP: no servers loaded");
+        return;
+    }
     let bin = singbox();
     if !bin.exists() {
         eprintln!("SKIP: no sing-box");

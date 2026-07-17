@@ -40,23 +40,19 @@ impl Default for HttpFetcher {
 #[async_trait::async_trait]
 impl SubscriptionFetcher for HttpFetcher {
     async fn fetch(&self, url: &str) -> Result<String, ProxyError> {
-        let response = self
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| ProxyError::subscription(
+        let response = self.client.get(url).send().await.map_err(|e| {
+            ProxyError::subscription(
                 ErrorCode::SubscriptionFetchFailed,
                 format!("HTTP request failed: {e}"),
-            ))?;
+            )
+        })?;
 
-        let body = response
-            .text()
-            .await
-            .map_err(|e| ProxyError::subscription(
+        let body = response.text().await.map_err(|e| {
+            ProxyError::subscription(
                 ErrorCode::SubscriptionFetchFailed,
                 format!("Failed to read response: {e}"),
-            ))?;
+            )
+        })?;
 
         Ok(body)
     }

@@ -41,7 +41,7 @@ impl PortPool {
     /// Create a new pool covering [`PORT_MIN`, `PORT_MAX`].
     pub fn new() -> Self {
         let ports: Vec<u16> = (PORT_MIN..=PORT_MAX).collect();
-        tracing::info!(target: "cache", 
+        tracing::info!(target: "cache",
             "[PortPool] created with {} ports ({}–{})",
             ports.len(),
             PORT_MIN,
@@ -51,7 +51,15 @@ impl PortPool {
             available: Arc::new(Mutex::new(ports)),
         }
     }
+}
 
+impl Default for PortPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PortPool {
     /// Create a pool with a custom port range (for testing).
     pub fn with_range(min: u16, max: u16) -> Self {
         let ports: Vec<u16> = (min..=max).collect();
@@ -66,7 +74,24 @@ impl PortPool {
     /// `Arc`, so the port is returned correctly on Drop.
     pub fn acquire(&self) -> Option<PortGuard> {
         let mut pool = self.available.lock().unwrap_or_else(|e| e.into_inner());
-        let port = pool.pop()?;
+        // LIFO returns the most-recently-freed port. After sing-box is
+        // killed, there may be a brief race before the OS releases the
+        // listen socket. Skip ports that can't be bound — catches the
+        // kill/re-acquire race. Adds <1ms per acquire.
+        let mut port: Option<u16> = None;
+        let mut skipped = 0;
+        while let Some(candidate) = pool.pop() {
+            if std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, candidate)).is_ok() {
+                port = Some(candidate);
+                break;
+            }
+            pool.insert(0, candidate);
+            skipped += 1;
+            if skipped > pool.len() {
+                break;
+            }
+        }
+        let port = port?;
         Some(PortGuard {
             port,
             pool: self.clone(), // cheap — inner state is already Arc'd

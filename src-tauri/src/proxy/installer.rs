@@ -159,20 +159,21 @@ impl Installer {
     // ── ZIP / tar.gz extraction ────────────────────────────────────────────
 
     fn extract_zip(bytes: &[u8], bin_dir: &Path, binary_name: &str) -> Result<(), ProxyError> {
-        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
-            .map_err(|e| ProxyError::install(
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| {
+            ProxyError::install(
                 ErrorCode::InstallExtractFailed,
                 format!("Failed to open zip: {e}"),
-            ))?;
+            )
+        })?;
 
         let mut found_binary = false;
         for i in 0..archive.len() {
-            let mut entry = archive
-                .by_index(i)
-                .map_err(|e| ProxyError::install(
+            let mut entry = archive.by_index(i).map_err(|e| {
+                ProxyError::install(
                     ErrorCode::InstallExtractFailed,
                     format!("Failed to read zip entry: {e}"),
-                ))?;
+                )
+            })?;
 
             if entry.is_dir() {
                 continue;
@@ -194,16 +195,18 @@ impl Installer {
             }
 
             let out_path = bin_dir.join(&file_name);
-            let mut out = std::fs::File::create(&out_path)
-                .map_err(|e| ProxyError::install(
+            let mut out = std::fs::File::create(&out_path).map_err(|e| {
+                ProxyError::install(
                     ErrorCode::InstallExtractFailed,
                     format!("Failed to create {file_name}: {e}"),
-                ))?;
-            std::io::copy(&mut entry, &mut out)
-                .map_err(|e| ProxyError::install(
+                )
+            })?;
+            std::io::copy(&mut entry, &mut out).map_err(|e| {
+                ProxyError::install(
                     ErrorCode::InstallExtractFailed,
                     format!("Failed to extract {file_name}: {e}"),
-                ))?;
+                )
+            })?;
         }
 
         if found_binary {
@@ -220,18 +223,18 @@ impl Installer {
         let decompressed = flate2::read::GzDecoder::new(bytes);
         let mut archive = tar::Archive::new(decompressed);
 
-        for entry in archive
-            .entries()
-            .map_err(|e| ProxyError::install(
+        for entry in archive.entries().map_err(|e| {
+            ProxyError::install(
                 ErrorCode::InstallExtractFailed,
                 format!("Failed to read tar: {e}"),
-            ))?
-        {
-            let mut entry =
-                entry.map_err(|e| ProxyError::install(
+            )
+        })? {
+            let mut entry = entry.map_err(|e| {
+                ProxyError::install(
                     ErrorCode::InstallExtractFailed,
                     format!("Failed to read tar entry: {e}"),
-                ))?;
+                )
+            })?;
 
             let path = entry
                 .path()
@@ -242,12 +245,12 @@ impl Installer {
                 .unwrap_or_default();
 
             if file_name == binary_name || file_name == "sing-box" {
-                entry
-                    .unpack(bin_dir.join(binary_name))
-                    .map_err(|e| ProxyError::install(
+                entry.unpack(bin_dir.join(binary_name)).map_err(|e| {
+                    ProxyError::install(
                         ErrorCode::InstallExtractFailed,
                         format!("Failed to extract binary: {e}"),
-                    ))?;
+                    )
+                })?;
                 return Ok(());
             }
         }
@@ -268,17 +271,15 @@ impl Installer {
         // First attempt: direct GitHub download
         match reqwest::get(url).await {
             Ok(resp) if resp.status().is_success() => {
-                return resp
-                    .bytes()
-                    .await
-                    .map(|b| b.to_vec())
-                    .map_err(|e| ProxyError::install(
+                return resp.bytes().await.map(|b| b.to_vec()).map_err(|e| {
+                    ProxyError::install(
                         ErrorCode::InstallDownloadFailed,
                         format!("Failed to read response: {e}"),
-                    ));
+                    )
+                });
             }
             Ok(resp) => {
-                tracing::warn!(target: "installer", 
+                tracing::warn!(target: "installer",
                     "Direct download returned HTTP {}, trying ghproxy...",
                     resp.status()
                 );
@@ -304,14 +305,12 @@ impl Installer {
                 format!(
                     "ghproxy download failed (HTTP {}): {}",
                     resp.status(),
-                    resp.text().await.unwrap_or_default().trim().to_string()
+                    resp.text().await.unwrap_or_default().trim()
                 ),
             )),
             Err(e) => Err(ProxyError::install(
                 ErrorCode::InstallDownloadFailed,
-                format!(
-                    "All download methods failed. Last error (ghproxy): {e}"
-                ),
+                format!("All download methods failed. Last error (ghproxy): {e}"),
             )),
         }
     }

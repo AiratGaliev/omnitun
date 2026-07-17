@@ -225,7 +225,7 @@ pub fn get_logs(logger: tauri::State<'_, std::sync::Mutex<Logger>>) -> Vec<LogEn
         }
     }
 
-    all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    all.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
     all.truncate(l.max_entries);
     all
 }

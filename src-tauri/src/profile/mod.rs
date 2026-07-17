@@ -122,7 +122,7 @@ impl ProfileManager {
         if changed {
             let _ = self.save();
         }
-        tracing::info!(target: "subscription", 
+        tracing::info!(target: "subscription",
             "GeoIP enrichment: {enriched_count} enriched, {cdn_cleanup} CDN exit cleaned up"
         );
     }
@@ -131,7 +131,8 @@ impl ProfileManager {
     /// Runs in-place — no disk I/O.
     pub fn deduplicate_profiles(&mut self) {
         for profile in &mut self.profiles {
-            let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+            let mut seen: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
             let mut deduped: Vec<ServerProfile> = Vec::new();
             let mut dup_count = 0usize;
             for s in profile.servers.drain(..) {
@@ -167,22 +168,25 @@ impl ProfileManager {
     }
 
     pub fn save(&self) -> Result<(), ProxyError> {
-        let json = serde_json::to_string_pretty(&self.profiles)
-            .map_err(|e| ProxyError::subscription(
+        let json = serde_json::to_string_pretty(&self.profiles).map_err(|e| {
+            ProxyError::subscription(
                 ErrorCode::SubscriptionSaveFailed,
                 format!("Failed to serialize profiles: {e}"),
-            ))?;
+            )
+        })?;
         let tmp = self.file_path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json)
-            .map_err(|e| ProxyError::subscription(
+        std::fs::write(&tmp, &json).map_err(|e| {
+            ProxyError::subscription(
                 ErrorCode::SubscriptionSaveFailed,
                 format!("Failed to write temp profiles: {e}"),
-            ))?;
-        std::fs::rename(&tmp, &self.file_path)
-            .map_err(|e| ProxyError::subscription(
+            )
+        })?;
+        std::fs::rename(&tmp, &self.file_path).map_err(|e| {
+            ProxyError::subscription(
                 ErrorCode::SubscriptionSaveFailed,
                 format!("Failed to rename profiles: {e}"),
-            ))?;
+            )
+        })?;
         Ok(())
     }
 
@@ -212,7 +216,9 @@ impl ProfileManager {
 
         let mut servers = if clean_url.starts_with("http://") || clean_url.starts_with("https://") {
             // Try through existing proxy first, fall back to direct
-            match crate::subscription::fetch_subscription(&clean_url, proxy_port_from_app(app)).await {
+            match crate::subscription::fetch_subscription(&clean_url, proxy_port_from_app(app))
+                .await
+            {
                 Ok(s) => s,
                 Err(e) => {
                     if proxy_port_from_app(app).is_some() {
@@ -230,9 +236,25 @@ impl ProfileManager {
             crate::subscription::parser::parse_subscription(&clean_url)?
         };
 
-        // Pass the pre-generated profile_id so refresh-progress and
-        // servers-discovered events carry the REAL profile ID — the frontend
-        // can then attach progress to the pending profile in its state.
+        // Save profile to disk IMMEDIATELY (with empty servers) so profiles.json
+        // exists even if the app is closed during the long batch test below.
+        // After process_servers completes, the in-memory profile is updated
+        // and saved again with the tested servers.
+        let initial = SubscriptionProfile {
+            id: profile_id.clone(),
+            name: name.clone(),
+            url: clean_url.clone(),
+            servers: Vec::new(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_tested: None,
+            traffic_used: None,
+            traffic_total: None,
+            traffic_expiry: None,
+        };
+        self.profiles.push(initial);
+        self.save()?;
+
+        // Run the test (original synchronous flow — this IS the auto-refresh)
         servers = process_servers(app, servers, &profile_id).await;
 
         // Persist cache to disk so negative entries survive app restart.
@@ -247,20 +269,28 @@ impl ProfileManager {
                 .map(|(used, total, expiry)| (Some(used), Some(total), expiry))
                 .unwrap_or((None, None, None));
 
-        let profile = SubscriptionProfile {
-            id: profile_id,
-            name,
-            url: clean_url,
-            servers,
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            last_tested: None,
-            traffic_used,
-            traffic_total,
-            traffic_expiry,
-        };
-
-        self.profiles.push(profile.clone());
+        // Update the existing profile in-place (was saved empty before process_servers)
+        if let Some(existing) = self.profiles.iter_mut().find(|p| p.id == profile_id) {
+            existing.servers = servers;
+            existing.updated_at = chrono::Utc::now().to_rfc3339();
+            existing.last_tested = Some(chrono::Utc::now().to_rfc3339());
+            existing.traffic_used = traffic_used;
+            existing.traffic_total = traffic_total;
+            existing.traffic_expiry = traffic_expiry;
+        }
         self.save()?;
+
+        let profile = self
+            .profiles
+            .iter()
+            .find(|p| p.id == profile_id)
+            .cloned()
+            .ok_or_else(|| {
+                ProxyError::subscription(
+                    ErrorCode::SubscriptionNotFound,
+                    "Profile disappeared during add",
+                )
+            })?;
         Ok(profile)
     }
 
@@ -308,9 +338,7 @@ impl ProfileManager {
         self.profiles[idx].last_tested = Some(chrono::Utc::now().to_rfc3339());
 
         // Notify cache: pass ALL current server IDs so stale entries are removed.
-        if let Some(cache) =
-            app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
-        {
+        if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
             let all_active_ids: std::collections::HashSet<String> = self
                 .profiles
                 .iter()
@@ -363,9 +391,7 @@ impl ProfileManager {
         self.profiles[idx].last_tested = Some(chrono::Utc::now().to_rfc3339());
 
         // Save cache (test may have updated positive/negative entries)
-        if let Some(cache) =
-            app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
-        {
+        if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
             cache.save_to_disk().await;
         }
 
@@ -392,8 +418,7 @@ pub async fn process_servers(
         .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
         .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
         .unwrap_or_default();
-    let cache = app
-        .try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>();
+    let cache = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>();
     let cache_ref = cache.as_ref().map(|c| c as _);
     process_servers_inner(
         &data_dir,
@@ -431,12 +456,7 @@ pub async fn process_servers_inner(
                 target: "system",
                 "Downloading GeoIP databases (one-time)...",
             );
-            match crate::proxy::geoip::ensure_downloaded(
-                &geo_dir,
-                &settings.ipinfo_token,
-            )
-            .await
-            {
+            match crate::proxy::geoip::ensure_downloaded(&geo_dir, &settings.ipinfo_token).await {
                 Ok(_) => tracing::info!(
                     target: "system",
                     "GeoIP databases ready",
@@ -602,7 +622,7 @@ pub async fn process_servers_inner(
         );
     }
 
-    // 3. TCP ping — up to 50 concurrent connections, 3-second timeout each
+    // 3. TCP ping — up to 25 concurrent connections, 5-second timeout each
     let mut unique_count = unique.len();
     tracing::info!(
         target: "subscription",
@@ -680,6 +700,56 @@ pub async fn process_servers_inner(
                 .is_ok_and(|r| r.is_ok());
                 (reachable, start.elapsed().as_millis() as u64)
             };
+
+            // GeoIP enrichment + CDN detection + hostname→IP replacement.
+            // Runs inside the spawn for parallel execution across servers.
+            let geoip_ip = entry_ip.as_deref().or_else(|| {
+                server
+                    .server
+                    .parse::<std::net::IpAddr>()
+                    .ok()
+                    .map(|_| &*server.server)
+            });
+            let geoip_info = if let Some(ip) = geoip_ip {
+                crate::proxy::geoip::resolve_hostname(ip).await
+            } else {
+                crate::proxy::geoip::resolve_hostname(&server.server).await
+            };
+            if let Some(info) = &geoip_info {
+                server.flag = Some(info.country_code.clone());
+                server.country_name = Some(info.country_name.clone());
+                if !info.city.is_empty() {
+                    server.city_name = Some(info.city.clone());
+                }
+            }
+
+            if !server.behind_cdn {
+                let check_ip = entry_ip.as_deref().or_else(|| {
+                    server
+                        .server
+                        .parse::<std::net::IpAddr>()
+                        .ok()
+                        .map(|_| &*server.server)
+                });
+                if let Some(rip) = check_ip {
+                    if crate::proxy::geoip::is_cdn_entry_ip(rip) {
+                        server.behind_cdn = true;
+                        server.assert_no_cdn_exit_data("process_servers::entry_ip_match");
+                        server.exit_server = None;
+                        server.exit_flag = None;
+                        server.exit_country_name = None;
+                        server.exit_city_name = None;
+                    }
+                }
+            }
+
+            if let Some(ref rip) = entry_ip {
+                if rip != &server.server {
+                    tracing::info!(target:"subscription", "[DNS] {} → {}", server.server, rip);
+                    server.server = rip.clone();
+                }
+            }
+
             drop(permit);
             (server, reachable, ping_ms, entry_ip)
         });
@@ -690,7 +760,7 @@ pub async fn process_servers_inner(
     while let Some(result) = set.join_next().await {
         tcp_tested += 1;
         match result {
-            Ok((mut server, true, ping_ms, entry_ip)) => {
+            Ok((mut server, true, ping_ms, _entry_ip)) => {
                 // For UDP protocols, TCP ping was skipped (ping_ms == 0).
                 // Use None so the UI shows "-" instead of misleading "0ms".
                 // The batch test may fill in a real latency if the SOCKS5
@@ -699,109 +769,6 @@ pub async fn process_servers_inner(
                     server.ping_ms = None;
                 } else {
                     server.ping_ms = Some(ping_ms);
-                }
-
-                // GeoIP enrichment: set flag + country/city fields + display name
-                // (subscription names often contain garbled emoji, components separate)
-                // Use the already-resolved entry_ip first; fall back to server.server
-                // if it's parseable as an IP literal (same pattern as CDN detection below).
-                let geoip_ip = entry_ip
-                    .as_deref()
-                    .or_else(|| {
-                        server
-                            .server
-                            .parse::<std::net::IpAddr>()
-                            .ok()
-                            .map(|_| &*server.server)
-                    });
-                let geoip_info = if let Some(ip) = geoip_ip {
-                    // Already have an IP — resolve_hostname first tries sync resolve(),
-                    // then falls back to ip.guide network API.
-                    crate::proxy::geoip::resolve_hostname(ip).await
-                } else {
-                    // Last resort: server.server is a hostname and DNS didn't resolve.
-                    // Let resolve_hostname try the DNS itself.
-                    crate::proxy::geoip::resolve_hostname(&server.server).await
-                };
-                if let Some(info) = geoip_info {
-                    server.flag = Some(info.country_code.clone());
-                    server.country_name = Some(info.country_name.clone());
-                    if !info.city.is_empty() {
-                        server.city_name = Some(info.city.clone());
-                    }
-                } else if server.flag.is_none() {
-                    tracing::warn!(
-                        target: "subscription",
-                        "GeoIP: country not resolved — host={}, ip={} — IP not in GeoIP database",
-                        server.server,
-                        geoip_ip.unwrap_or("<none>"),
-                    );
-                }
-                // If GeoIP fails, keep flag from emoji extraction or leave unset
-
-                // CDN detection on the real entry IP (resolved from hostname if needed).
-                // If lookup_host() failed (common for IP addresses on Windows), fallback
-                // to server.server directly when it's parseable as an IP.
-                if !server.behind_cdn {
-                    let check_ip = entry_ip.as_deref().or_else(|| {
-                        server
-                            .server
-                            .parse::<std::net::IpAddr>()
-                            .ok()
-                            .map(|_| &*server.server)
-                    });
-                    if let Some(rip) = check_ip {
-                        let cdn_ranges_count = crate::proxy::geoip::cdn_ranges_count();
-                        if crate::proxy::geoip::is_cdn_entry_ip(rip) {
-                            server.behind_cdn = true;
-                            // 🚫 ANTI-REGRESSION: логируем нарушение инварианты
-                            // ПЕРЕД занулением. Если сервер уже имел exit-данные
-                            // (старые), это означает, что раньше он был не-CDN,
-                            // а теперь классифицируется как CDN — нужно явно
-                            // зафиксировать этот переход в логах.
-                            server.assert_no_cdn_exit_data(
-                                "process_servers::entry_ip_match",
-                            );
-                            // CDN servers must not retain stale exit data
-                            server.exit_server = None;
-                            server.exit_flag = None;
-                            server.exit_country_name = None;
-                            server.exit_city_name = None;
-                            tracing::info!(
-                                target: "subscription",
-                                "[CDN] entry IP {} is behind CDN ({} CIDRs)",
-                                rip,
-                                cdn_ranges_count,
-                            );
-                        } else if tcp_tested <= 5 {
-                            tracing::info!(
-                                target: "subscription",
-                                "[CDN debug] IP {} not in CDN ranges ({} CIDRs)",
-                                rip,
-                                cdn_ranges_count,
-                            );
-                        }
-                    } else {
-                        tracing::warn!(
-                            target: "subscription",
-                            "[CDN debug] no IP to check for server {}",
-                            server.server,
-                        );
-                    }
-                }
-
-                // Replace hostname with resolved IP in server address,
-                // so profiles store IPs, not hostnames. SNI stays intact.
-                if let Some(ref rip) = entry_ip {
-                    if rip != &server.server {
-                        tracing::info!(
-                            target: "subscription",
-                            "[DNS] {} → {}",
-                            server.server,
-                            rip,
-                        );
-                        server.server = rip.clone();
-                    }
                 }
 
                 alive.push(server);
@@ -813,7 +780,7 @@ pub async fn process_servers_inner(
                     cache
                         .update_negative(
                             &server.id,
-                            "TCP ping: connection refused or timeout (3s)".to_string(),
+                            "TCP ping: connection refused or timeout (5s)".to_string(),
                         )
                         .await;
                 }
@@ -946,21 +913,35 @@ pub async fn process_servers_inner(
             );
 
             let cancel_token = app_handle
-                .and_then(|app| app.try_state::<Mutex<CancellationToken>>())
+                .and_then(|app| app.try_state::<Arc<Mutex<CancellationToken>>>())
                 .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()).clone());
 
             let total_alive_servers = ready_servers.len() + needs_batch_test.len();
             let mut updated = match app_handle {
-                Some(app) => cache
-                    .batch_test(Some(app), &needs_batch_test, cancel_token, profile_id, total_alive_servers)
-                    .await,
+                Some(app) => {
+                    cache
+                        .batch_test(
+                            Some(app),
+                            &needs_batch_test,
+                            cancel_token,
+                            profile_id,
+                            total_alive_servers,
+                        )
+                        .await
+                }
                 None => {
                     tracing::info!(
                         target: "cache",
                         "Batch test running headless (no Tauri app handle)",
                     );
                     cache
-                        .batch_test(None, &needs_batch_test, cancel_token, profile_id, total_alive_servers)
+                        .batch_test(
+                            None,
+                            &needs_batch_test,
+                            cancel_token,
+                            profile_id,
+                            total_alive_servers,
+                        )
                         .await
                 }
             };
@@ -1158,14 +1139,22 @@ mod extra_tests {
 
     fn load_real_servers() -> Vec<ServerProfile> {
         let p = app_data_dir().join("profiles.json");
-        let data: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+        let Ok(json) = std::fs::read_to_string(&p) else {
+            eprintln!("SKIP: profiles.json not found at {}", p.display());
+            return Vec::new();
+        };
+        let Ok(data) = serde_json::from_str::<serde_json::Value>(&json) else {
+            eprintln!("SKIP: invalid profiles.json");
+            return Vec::new();
+        };
         data[0]["servers"]
             .as_array()
-            .unwrap()
-            .iter()
-            .map(|s| serde_json::from_value(s.clone()).unwrap())
-            .collect()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| serde_json::from_value(s.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     // -----------------------------------------------------------------------
@@ -1174,6 +1163,10 @@ mod extra_tests {
     #[test]
     fn test_each_server_generates_valid_config() {
         let servers = load_real_servers();
+        if servers.is_empty() {
+            eprintln!("SKIP: no servers in profiles.json");
+            return;
+        }
         let binary = singbox();
         if !binary.exists() {
             eprintln!("SKIP: no sing-box binary");
@@ -1291,6 +1284,10 @@ mod extra_tests {
     #[test]
     fn test_full_config_has_all_required_sections() {
         let servers = load_real_servers();
+        if servers.is_empty() {
+            eprintln!("SKIP: no servers in profiles.json");
+            return;
+        }
         let cache = test_dir("full-check");
         let _ = std::fs::create_dir_all(&cache);
         let settings = AppSettings::default();
@@ -1359,6 +1356,10 @@ mod extra_tests {
         // This tests the logic in lib.rs: when autoConnectFastest=false,
         // alternativeServers must be empty so no urltest group is added
         let servers = load_real_servers();
+        if servers.is_empty() {
+            eprintln!("SKIP: no real servers loaded (profiles.json missing or empty)");
+            return;
+        }
         let cache = test_dir("alt-servers");
         let _ = std::fs::create_dir_all(&cache);
 
@@ -1416,7 +1417,13 @@ mod extra_tests {
     #[test]
     fn test_refresh_preserves_server_ids() -> Result<(), Box<dyn std::error::Error>> {
         let servers = load_real_servers();
-        assert!(servers.len() >= 2, "Need at least 2 servers for ID test");
+        if servers.len() < 2 {
+            eprintln!(
+                "SKIP: need at least 2 servers for ID test, got {}",
+                servers.len()
+            );
+            return Ok(());
+        }
 
         // Simulate "old" servers with known IDs (as if loaded from saved profiles.json)
         let old_servers: Vec<ServerProfile> = servers.iter().take(5).cloned().collect();

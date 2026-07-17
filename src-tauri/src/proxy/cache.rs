@@ -154,7 +154,7 @@ pub fn calculate_negative_ttl(consecutive_failures: u32, previously_worked: bool
         NEGATIVE_BASE_NEVER_WORKED_SECS
     };
     // Clamp to [1, 6] then subtract 1 for safe shift: 1→0, 6→5 → 2^0..2^5 → 1..32
-    let clamped = consecutive_failures.max(1).min(6) - 1;
+    let clamped = consecutive_failures.clamp(1, 6) - 1;
     let multiplier = 2_u64.pow(clamped); // 1, 2, 4, 8, 16, 32
     let ttl_secs = (base_ttl * multiplier).min(NEGATIVE_MAX_TTL_SECS);
     Duration::from_secs(ttl_secs)
@@ -229,7 +229,7 @@ impl ServerCache {
         let (batch_tx, batch_rx) = tokio::sync::mpsc::unbounded_channel();
 
         tracing::info!(target: "cache", "[ServerCache] initialized with {persisted_count} persisted entries");
-        tracing::info!(target: "cache", 
+        tracing::info!(target: "cache",
             "[ServerCache] hot cache TTL={POSITIVE_TTL_SECS}s, idle={POSITIVE_IDLE_SECS}s, SWR stale={POSITIVE_STALE_SECS}s"
         );
         tracing::info!(target: "cache", "[ServerCache] batch channel created (not started — call start_batcher)");
@@ -252,7 +252,7 @@ impl ServerCache {
         &self,
         port_pool: Arc<PortPool>,
         data_dir: PathBuf,
-        cancel: CancellationToken,
+        cancel: Arc<std::sync::Mutex<CancellationToken>>,
     ) {
         if self
             .batcher_started
@@ -318,8 +318,12 @@ impl ServerCache {
                                         Ok(Ok(r)) => {
                                             tracing::info!(target: "cache", "SWR refresh ok for {}", r.server_id)
                                         }
-                                        Ok(Err(e)) => tracing::warn!(target: "cache", "SWR refresh failed: {e}"),
-                                        Err(_) => tracing::warn!(target: "cache", "SWR refresh cancelled"),
+                                        Ok(Err(e)) => {
+                                            tracing::warn!(target: "cache", "SWR refresh failed: {e}")
+                                        }
+                                        Err(_) => {
+                                            tracing::warn!(target: "cache", "SWR refresh cancelled")
+                                        }
                                     }
                                 });
                                 return Ok(result);
@@ -397,7 +401,11 @@ impl ServerCache {
             let store = self.store.read().await;
             match store.get(server_id) {
                 Some(CacheEntry {
-                    status: CacheStatus::Positive { consecutive_successes, .. },
+                    status:
+                        CacheStatus::Positive {
+                            consecutive_successes,
+                            ..
+                        },
                     ..
                 }) => *consecutive_successes,
                 _ => 0,
@@ -569,7 +577,7 @@ impl ServerCache {
         profile_id: &str,
         total_alive_servers: usize,
     ) -> Vec<crate::proxy::ServerProfile> {
-        let app_ref = app;  // rename so we can shadow with Option
+        let app_ref = app; // rename so we can shadow with Option
         let (logger, use_tracing) = match app_ref {
             Some(a) => (Some(a.state::<std::sync::Mutex<Logger>>()), false),
             None => (None, true),
@@ -589,6 +597,9 @@ impl ServerCache {
         // Use a simple cache-only check to avoid blocking on the batch worker.
         let mut pending = Vec::new();
         let mut result_slots: Vec<Option<ServerProfile>> = Vec::with_capacity(total);
+        // Track slot index for each pending server by ID.
+        let mut slot_by_id: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         for server in servers.iter() {
             let server_id = &server.id;
@@ -668,8 +679,16 @@ impl ServerCache {
                 // подтвердил базовую связность, чего достаточно для CDN-узлов.
                 cdn_skip_count += 1;
                 if let Some(l) = &logger {
-                    log(app_ref.unwrap(), l, LogLevel::Info, LogSource::Cache,
-                        format!("[Cache] server {} behind CDN — skipping batch test, using TCP ping", server.id));
+                    log(
+                        app_ref.unwrap(),
+                        l,
+                        LogLevel::Info,
+                        LogSource::Cache,
+                        format!(
+                            "[Cache] server {} behind CDN — skipping batch test, using TCP ping",
+                            server.id
+                        ),
+                    );
                 }
                 let mut s = server.clone();
                 // Инвариант I-CDN-1: behind_cdn => exit_* = None
@@ -685,6 +704,8 @@ impl ServerCache {
                 let rx = self.queue_test(server, profile_id);
                 pending.push((server.clone(), rx));
                 result_slots.push(None);
+                // Record the actual result_slots index for this server.
+                slot_by_id.insert(server.id.clone(), result_slots.len() - 1);
                 queued += 1;
             }
         }
@@ -695,7 +716,7 @@ impl ServerCache {
         }
 
         if queued == 0 {
-            return result_slots.into_iter().filter_map(|s| s).collect();
+            return result_slots.into_iter().flatten().collect();
         }
 
         // Phase 2: Await all queued results using JoinSet with progress reporting
@@ -715,8 +736,13 @@ impl ServerCache {
             if let Some(ref token) = cancel {
                 if token.is_cancelled() {
                     if let Some(l) = &logger {
-                        log(app_ref.unwrap(), l, LogLevel::Info, LogSource::Cache,
-                            "[Cache] batch_test cancelled".into());
+                        log(
+                            app_ref.unwrap(),
+                            l,
+                            LogLevel::Info,
+                            LogSource::Cache,
+                            "[Cache] batch_test cancelled".into(),
+                        );
                     }
                     break;
                 }
@@ -732,45 +758,90 @@ impl ServerCache {
                         s.behind_cdn = positive.behind_cdn;
                         // CDN servers must not retain outlet IP
                         if s.behind_cdn {
-                            // 🚫 ANTI-REGRESSION: логируем нарушение ПЕРЕД занулением.
-                            // positive здесь — результат test_single_server. Если
-                            // positive.behind_cdn=true и при этом s имел старые
-                            // exit-данные (не-CDN кеш), это означает, что сервер
-                            // только что был переклассифицирован в CDN. Логируем.
                             s.assert_no_cdn_exit_data("batch_test::batch_result");
                             s.exit_server = None;
                             s.exit_flag = None;
                             s.exit_country_name = None;
                             s.exit_city_name = None;
                         } else {
-                            s.exit_server = positive.exit_ip;
-                            s.exit_flag = positive.exit_flag;
-                            s.exit_country_name = positive.exit_country;
-                            s.exit_city_name = positive.exit_city;
+                            s.exit_server = positive.exit_ip.clone();
+                            s.exit_flag = positive.exit_flag.clone();
+                            s.exit_country_name = positive.exit_country.clone();
+                            s.exit_city_name = positive.exit_city.clone();
+                        }
+                        // Emit per-server event for streaming UI updates.
+                        if let Some(app) = app_ref {
+                            crate::events::emit_server_tested(
+                                app,
+                                crate::events::ServerTestedEvent {
+                                    profile_id: profile_id.to_string(),
+                                    server_id: s.id.clone(),
+                                    ping_ms: Some(positive.ping_ms),
+                                    outlet_ip: positive.exit_ip.clone(),
+                                    exit_country: positive.exit_country.clone(),
+                                    success: true,
+                                    error: None,
+                                },
+                            );
                         }
                     }
                     Ok(Err(e)) => {
                         failed += 1;
                         if let Some(l) = &logger {
-                            log(app_ref.unwrap(), l, LogLevel::Warning, LogSource::Cache,
-                                format!("[Cache] server {} batch test failed: {e}", server.id));
+                            log(
+                                app_ref.unwrap(),
+                                l,
+                                LogLevel::Warning,
+                                LogSource::Cache,
+                                format!("[Cache] server {} batch test failed: {e}", server.id),
+                            );
+                        }
+                        if let Some(app) = app_ref {
+                            crate::events::emit_server_tested(
+                                app,
+                                crate::events::ServerTestedEvent {
+                                    profile_id: profile_id.to_string(),
+                                    server_id: s.id.clone(),
+                                    ping_ms: None,
+                                    outlet_ip: None,
+                                    exit_country: None,
+                                    success: false,
+                                    error: Some(e),
+                                },
+                            );
                         }
                     }
                     Err(_) => {
                         failed += 1;
                         if let Some(l) = &logger {
-                            log(app_ref.unwrap(), l, LogLevel::Error, LogSource::Cache,
-                                format!("[Cache] server {} batch worker dropped", server.id));
+                            log(
+                                app_ref.unwrap(),
+                                l,
+                                LogLevel::Error,
+                                LogSource::Cache,
+                                format!("[Cache] server {} batch worker dropped", server.id),
+                            );
+                        }
+                        if let Some(app) = app_ref {
+                            crate::events::emit_server_tested(
+                                app,
+                                crate::events::ServerTestedEvent {
+                                    profile_id: profile_id.to_string(),
+                                    server_id: s.id.clone(),
+                                    ping_ms: None,
+                                    outlet_ip: None,
+                                    exit_country: None,
+                                    success: false,
+                                    error: Some("batch worker dropped".into()),
+                                },
+                            );
                         }
                     }
                 }
 
-                // Find and fill the right slot
-                for slot in &mut result_slots {
-                    if slot.is_none() {
-                        *slot = Some(s);
-                        break;
-                    }
+                // Fill the correct slot by server.id.
+                if let Some(&idx) = slot_by_id.get(&s.id) {
+                    result_slots[idx] = Some(s);
                 }
 
                 crate::events::emit_refresh_progress(
@@ -794,8 +865,13 @@ impl ServerCache {
                 if use_tracing {
                     tracing::warn!(target: "cache", "[Cache] batch_test task panicked or was cancelled");
                 } else if let Some(l) = &logger {
-                    log(app_ref.unwrap(), l, LogLevel::Warning, LogSource::Cache,
-                        "[Cache] batch_test task panicked or was cancelled".into());
+                    log(
+                        app_ref.unwrap(),
+                        l,
+                        LogLevel::Warning,
+                        LogSource::Cache,
+                        "[Cache] batch_test task panicked or was cancelled".into(),
+                    );
                 }
                 // We can't identify which server panicked, so skip slot filling.
                 // The slot will be filled by the next completed task, or at worst
@@ -809,7 +885,10 @@ impl ServerCache {
                             total,
                             tested: initial_cache_hits + cache_hits + completed,
                             cache_hits: initial_cache_hits + cache_hits,
-                            successful: initial_cache_hits + cache_hits + cdn_skip_count + successful,
+                            successful: initial_cache_hits
+                                + cache_hits
+                                + cdn_skip_count
+                                + successful,
                             failed,
                             phase: "testing".into(),
                             updated_at: String::new(),
@@ -824,12 +903,16 @@ impl ServerCache {
             tracing::info!(target: "cache",
                 "[Cache] batch_test done: {completed}/{queued} completed, {failed} failed");
         } else if let Some(l) = &logger {
-            log(app_ref.unwrap(), l, LogLevel::Info, LogSource::Cache,
-                format!("[Cache] batch_test done: {completed}/{queued} completed, {failed} failed"));
+            log(
+                app_ref.unwrap(),
+                l,
+                LogLevel::Info,
+                LogSource::Cache,
+                format!("[Cache] batch_test done: {completed}/{queued} completed, {failed} failed"),
+            );
         }
 
-
-        result_slots.into_iter().filter_map(|s| s).collect()
+        result_slots.into_iter().flatten().collect()
     }
 
     /// Remove entries that no longer exist in any profile, and resurrect
@@ -855,7 +938,7 @@ impl ServerCache {
         // every subscription refresh, wasting resources on known-dead servers.
 
         if removed > 0 {
-            tracing::info!(target: "cache", 
+            tracing::info!(target: "cache",
                 "[Cache] subscription refresh: removed {removed} stale server(s) ({} remaining)",
                 store.len(),
             );
@@ -878,13 +961,30 @@ impl ServerCache {
         });
         let removed = before - store.len();
         if removed > 0 {
-            tracing::info!(target: "cache", 
+            tracing::info!(target: "cache",
                 "[Cache] pruned {removed} old entries older than {}d ({} remaining)",
                 max_age_secs / 86400,
                 store.len(),
             );
         }
         removed
+    }
+
+    /// Clear negative-cache entries for the given server IDs.
+    /// Used by test_servers(force=true) so the user can manually re-test
+    /// servers that are in exponential-backoff.
+    ///
+    /// NOTE: Negative entries are stored in self.store (CacheEntry with
+    /// status=Negative), NOT a separate field. This method removes them
+    /// from the store entirely, resetting the failure counter.
+    pub async fn clear_negative_for_ids(&self, ids: &[String]) {
+        let mut store = self.store.write().await;
+        let before = store.len();
+        store.retain(|k, v| !(ids.contains(k) && matches!(v.status, CacheStatus::Negative { .. })));
+        let removed = before - store.len();
+        if removed > 0 {
+            tracing::info!(target:"cache", "[Cache] cleared {} negative entries (force re-test)", removed);
+        }
     }
 
     /// Persist the current store to disk.
