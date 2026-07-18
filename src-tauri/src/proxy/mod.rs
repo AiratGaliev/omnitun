@@ -343,13 +343,12 @@ fn keyword_cdn_check(host: &str) -> bool {
 ///
 /// The real detection happens during batch testing via GeoLite2-ASN.mmdb
 /// (`geoip::is_cdn_entry_ip()`), which examines the actual entry IP.
-/// is a fast pre-check for obviously serverless domains, so the UI can show
+/// This is a fast pre-check for obviously serverless domains, so the UI can show
 /// the CDN badge even before batch testing runs.
 ///
-/// Previously this function also did DNS CIDR resolution on entry domains,
-/// but that was incorrect — a VPS behind Cloudflare CDN has a stable outlet IP
-/// and is NOT a CDN node in the problematic sense. Only Workers/WARP/Pages
-/// have unstable outlet IPs.
+/// DNS CIDR resolution on entry domains is NOT used here because a VPS behind
+/// Cloudflare CDN has a stable outlet IP and is NOT a CDN node in the
+/// problematic sense. Only Workers/WARP/Pages have unstable outlet IPs.
 pub fn is_cdn_server(s: &ServerProfile) -> bool {
     if let Some(ref host) = s.transport_host {
         if keyword_cdn_check(host) {

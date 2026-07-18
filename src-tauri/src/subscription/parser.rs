@@ -7,6 +7,26 @@
 
 use crate::proxy::{ProxyError, ServerProfile};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+
+/// Replace the random UUID with a deterministic hash of server fields.
+/// This ensures the same subscription data always produces the same
+/// server IDs, keeping the negative/positive cache valid across refreshes.
+fn determinize_id(s: &mut ServerProfile) {
+    let key = format!(
+        "{}://{}:{}@{}:{}:{}/{}",
+        s.protocol,
+        s.server,
+        s.port,
+        s.uuid.as_deref().unwrap_or(""),
+        s.password.as_deref().unwrap_or(""),
+        s.method.as_deref().unwrap_or(""),
+        s.transport_type.as_deref().unwrap_or(""),
+    );
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    s.id = format!("{:016x}", hasher.finish());
+}
 
 pub fn parse_subscription(data: &str) -> Result<Vec<ServerProfile>, ProxyError> {
     let decoded = try_base64_decode(data).unwrap_or_else(|_| data.to_string());
@@ -21,6 +41,7 @@ pub fn parse_subscription(data: &str) -> Result<Vec<ServerProfile>, ProxyError> 
         if let Some(mut profile) = parse_uri(line) {
             // Validate schema — drop servers with fatal issues (empty uuid, port 0, etc.)
             if validate_server_profile(&mut profile) {
+                determinize_id(&mut profile);
                 servers.push(profile);
             }
         }

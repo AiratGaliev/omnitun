@@ -608,10 +608,9 @@ pub fn parse_srs_file(path: &Path) -> Result<Vec<(IpAddr, u8)>, String> {
         .ok_or_else(|| "sing-box binary not set".to_string())?;
 
     // ── 1. Unique tmp file per call ───────────────────────────────────
-    // Previously this function used a hardcoded "cdn_srs_tmp.json" name,
-    // which caused a race condition when called concurrently from
-    // `ensure_downloaded` and `profile::mod::lazy_init_cdn_ranges`:
-    // one call would `remove_file` the output while another was still
+    // Unique temp file name (UUID) prevents race when called concurrently
+    // from `ensure_downloaded` and `profile::mod::lazy_init_cdn_ranges`:
+    // one call could `remove_file` the output while another is still
     // reading it, producing "os error 2" (file not found).
     //
     // Using uuid-based unique names eliminates the race entirely without
@@ -1263,6 +1262,7 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
             "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb",
             "https://fastly.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-City.mmdb",
             "https://ghproxy.net/https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb",
+            "https://translate.yandex.ru/translate?lang=en-en&url=https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-City.mmdb",
         ];
         if let Ok(dl) = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -1299,6 +1299,7 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
             "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-ASN.mmdb",
             "https://fastly.jsdelivr.net/gh/P3TERX/GeoLite.mmdb@main/GeoLite2-ASN.mmdb",
             "https://ghproxy.net/https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-ASN.mmdb",
+            "https://translate.yandex.ru/translate?lang=en-en&url=https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-ASN.mmdb",
         ];
         if let Ok(dl) = reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -1358,10 +1359,12 @@ pub async fn ensure_databases_fresh(db_dir: &Path, ipinfo_token: &str) {
         ("123jjck", "cdn-only_singbox.srs", &[
             "https://raw.githubusercontent.com/123jjck/cdn-ip-ranges/main/cdn-only/cdn-only_singbox.srs",
             "https://ghproxy.net/https://raw.githubusercontent.com/123jjck/cdn-ip-ranges/main/cdn-only/cdn-only_singbox.srs",
+            "https://translate.yandex.ru/translate?lang=en-en&url=https://raw.githubusercontent.com/123jjck/cdn-ip-ranges/main/cdn-only/cdn-only_singbox.srs",
         ]),
         ("PentiumB", "merged.srs", &[
             "https://github.com/PentiumB/CDN-RuleSet/releases/latest/download/merged.srs",
             "https://ghproxy.net/https://github.com/PentiumB/CDN-RuleSet/releases/latest/download/merged.srs",
+            "https://translate.yandex.ru/translate?lang=en-en&url=https://github.com/PentiumB/CDN-RuleSet/releases/latest/download/merged.srs",
         ]),
     ];
 

@@ -95,9 +95,12 @@ pub fn generate_config(
 
     if let Some(outbounds) = config["outbounds"].as_array_mut() {
         if proxy_outbounds.len() > 1 {
-            // Native Sing-Box failover: urltest (auto fastest) or fallback.
-            // Unlike the old `selector`, Sing-Box handles the switching
-            // internally — no Clash API calls needed, no connection drops.
+            // sing-box has NO 'fallback' outbound type (Clash Premium
+            // concept sing-box never implemented). sing-box rejects
+            // the config with "unknown outbound type: fallback" —
+            // proxy fails to start when auto_connect_fastest=false
+            // with 2+ servers. Use 'selector' (manual selection
+            // group) — supports PUT /proxies/{name} for failover.
             let tags: Vec<String> = (0..proxy_outbounds.len())
                 .map(|i| format!("proxy-{i}"))
                 .collect();
@@ -105,7 +108,7 @@ pub fn generate_config(
             let group_type = if settings.auto_connect_fastest {
                 "urltest"
             } else {
-                "fallback"
+                "selector"
             };
 
             let mut group = json!({
@@ -506,6 +509,35 @@ fn build_vmess(profile: &ServerProfile) -> Value {
     if let Some(sni) = &profile.sni {
         set_tls(&mut outbound, sni);
     }
+    // Transport (WebSocket, gRPC) — same pattern as the existing
+    // transport helper. Without this, VMess+WS subscriptions (common
+    // for CDN-fronted proxies) silently use plain TCP and fail.
+    if let Some(t_type) = &profile.transport_type {
+        match t_type.as_str() {
+            "ws" => {
+                let host = profile.transport_host.clone()
+                    .filter(|h| !h.is_empty())
+                    .or_else(|| profile.sni.clone())
+                    .filter(|h| !h.is_empty())
+                    .unwrap_or_else(|| profile.server.clone());
+                outbound["transport"] = json!({
+                    "type": "ws",
+                    "path": profile.transport_path.clone().unwrap_or_else(|| "/".into()),
+                    "headers": { "Host": host.clone() }
+                });
+                if host != profile.sni.clone().unwrap_or_default() {
+                    outbound["tls"]["server_name"] = json!(host);
+                }
+            }
+            "grpc" => {
+                outbound["transport"] = json!({
+                    "type": "grpc",
+                    "service_name": profile.transport_path.clone().unwrap_or_default()
+                });
+            }
+            _ => {}
+        }
+    }
 
     outbound
 }
@@ -654,6 +686,12 @@ fn build_tuic(profile: &ServerProfile) -> Value {
 
     if let Some(sni) = &profile.sni {
         set_tls(&mut outbound, sni);
+    } else {
+        // TUIC v5 requires TLS. Without an SNI, fall back to the server
+        // address (same pattern as build_hysteria2). Without this,
+        // sing-box rejects the config with "missing TLS configuration
+        // for TUIC".
+        set_tls(&mut outbound, &profile.server);
     }
 
     outbound
@@ -661,7 +699,7 @@ fn build_tuic(profile: &ServerProfile) -> Value {
 
 /// Apply anti-DPI measures to outbounds with TLS enabled.
 /// Uses utls fingerprint randomization.
-fn apply_anti_dpi(outbound: &mut Value) {
+pub(crate) fn apply_anti_dpi(outbound: &mut Value) {
     // Only apply to outbounds with TLS
     if outbound
         .get("tls")
@@ -682,7 +720,7 @@ fn apply_anti_dpi(outbound: &mut Value) {
 }
 
 /// Apply Mux (h2mux multiplexing) to TCP-based outbounds.
-fn apply_mux(outbound: &mut Value) {
+pub(crate) fn apply_mux(outbound: &mut Value) {
     let outbound_type = outbound["type"].as_str().unwrap_or("");
     // Mux works on TCP-based protocols
     match outbound_type {

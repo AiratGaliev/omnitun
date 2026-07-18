@@ -697,6 +697,8 @@ export const useAppStore = create<ProxyStore>((set, get) => {
       }
       set((state) => ({ _testingIds: [...state._testingIds, id] }));
       try {
+        // Clash API testing via testing engine — tests ALL servers
+        // (including CDN) regardless of proxy state.
         const result = await invoke<RustSubscriptionProfile>('test_servers', { id });
         const updated = mapRustProfile(result);
         set((state) => {
@@ -1179,7 +1181,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
 
       // Listen for servers-discovered ────────────────────────────
       // Backend emits fully-tested servers in BATCH_SIZE groups after
-      // TCP ping + batch test complete. Frontend merges by server ID.
+      // Ping + batch test complete. Frontend merges by server ID.
       const serversDiscoveredBuffer: { profileId: string; servers: RustServerProfile[] }[] = [];
       let serversDiscoveredFlushScheduled = false;
       const SERVERS_DISCOVERED_FLUSH_MS = 150;
@@ -1251,6 +1253,34 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         scheduleServersDiscoveredFlush();
       });
 
+      // Per-server streaming test results — update individual rows as
+      // results arrive. Emitted by test_servers_live and by
+      // batch_test (cache.rs emits server-tested events).
+      // Updates individual server rows incrementally.
+      const unlistenServerTested = await listen<{
+        profileId: string;
+        serverId: string;
+        pingMs: number | null;
+        outletIp: string | null;
+        exitCountry: string | null;
+        success: boolean;
+        error: string | null;
+      }>('server-tested', (event) => {
+        const { serverId, pingMs, success: _success } = event.payload;
+        set((state) => {
+          const newServers = state.servers.map((s) =>
+            s.id === serverId ? { ...s, ping: pingMs ?? undefined } : s,
+          );
+          const newProfiles = state.profiles.map((p) => ({
+            ...p,
+            servers: p.servers.map((s) =>
+              s.id === serverId ? { ...s, ping: pingMs ?? undefined } : s,
+            ),
+          }));
+          return { servers: newServers, profiles: newProfiles };
+        });
+      });
+
       return () => {
         unlisten();
         unlistenLogs();
@@ -1259,6 +1289,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         unlistenProxyProgress();
         unlistenFailover();
         unlistenServersDiscovered();
+        unlistenServerTested();
       };
     },
   };

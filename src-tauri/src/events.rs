@@ -68,7 +68,7 @@ pub fn emit_refresh_progress(app_handle: &AppHandle, progress: RefreshProgress) 
 pub struct ServersDiscoveredPayload {
     /// ID of the subscription profile being refreshed.
     pub profile_id: String,
-    /// Chunk of fully-validated servers (passed TCP ping + batch test, or
+    /// Chunk of fully-validated servers (passed ping + batch test, or
     /// cache hit, or CDN skip).
     pub servers: Vec<crate::proxy::ServerProfile>,
 }

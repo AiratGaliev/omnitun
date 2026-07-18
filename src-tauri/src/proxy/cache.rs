@@ -44,17 +44,18 @@ const POSITIVE_TTL_SECS: u64 = 1800; // 30 min
 const POSITIVE_IDLE_SECS: u64 = 600; // 10 min
 
 /// Negative cache base TTL for servers that previously worked.
+/// 1 мин, экспоненциальный backoff: 1м → 2м → 4м → 8м → 16м → 32м (plateau).
+/// Быстро перетестировать — сервер мог ожить.
 const NEGATIVE_BASE_WORKED_SECS: u64 = 60; // 1 min
 
 /// Negative cache base TTL for servers that never worked.
-/// 12 часов — чтобы ни разу не работавшие сервера не тестировались часто.
-/// Экспоненциальный backoff: 12ч → 1д → 2д → 4д → 8д → 16д (plateau).
-const NEGATIVE_BASE_NEVER_WORKED_SECS: u64 = 43200; // 12 hours
+/// Тоже 1 день — нет смысла тестировать чаще.
+const NEGATIVE_BASE_NEVER_WORKED_SECS: u64 = 86400; // 1 day
 
-/// Maximum negative cache TTL — 30 дней.
-/// Даже при максимальном multiplier (32) и base=43200 plateau=16д,
-/// но cap на 30д страхует от аномалий.
-const NEGATIVE_MAX_TTL_SECS: u64 = 2592000; // 30 days
+/// Maximum negative cache TTL — 32 дня.
+/// Экспоненциальный backoff доходит до multiplier=32, и логично
+/// чтобы cap совпадал с пиковым значением.
+const NEGATIVE_MAX_TTL_SECS: u64 = 2764800; // 32 days
 
 // ── Data Structures ─────────────────────────────────────────────────────────
 
@@ -563,7 +564,7 @@ impl ServerCache {
         None
     }
 
-    /// Batch-test all servers that passed TCP ping. Fills the cache
+    /// Batch-test all servers that passed ping. Fills the cache
     /// and returns results.
     ///
     /// Two-phase algorithm to avoid sequential batching:
@@ -639,7 +640,7 @@ impl ServerCache {
                         }
                         CacheStatus::Negative { .. } => {
                             // Still negative — don't return cached, but don't skip
-                            // either: the server passed TCP ping (it's alive), so it
+                            // either: the server passed ping (it's alive), so it
                             // deserves a fresh batch test. The batcher will call
                             // update_negative() again if it fails.
                         }
@@ -650,7 +651,6 @@ impl ServerCache {
             if let Some(positive) = cached {
                 cache_hits += 1;
                 let mut s = server.clone();
-                s.ping_ms = Some(positive.ping_ms);
                 // Preserve live behind_cdn flag — entry IP check (step 1c in process_servers)
                 // is authoritative. Cache may have stale false from before CDN detection.
                 if !s.behind_cdn {
@@ -675,8 +675,8 @@ impl ServerCache {
                 result_slots.push(Some(s.clone()));
             } else if server.behind_cdn {
                 // CDN-серверы: пропускаем batch test — их exit IP динамический
-                // и нестабильный (CDN anycast, Workers, WARP). TCP Ping уже
-                // подтвердил базовую связность, чего достаточно для CDN-узлов.
+                // и нестабильный (CDN anycast, Workers, WARP). Clash API preflight
+                // уже подтвердил базовую связность, чего достаточно для CDN-узлов.
                 cdn_skip_count += 1;
                 if let Some(l) = &logger {
                     log(
@@ -685,7 +685,7 @@ impl ServerCache {
                         LogLevel::Info,
                         LogSource::Cache,
                         format!(
-                            "[Cache] server {} behind CDN — skipping batch test, using TCP ping",
+                            "[Cache] server {} behind CDN — skipping batch test, using ping",
                             server.id
                         ),
                     );
@@ -754,7 +754,6 @@ impl ServerCache {
                 match rx_res {
                     Ok(Ok(positive)) => {
                         successful += 1;
-                        s.ping_ms = Some(positive.ping_ms);
                         s.behind_cdn = positive.behind_cdn;
                         // CDN servers must not retain outlet IP
                         if s.behind_cdn {
@@ -927,8 +926,15 @@ impl ServerCache {
         let mut store = self.store.write().await;
         let before = store.len();
 
-        // Remove servers that are no longer in ANY subscription
-        store.retain(|key, _| all_active_ids.contains(key));
+        // Remove entries that are no longer in ANY subscription.
+        // Preserve negative cache entries — their exponential backoff TTL
+        // controls when a dead server is eligible for re-testing.
+        // 🚫 ANTI-REGRESSION: removing negative entries here defeats the
+        // entire negative cache optimization.
+        store.retain(|key, entry| {
+            all_active_ids.contains(key)
+                || matches!(entry.status, CacheStatus::Negative { .. })
+        });
         let removed = before - store.len();
 
         // NOTE: negative cache entries for surviving servers are NOT resurrected
@@ -1068,16 +1074,14 @@ mod tests {
     }
 
     #[test]
-    fn test_negative_ttl_never_worked_base_43200() {
+    fn test_negative_ttl_never_worked_base_86400() {
         let ttl = calculate_negative_ttl(1, false);
-        assert_eq!(ttl.as_secs(), 43200);
+        assert_eq!(ttl.as_secs(), 86400);
     }
+
 
     #[test]
     fn test_negative_ttl_exponential_backoff() {
-        // failure=1: base * 2^0 = base
-        // failure=2: base * 2^1 = base*2
-        // failure=3: base * 2^2 = base*4
         let ttl1 = calculate_negative_ttl(1, true).as_secs();
         let ttl2 = calculate_negative_ttl(2, true).as_secs();
         let ttl3 = calculate_negative_ttl(3, true).as_secs();
@@ -1087,31 +1091,28 @@ mod tests {
     }
 
     #[test]
-    fn test_negative_ttl_plateau_1382400() {
-        // failure=7: clamp(7,6)->5 -> 2^5=32 -> 43200*32=1382400 -> min(1382400, 2592000)=1382400
-        // failure=99: clamp(99,6)->5 -> same
-        // Больше не упирается в MAX_TTL (30d), а в plateau базовой экспоненты.
-        let ttl = calculate_negative_ttl(99, false);
-        assert_eq!(ttl.as_secs(), 1382400);
+    fn test_negative_ttl_plateau_previously_worked() {
+        // failure=99: previously-worked → base=60 * 32 = 1920 → min(1920, 2764800)=1920
+        let ttl = calculate_negative_ttl(99, true);
+        assert_eq!(ttl.as_secs(), 1920);
     }
 
     #[test]
     fn test_negative_ttl_zero_failures_no_underflow() {
-        // ⚠️ This is the case that would underflow in the original TZ.
-        // consecutive_failures=0: max(1,0)=1 -> 1-1=0 -> 2^0=1 -> 60*1=60
+        // consecutive_failures=0: clamp to 1 → 2^0=1 → 60*1=60
         let ttl = calculate_negative_ttl(0, true);
         assert_eq!(ttl.as_secs(), 60);
     }
 
     #[test]
-    fn test_negative_ttl_one_failure() {
+    fn test_negative_ttl_one_failure_never_worked() {
         let ttl = calculate_negative_ttl(1, false);
-        assert_eq!(ttl.as_secs(), 43200);
+        assert_eq!(ttl.as_secs(), 86400);
     }
 
     #[test]
-    fn test_negative_ttl_six_failures() {
-        // failure=6: max(1,6)->6 -> 6-1=5 -> 2^5=32 -> 60*32=1920
+    fn test_negative_ttl_six_failures_previously_worked() {
+        // failure=6: base=60 * 32 = 1920
         let ttl = calculate_negative_ttl(6, true);
         assert_eq!(ttl.as_secs(), 1920);
     }
@@ -1128,7 +1129,7 @@ mod tests {
     #[test]
     fn test_negative_expired() {
         let entry = make_neg("s1", 1, false, "timeout");
-        let now = 1_000_000 + 45000; // 45000s ago (TTL=43200s for never-worked)
+        let now = 1_000_000 + 86500; // 86500s ago (TTL=86400s for never-worked)
         assert!(is_negative_expired(&entry, now));
     }
 

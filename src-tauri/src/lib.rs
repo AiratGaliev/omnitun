@@ -353,7 +353,26 @@ async fn start_proxy(
                                     format!("http://127.0.0.1:{stats_port}/proxies/proxy");
                                 let body = serde_json::json!({ "name": tag });
                                 let client = reqwest::Client::new();
-                                if client.put(&switch_url).json(&body).send().await.is_ok() {
+                                // sing-box's PUT /proxies/{name} only works on
+                                // 'selector' outbounds — 'urltest' auto-selects
+                                // and returns HTTP 400. With a 'selector' outbound
+                                // (set when auto_connect_fastest=false), PUT
+                                // works for manual failover. For 'urltest'
+                                // groups, log a warning and skip the switch.
+                                let switch_ok = match client.put(&switch_url).json(&body).send().await {
+                                    Ok(resp) if resp.status().is_success() => true,
+                                    Ok(resp) => {
+                                        tracing::warn!(target: "proxy",
+                                            "Failover switch to {tag} returned HTTP {} — urltest group auto-selects", resp.status());
+                                        false
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(target: "proxy",
+                                            "Failover switch to {tag} failed: {e}");
+                                        false
+                                    }
+                                };
+                                if switch_ok {
                                     tokio::time::sleep(Duration::from_secs(2)).await;
                                     // Re-verify exit IP through the new server
                                     let mut cb =
@@ -579,7 +598,7 @@ async fn start_proxy(
                         .build()
                         .unwrap_or_default();
                     let api_url = format!("http://127.0.0.1:{fail_port}/proxies/proxy");
-                    let mut current_tag = String::new();
+                    let mut current_tag = "proxy-0".to_string();
                     loop {
                         if cancel_fail.is_cancelled() {
                             break;
@@ -594,7 +613,7 @@ async fn start_proxy(
                         if let Ok(resp) = client.get(&api_url).send().await {
                             if let Ok(body) = resp.json::<serde_json::Value>().await {
                                 if let Some(now_tag) = body.get("now").and_then(|v| v.as_str()) {
-                                    if !current_tag.is_empty() && now_tag != current_tag {
+                                    if now_tag != current_tag {
                                         tracing::info!(
                                             target: "proxy",
                                             "Seamless failover detected: {current_tag} -> {now_tag}",
@@ -1365,41 +1384,6 @@ async fn refresh_subscription(
         }
     };
 
-    // Preserve server IDs
-    let old_index: std::collections::HashMap<String, String> = old_servers
-        .iter()
-        .map(|s| {
-            (
-                format!(
-                    "{}://{}:{}@{}:{}:{}/{}",
-                    s.protocol,
-                    s.server,
-                    s.port,
-                    s.uuid.as_deref().unwrap_or(""),
-                    s.password.as_deref().unwrap_or(""),
-                    s.method.as_deref().unwrap_or(""),
-                    s.transport_type.as_deref().unwrap_or(""),
-                ),
-                s.id.clone(),
-            )
-        })
-        .collect();
-    for server in &mut servers {
-        let key = format!(
-            "{}://{}:{}@{}:{}:{}/{}",
-            server.protocol,
-            server.server,
-            server.port,
-            server.uuid.as_deref().unwrap_or(""),
-            server.password.as_deref().unwrap_or(""),
-            server.method.as_deref().unwrap_or(""),
-            server.transport_type.as_deref().unwrap_or(""),
-        );
-        if let Some(old_id) = old_index.get(&key) {
-            server.id = old_id.clone();
-        }
-    }
-
     // Preserve exit IP data
     type ExitData = (
         Option<String>,
@@ -1427,7 +1411,7 @@ async fn refresh_subscription(
         .map(|s| (s.id.clone(), s.ping_ms))
         .collect();
 
-    // process_servers: TCP ping + batch_test + GeoIP (long, no lock)
+    // process_servers: ping + batch_test + GeoIP (long, no lock)
     servers = crate::profile::process_servers(&app, servers, &id).await;
 
     // Restore preserved exit data
@@ -1502,9 +1486,9 @@ async fn refresh_subscription(
 /// Test existing servers WITHOUT re-fetching the subscription URL.
 ///
 /// This is the "server testing" layer, separate from "subscription refresh":
-///   - `refresh_subscription` = HTTP fetch + parse + TCP-ping + batch-test
+///   - `refresh_subscription` = HTTP fetch + parse + ping + batch-test
 ///     (discovers NEW servers, re-tests all). Cadence: `auto_update_interval`.
-///   - `test_servers`         = TCP-ping + batch-test only (no URL fetch).
+///   - `test_servers`         = ping + batch-test only (no URL fetch).
 ///     Re-tests EXISTING servers to keep latency/exit-IP fresh.
 ///     Cadence: `auto_test_interval`.
 ///
@@ -1530,43 +1514,118 @@ async fn test_servers(
         "Testing existing servers (no URL fetch)...".into(),
     );
 
-    // Phase 1: brief read lock — get existing servers
-    let servers = {
-        let mgr = state.manager.lock().await;
-        let idx = mgr.list().iter().position(|p| p.id == id).ok_or_else(|| {
-            ProxyError::subscription(
-                crate::proxy::ErrorCode::SubscriptionNotFound,
-                "Profile not found",
-            )
-        })?;
-        // Clear negative cache for this profile's servers if force=true.
-        // Without this, servers in exponential backoff (up to 30 days for
-        // never-worked servers) are silently skipped.
-        if force.unwrap_or(false) {
-            if let Some(cache) = app.try_state::<Arc<ServerCache>>() {
-                let ids: Vec<String> = mgr.list()[idx]
-                    .servers
-                    .iter()
-                    .map(|s| s.id.clone())
-                    .collect();
-                cache.clear_negative_for_ids(&ids).await;
+    // Phase 1: brief read lock — get existing servers + old ping values
+    let (servers, old_ping) = {
+            let mgr = state.manager.lock().await;
+            let idx = mgr.list().iter().position(|p| p.id == id).ok_or_else(|| {
+                ProxyError::subscription(
+                    crate::proxy::ErrorCode::SubscriptionNotFound,
+                    "Profile not found",
+                )
+            })?;
+            // Clear negative cache for this profile's servers if force=true.
+            if force.unwrap_or(false) {
+                if let Some(cache) = app.try_state::<Arc<ServerCache>>() {
+                    let ids: Vec<String> = mgr.list()[idx]
+                        .servers
+                        .iter()
+                        .map(|s| s.id.clone())
+                        .collect();
+                    cache.clear_negative_for_ids(&ids).await;
+                }
+            }
+            // Save old ping values for fallback if engine fails.
+            let old_ping: std::collections::HashMap<String, Option<u64>> = mgr.list()[idx]
+                .servers
+                .iter()
+                .map(|s| (s.id.clone(), s.ping_ms))
+                .collect();
+            // Clone servers, reset ping_ms so they get re-tested
+            let servers = mgr.list()[idx]
+                .servers
+                .iter()
+                .map(|s| {
+                    let mut s = s.clone();
+                    s.ping_ms = None;
+                    s
+                })
+                .collect::<Vec<_>>();
+            (servers, old_ping)
+        }; // lock released
+
+    // Phase 2: Clash API ping + pre-filter (dead servers → negative cache)
+    crate::proxy::geoip::reset_ipguide_rate_limit();
+    let data_dir = match app.path().app_data_dir() {
+        Ok(d) => d,
+        Err(_) => return Err(ProxyError::process(
+            crate::proxy::ErrorCode::ProcessNotReachable,
+            "Cannot access app data directory".to_string(),
+        )),
+    };
+    let settings = app
+        .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
+        .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
+        .unwrap_or_default();
+    let cache = {
+        let state = app
+            .try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>();
+        state.as_ref().map(|s| -> std::sync::Arc<crate::proxy::cache::ServerCache> { (**s).clone() })
+    };
+    let pings = crate::profile::clash_api_test(
+        &servers,
+        &data_dir,
+        &settings,
+        cache.as_deref(),
+        Some(&app),
+        &id,
+    ).await;
+
+    // Pre-filter: servers without ping → negative cache, remove from profile
+    // If testing engine returned 0 pings, skip filtering (transient failure).
+    let mut tested: Vec<crate::proxy::ServerProfile> = servers;
+    let test_cache = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>();
+    if !pings.is_empty() {
+        if let Some(cache) = test_cache.as_ref() {
+            let mut dead_ids = std::collections::HashSet::new();
+            for server in &tested {
+                if pings.contains_key(&server.id) { continue; }
+                dead_ids.insert(server.id.clone());
+            }
+            if !dead_ids.is_empty() {
+                for sid in &dead_ids {
+                    cache
+                        .update_negative(sid, "Clash API test: no ping".to_string())
+                        .await;
+                }
+                cache.save_to_disk().await;
+                let before = tested.len();
+                tested.retain(|s| !dead_ids.contains(&s.id));
+                let n = before - tested.len();
+                log(
+                    &app, &logger,
+                    LogLevel::Info,
+                    LogSource::Cache,
+                    format!("Removed {n} dead server(s) via Clash API test"),
+                );
             }
         }
-        // Clone servers, reset ping_ms so they get re-tested
-        mgr.list()[idx]
-            .servers
-            .iter()
-            .map(|s| {
-                let mut s = s.clone();
-                s.ping_ms = None;
-                s
-            })
-            .collect::<Vec<_>>()
-    }; // lock released
-
-    // Phase 2: process_servers (TCP-ping + batch-test, no URL fetch)
-    crate::proxy::geoip::reset_ipguide_rate_limit();
-    let tested = crate::profile::process_servers(&app, servers, &id).await;
+    } else {
+        log(
+            &app, &logger,
+            LogLevel::Info,
+            LogSource::Cache,
+            "Testing engine returned 0 pings — keeping all servers (transient)".into(),
+        );
+    }
+    // Apply pings to survivors — then restore old ping for servers
+    // that the Clash API test couldn't reach (transient failure).
+    for server in &mut tested {
+        if let Some(ping) = pings.get(&server.id) {
+            server.ping_ms = Some(*ping);
+        } else if let Some(old) = old_ping.get(&server.id).and_then(|o| *o) {
+            server.ping_ms = Some(old);
+        }
+    }
 
     if tested.is_empty() {
         log(
@@ -2074,6 +2133,8 @@ pub fn run() {
                                     cancel.cancel();
                                 }
                             }
+                            // Kill the persistent testing engine
+                            crate::profile::shutdown_test_engine();
                         }
                     }
                 });
@@ -2807,6 +2868,29 @@ async fn initialize_app(
                 )
                 .await;
             cache.save_to_disk().await;
+        }
+    }
+
+    // 3b. Pre-warm testing engine — start immediately after profile load.
+    {
+        let data_dir = app.path().app_data_dir().ok();
+        let profiles = app
+            .try_state::<ProfileState>()
+            .and_then(|ps| ps.manager.try_lock().ok().map(|g| g.list().to_vec()))
+            .unwrap_or_default();
+        let servers: Vec<crate::proxy::ServerProfile> = profiles
+            .iter()
+            .flat_map(|p| p.servers.iter().cloned())
+            .collect();
+        let settings = app
+            .try_state::<Mutex<crate::settings::AppSettings>>()
+            .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
+            .unwrap_or_default();
+        if let Some(d) = data_dir {
+            tokio::spawn(async move {
+                tracing::info!(target: "system", "Pre-warming testing engine with {} servers", servers.len());
+                let _ = crate::profile::ensure_test_engine(&servers, &d, &settings).await;
+            });
         }
     }
 

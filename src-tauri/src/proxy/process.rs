@@ -433,6 +433,92 @@ impl ProcessManager {
         }
     }
 
+    /// Spawn sing-box for the testing engine.
+    /// Identical to `start_headless` but without any Windows creation flags
+    /// (CREATE_NO_WINDOW / DETACHED_PROCESS / BREAKAWAY all break the Go
+    /// runtime at startup). Only stdout/stderr are redirected to null.
+    /// Stale PID cleanup and JobObject creation are the same.
+    pub async fn start_headless_test(&self, config_path: &Path) -> Result<u32, ProxyError> {
+        let existing_pid = *self.pid.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(pid) = existing_pid {
+            if !crate::is_process_alive(pid) {
+                *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            } else {
+                return Err(ProxyError::process(
+                    ErrorCode::ProcessAlreadyRunning,
+                    "Testing engine is already running",
+                ));
+            }
+        }
+
+        let config_str = config_path.to_str().ok_or_else(|| {
+            ProxyError::process(ErrorCode::ProcessStartFailed, "Invalid config path")
+        })?;
+
+        let binary = self.binary_path.to_str().ok_or_else(|| {
+            ProxyError::process(ErrorCode::ProcessStartFailed, "Invalid binary path")
+        })?;
+
+        #[cfg(windows)]
+        {
+            let child = std::process::Command::new(binary)
+                .args(["run", "-c", config_str])
+                .spawn()
+                .map_err(|e| {
+                    ProxyError::process(
+                        ErrorCode::ProcessStartFailed,
+                        format!("Failed to start testing engine: {e}"),
+                    )
+                })?;
+
+            use std::os::windows::io::AsRawHandle;
+            let process_handle = child.as_raw_handle();
+            if let Some(job) = orphan_guard::create() {
+                if orphan_guard::assign(&job, process_handle) {
+                    *self.job.lock().unwrap_or_else(|e| e.into_inner()) = Some(job);
+                }
+            }
+
+            let new_pid = child.id();
+            *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(new_pid);
+            crate::proxy::PROXY_PID.store(new_pid, std::sync::atomic::Ordering::Release);
+            write_pid_file_headless(new_pid);
+            Ok(new_pid)
+        }
+
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::process::CommandExt;
+            let mut cmd = std::process::Command::new(binary);
+            cmd.args(["run", "-c", config_str])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .process_group(0);
+
+            #[cfg(target_os = "linux")]
+            unsafe {
+                cmd.pre_exec(|| {
+                    extern "C" { fn prctl(option: i32, arg2: u64, ...) -> i32; }
+                    prctl(1, 9);
+                    Ok(())
+                });
+            }
+
+            let child = cmd.spawn().map_err(|e| {
+                ProxyError::process(
+                    ErrorCode::ProcessStartFailed,
+                    format!("Failed to start testing engine: {e}"),
+                )
+            })?;
+
+            let new_pid = child.id();
+            *self.pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(new_pid);
+            crate::proxy::PROXY_PID.store(new_pid, std::sync::atomic::Ordering::Release);
+            write_pid_file_headless(new_pid);
+            Ok(new_pid)
+        }
+    }
+
     pub async fn stop(&self) -> Result<(), ProxyError> {
         remove_pid_file();
 

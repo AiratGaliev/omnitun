@@ -266,7 +266,7 @@ impl Installer {
         format!("https://github.com/SagerNet/sing-box/releases/download/v{version}/sing-box-{version}-{suffix}")
     }
 
-    /// Download a file, with ghproxy.net fallback for blocked regions.
+    /// Download a file, with fallback mirrors for blocked regions.
     async fn download_with_fallback(url: &str) -> Result<Vec<u8>, ProxyError> {
         // First attempt: direct GitHub download
         match reqwest::get(url).await {
@@ -280,37 +280,59 @@ impl Installer {
             }
             Ok(resp) => {
                 tracing::warn!(target: "installer",
-                    "Direct download returned HTTP {}, trying ghproxy...",
+                    "Direct download returned HTTP {}, trying mirrors...",
                     resp.status()
                 );
             }
             Err(e) => {
-                tracing::warn!(target: "installer", "Direct download failed ({e}), trying ghproxy...");
+                tracing::warn!(target: "installer", "Direct download failed ({e}), trying mirrors...");
             }
         }
 
-        // Fallback: ghproxy.net mirror (accessible from China, Russia, Iran)
+        // Fallback 1: ghproxy.net mirror (accessible from China, Russia, Iran)
         let ghproxy_url = format!("https://ghproxy.net/{}", url);
         match reqwest::get(&ghproxy_url).await {
+            Ok(resp) if resp.status().is_success() => {
+                return resp.bytes().await.map(|b| b.to_vec()).map_err(|e| {
+                    ProxyError::install(
+                        ErrorCode::InstallDownloadFailed,
+                        format!("Failed to read ghproxy response: {e}"),
+                    )
+                });
+            }
+            Ok(resp) => {
+                tracing::warn!(target: "installer",
+                    "ghproxy returned HTTP {}, trying yandex translate...",
+                    resp.status()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(target: "installer", "ghproxy failed ({e}), trying yandex translate...");
+            }
+        }
+
+        // Fallback 2: Yandex Translate hack (whitelist-friendly, works when
+        // GitHub and ghproxy are blocked).
+        let yandex_url = format!("https://translate.yandex.ru/translate?lang=en-en&url={}", url);
+        match reqwest::get(&yandex_url).await {
             Ok(resp) if resp.status().is_success() => {
                 resp.bytes().await.map(|b| b.to_vec()).map_err(|e| {
                     ProxyError::install(
                         ErrorCode::InstallDownloadFailed,
-                        format!("Failed to read ghproxy response: {e}"),
+                        format!("Failed to read yandex translate response: {e}"),
                     )
                 })
             }
             Ok(resp) => Err(ProxyError::install(
                 ErrorCode::InstallDownloadFailed,
                 format!(
-                    "ghproxy download failed (HTTP {}): {}",
+                    "All mirrors failed — yandex translate returned HTTP {}",
                     resp.status(),
-                    resp.text().await.unwrap_or_default().trim()
                 ),
             )),
             Err(e) => Err(ProxyError::install(
                 ErrorCode::InstallDownloadFailed,
-                format!("All download methods failed. Last error (ghproxy): {e}"),
+                format!("All mirrors failed — yandex translate error: {e}"),
             )),
         }
     }

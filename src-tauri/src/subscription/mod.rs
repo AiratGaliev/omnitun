@@ -40,6 +40,7 @@ pub async fn fetch_subscription(
             "https://ghproxy.net/https://raw.githubusercontent.com/",
             "https://gh-proxy.com/https://raw.githubusercontent.com/",
             "https://raw.githack.com/",
+            "https://translate.yandex.ru/translate?lang=en-en&url=https://raw.githubusercontent.com/",
         ];
         let mut all = vec![url.to_string()];
         for prefix in &mirrors {
@@ -50,7 +51,15 @@ pub async fn fetch_subscription(
         vec![url.to_string()]
     };
 
-    // Race all URLs concurrently — return first success
+    if urls.is_empty() {
+        return Err(ProxyError::process(
+            crate::proxy::ErrorCode::ProcessNotReachable,
+            "No download URLs available",
+        ));
+    }
+
+    // Race all URLs concurrently — return first success.
+    // HTTP fetch is the expensive operation, mirrors may respond faster.
     let mut set = tokio::task::JoinSet::new();
     for u in &urls {
         let url = u.clone();

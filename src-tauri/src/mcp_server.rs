@@ -343,8 +343,17 @@ impl Handler {
                 proxy_port: actual_port,
             });
         }
-        // Spawn watchdog (crash detector + optional auto-reconnect).
-        spawn_proxy_watchdog(self.state.clone(), pid, actual_port, auto_reconnect);
+        // Clone cancel_token BEFORE releasing the state lock to avoid
+        // self-deadlock. spawn_proxy_watchdog must not acquire the
+        // same tokio::sync::Mutex that cmd_start already holds —
+        // tokio::Mutex is non-reentrant.
+        let cancel_token = {
+            let guard = state.cancel_token.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clone()
+        };
+        let state_clone = self.state.clone();
+        drop(state);  // release tokio::Mutex BEFORE spawning watchdog
+        spawn_proxy_watchdog(cancel_token, state_clone, pid, actual_port, auto_reconnect);
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Proxy started (PID {pid}) on port {actual_port}"
         ))]))
@@ -431,7 +440,7 @@ impl Handler {
         let url_owned = url.to_string();
         let profile_id = uuid::Uuid::new_v4().to_string();
 
-        // Fetch + parse + process_servers (TCP ping + batch test), same as Tauri path.
+        // Fetch + parse + process_servers (ping + batch test), same as Tauri path.
         // Servers only appear in the profile AFTER full testing (no raw saves).
         let (data_dir, settings, cache) = {
             let state = self.state.lock().await;
@@ -458,6 +467,7 @@ impl Handler {
             &profile_id,
             Some(&cache),
             None,
+            &[],
         )
         .await;
 
@@ -491,26 +501,26 @@ impl Handler {
             .ok_or_else(|| ErrorData::invalid_params("'id' is required", None))?
             .to_string();
 
-        // Phase 1: read lock — get URL + settings + data_dir
-        let (url, data_dir, settings, cache) = {
+        // Phase 1: read lock — get URL + old servers + settings + data_dir
+        let (url, old_servers, data_dir, settings, cache) = {
             let state = self.state.lock().await;
-            let url = state
+            let profile = state
                 .profile_mgr
                 .list()
                 .iter()
                 .find(|p| p.id == id)
                 .ok_or_else(|| {
                     ErrorData::invalid_params(format!("Profile '{id}' not found"), None)
-                })?
-                .url
-                .clone();
+                })?;
+            let url = profile.url.clone();
+            let old_servers = profile.servers.clone();
             let data_dir = state.data_dir.clone();
             let settings = state.settings_mgr.load().unwrap_or_default();
             let cache = state.cache.clone();
-            (url, data_dir, settings, cache)
+            (url, old_servers, data_dir, settings, cache)
         }; // lock released
 
-        // Spawn background task for long operations (fetch, TCP ping, batch test)
+        // Spawn background task for long operations (fetch, ping, batch test)
         let bg_id = id.clone();
         let bg_state = self.state.clone();
         tokio::spawn(async move {
@@ -523,20 +533,33 @@ impl Handler {
                         &bg_id,
                         Some(&cache),
                         None,
+                        &old_servers,
                     )
                     .await;
-                    let count = enriched.len();
                     {
                         let mut state = bg_state.lock().await;
-                        if let Some(idx) =
-                            state.profile_mgr.list().iter().position(|p| p.id == bg_id)
+                        if let Some(profile) =
+                            state.profile_mgr.list_mut().iter_mut().find(|p| p.id == bg_id)
                         {
-                            state.profile_mgr.list_mut()[idx].servers = enriched;
-                            state.profile_mgr.list_mut()[idx].updated_at =
+                            profile.servers = enriched;
+                            profile.updated_at =
                                 chrono::Utc::now().to_rfc3339();
-                            let _ = state.profile_mgr.save();
+                        }
+                        // Borrow of profile_mgr ended — safe to call save()
+                        let profile_exists = state.profile_mgr.list().iter()
+                            .any(|p| p.id == bg_id);
+                        if !profile_exists {
+                            tracing::warn!(target: "subscription",
+                                "Background refresh: profile {bg_id} not found in manager");
+                        } else if let Err(e) = state.profile_mgr.save() {
+                            tracing::warn!(target: "subscription",
+                                "Failed to save profile {bg_id} after refresh: {e}");
+                        } else {
+                            let server_count = state.profile_mgr.list().iter()
+                                .find(|p| p.id == bg_id)
+                                .map_or(0, |p| p.servers.len());
                             tracing::info!(target: "subscription",
-                                "Background refresh completed: {count} server(s) for profile {bg_id}");
+                                "Background refresh completed: {server_count} server(s) for profile {bg_id}");
                         }
                     }
                 }
@@ -691,10 +714,19 @@ impl Handler {
                 proxy_port: actual_port,
             });
         }
-        spawn_proxy_watchdog(self.state.clone(), pid, actual_port, auto_reconnect);
+        // Clone cancel_token BEFORE releasing the state lock to avoid
+        // self-deadlock (same pattern as cmd_start).
+        let cancel_token = {
+            let guard = state.cancel_token.lock().unwrap_or_else(|e| e.into_inner());
+            guard.clone()
+        };
+        let state_clone = self.state.clone();
+        let server_clone = server.clone();
+        drop(state);
+        spawn_proxy_watchdog(cancel_token, state_clone, pid, actual_port, auto_reconnect);
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Proxy started (PID {pid}) via server '{}' on port {actual_port}",
-            server.server
+            server_clone.server
         ))]))
     }
 
@@ -958,6 +990,7 @@ impl Handler {
                 &profile_id,
                 Some(&cache),
                 None,
+                &[],
             )
             .await;
             (processed, data_dir, cache)
@@ -1252,18 +1285,17 @@ impl Handler {
 // When auto_reconnect=true: the watchdog attempts reconnection up to 3
 // times, then activates kill switch if enabled (same as Tauri).
 fn spawn_proxy_watchdog(
+    cancel_token: tokio_util::sync::CancellationToken,
     state: Arc<tokio::sync::Mutex<ServerState>>,
     pid: u32,
     _proxy_port: u16,
     auto_reconnect: bool,
 ) {
-    let cancel = {
-        let s = state.blocking_lock();
-        let guard = s.cancel_token.lock().unwrap_or_else(|e| e.into_inner());
-        let token = guard.clone();
-        token
-    };
+    // cancel_token is passed directly — no lock needed here.
+    // The caller clones it from the inner std Mutex before releasing
+    // the tokio Mutex, breaking the potential deadlock.
     tokio::spawn(async move {
+        let cancel = cancel_token;
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => return,
