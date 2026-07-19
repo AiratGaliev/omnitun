@@ -2658,10 +2658,9 @@ async fn import_subscription_content(
         ));
     }
 
-    // Use the profile_id passed by the frontend so refresh-progress and
-    // servers-discovered events carry the REAL profile ID — the frontend
-    // can then attach progress and discovered servers to the pending profile
-    // in its state (same pattern as add_subscription).
+    // Use the profile_id passed by the frontend so refresh-progress
+    // events carry the REAL profile ID — the frontend can then attach
+    // progress to the pending profile in its state.
     let servers = crate::profile::process_servers(&app, servers, &profile_id).await;
 
     // Persist cache to disk so batch-test results survive app restart.
@@ -2759,8 +2758,8 @@ async fn import_subscription_file(
     // Use file URL as unique identifier (hash of content)
     let url = format!("file://{}", file_path);
 
-    // Pre-generate profile_id so refresh-progress and servers-discovered events
-    // emitted during process_servers carry the REAL profile ID.
+    // Pre-generate profile_id so refresh-progress events emitted during
+    // process_servers carry the REAL profile ID.
     let profile_id = uuid::Uuid::new_v4().to_string();
     let servers = crate::profile::process_servers(&app, servers, &profile_id).await;
     let server_count = servers.len();

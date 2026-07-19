@@ -2199,15 +2199,8 @@ pub async fn process_servers_inner(
             .cmp(&b.ping_ms.unwrap_or(u64::MAX))
     });
 
-    // Emit fully-tested servers to frontend in BATCH_SIZE groups.
-    // No emission happens before this point — servers only appear after
-    // completing ping + batch test, guaranteeing correct data.
-    if let Some(app) = app_handle {
-        for chunk in ready_servers.chunks(50) {
-            crate::events::emit_servers_discovered(app, profile_id, chunk.to_vec());
-        }
-    }
-
+    // Per-server `server-tested` events from batch_test already
+    // stream results to the frontend — no batch emit needed here.
     tracing::info!(
         target: "subscription",
         "{} server(s) passed and saved",

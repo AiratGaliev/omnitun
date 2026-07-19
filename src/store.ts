@@ -233,7 +233,7 @@ function extractError(payload: StatusPayload): string | undefined {
  * Convert a single Rust ServerProfile (snake_case JSON from backend)
  * into the frontend Server shape (camelCase).
  * Extracted from mapRustProfile so it can be reused by the
- * servers-discovered event listener.
+ * Per-server test results (server-tested events).
  */
 export function mapRustServer(s: RustServerProfile): Server {
   const cn = s.country_name;
@@ -450,11 +450,10 @@ export const useAppStore = create<ProxyStore>((set, get) => {
 
     addProfile: async (data) => {
       // Pre-generate the profile ID so the backend can emit refresh-progress
-      // and servers-discovered events with the REAL profile_id during
-      // add_subscription. The pending profile is added to state.profiles
-      // immediately (with empty servers) so the user sees it in the list
-      // right away — same UX as clicking "Refresh servers" on an existing
-      // profile.
+      // events with the REAL profile_id during add_subscription. The
+      // pending profile is added to state.profiles immediately (with
+      // empty servers) so the user sees it in the list right away — same
+      // UX as clicking "Refresh servers" on an existing profile.
       const profileId = crypto.randomUUID();
       const pendingProfile: Profile = {
         id: profileId,
@@ -468,8 +467,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
       // This way:
       //   - The profile appears in the list immediately
       //   - refresh-progress events (with profile_id === profileId) attach to it
-      //   - servers-discovered events (with profile_id === profileId) populate
-      //     both state.servers and the profile's servers array after full testing
+      //   - server-tested events populate state.servers incrementally
       //   - The Dashboard can detect "a profile is being refreshed" and block
       //     the server picker / connect button until servers arrive
       set((state) => ({
@@ -487,8 +485,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
 
         // Replace the pending profile with the real one (same ID — no
         // replacement needed, just update fields). Rebuild servers from
-        // flatMap to deduplicate any servers that arrived via servers-discovered
-        // events during the add.
+        // flatMap for a clean final state from the invoke result.
         const stateSnap = get();
         const newProfiles = stateSnap.profiles.map((p) =>
           p.id === profileId ? { ...p, ...updated } : p,
@@ -509,7 +506,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
       } catch (e) {
         // Atomic cleanup: remove pending profile, rebuild servers, AND clear
         // _refreshingIds in a single set() call. This avoids a window where
-        // a late servers-discovered flush could add orphaned servers between
+        // fully populated from the invoke result; no orphaned servers to worry about.
         // the catch's set() and the finally's set().
         // Also clear refreshProgress — backend doesn't emit phase:"done" for add.
         set((state) => {
@@ -588,7 +585,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
       } catch (e) {
         // Atomic cleanup: remove pending profile, rebuild servers, AND clear
         // _refreshingIds in a single set() call to avoid leaving orphaned
-        // servers from late servers-discovered flushes.
+        // fully populated from the invoke result.
         // Also clear refreshProgress — backend doesn't emit phase:"done" here.
         set((state) => {
           const remainingProfiles = state.profiles.filter((p) => p.id !== profileId);
@@ -1195,87 +1192,132 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         }
       });
 
-      // Listen for servers-discovered ────────────────────────────
-      // Backend emits fully-tested servers in BATCH_SIZE groups after
-      // Ping + batch test complete. Frontend merges by server ID.
-      const serversDiscoveredBuffer: { profileId: string; servers: RustServerProfile[] }[] = [];
-      let serversDiscoveredFlushScheduled = false;
-      const SERVERS_DISCOVERED_FLUSH_MS = 150;
+      // ── Server-tested buffer (100ms flush, top-200 cap) ─────────
+      // Prevents UI freeze under 7000+ servers by batching individual
+      // update events. Full list lives in profiles[i].servers.
+      const MAX_DROPDOWN_SERVERS = 200;
+      const serverTestedBuffer = new Map<
+        string,
+        {
+          serverId: string;
+          phase: string;
+          profileId: string;
+          staticData?: {
+            protocol: string;
+            server: string;
+            port: number;
+            originalName: string;
+            flag: string | null;
+            countryName: string | null;
+          };
+          pingMs: number | null;
+          exitServer: string | null;
+          exitFlag: string | null;
+          exitCountryName: string | null;
+          exitCityName: string | null;
+          behindCdn: boolean | null;
+          error: string | null;
+        }
+      >();
+      let serverTestedFlushScheduled = false;
+      const SERVER_TESTED_FLUSH_MS = 100;
 
-      const flushServersDiscovered = () => {
-        serversDiscoveredFlushScheduled = false;
-        if (serversDiscoveredBuffer.length === 0) return;
-        const chunks = serversDiscoveredBuffer.splice(0, serversDiscoveredBuffer.length);
+      const flushServerTested = () => {
+        serverTestedFlushScheduled = false;
+        if (serverTestedBuffer.size === 0) return;
+        const entries = Array.from(serverTestedBuffer.values());
+        serverTestedBuffer.clear();
+
         set((state) => {
-          const knownProfileIds = new Set(state.profiles.map((p) => p.id));
-          const validChunks = chunks.filter(({ profileId }) => knownProfileIds.has(profileId));
-          if (validChunks.length === 0) return {};
-
+          // Build a Map from current state.servers
           const existing = new Map(state.servers.map((s) => [s.id, s]));
-          for (const { servers } of validChunks) {
-            for (const rs of servers) {
-              const mapped = mapRustServer(rs);
-              existing.set(mapped.id, mapped);
+
+          // Process all buffered events
+          for (const e of entries) {
+            if (e.phase === 'init' && e.staticData) {
+              const newServer: Server = {
+                id: e.serverId,
+                name:
+                  e.staticData.originalName ||
+                  e.staticData.server + ':' + String(e.staticData.port),
+                protocol: e.staticData.protocol,
+                server: e.staticData.server,
+                port: e.staticData.port,
+                flag: e.staticData.flag ?? undefined,
+                countryName: e.staticData.countryName ?? undefined,
+                ping: undefined,
+                behindCdn: false,
+              };
+              existing.set(e.serverId, newServer);
+            } else {
+              const s = existing.get(e.serverId);
+              if (s) {
+                existing.set(e.serverId, {
+                  ...s,
+                  ...(e.pingMs !== null && { ping: e.pingMs }),
+                  ...(e.exitServer != null && { exitServer: e.exitServer }),
+                  ...(e.exitFlag != null && { exitFlag: e.exitFlag }),
+                  ...(e.exitCountryName != null && { exitCountryName: e.exitCountryName }),
+                  ...(e.exitCityName != null && { exitCityName: e.exitCityName }),
+                  ...(e.behindCdn !== null && { behindCdn: e.behindCdn }),
+                });
+              }
             }
-          }
-          const newServers = Array.from(existing.values());
-          newServers.sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
-          const currentActive = state.activeServer;
-          let updatedActive: Server | null;
-          if (currentActive) {
-            updatedActive = newServers.find((s) => s.id === currentActive.id) ?? null;
-          } else {
-            updatedActive = null;
-          }
-          if (!updatedActive && newServers.length > 0) {
-            updatedActive = newServers[0];
           }
 
-          const byProfile = new Map<string, Map<string, Server>>();
-          for (const { profileId, servers } of validChunks) {
-            let bucket = byProfile.get(profileId);
+          const allServers = Array.from(existing.values());
+          allServers.sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
+
+          // Top-200 slice for the dropdown
+          const topServers = allServers.slice(0, MAX_DROPDOWN_SERVERS);
+
+          // Update profiles with full server list (merge by profile)
+          const profileUpdates = new Map<string, Map<string, Server>>();
+          for (const e of entries) {
+            if (!e.profileId) continue;
+            let bucket = profileUpdates.get(e.profileId);
             if (!bucket) {
-              bucket = new Map();
-              byProfile.set(profileId, bucket);
+              const profile = state.profiles.find((p) => p.id === e.profileId);
+              if (!profile) continue;
+              bucket = new Map(profile.servers.map((s) => [s.id, s]));
+              profileUpdates.set(e.profileId, bucket);
             }
-            for (const rs of servers) {
-              const mapped = mapRustServer(rs);
-              bucket.set(mapped.id, mapped);
+            const updated = existing.get(e.serverId);
+            if (updated) {
+              bucket.set(e.serverId, updated);
             }
           }
           const newProfiles = state.profiles.map((p) => {
-            const bucket = byProfile.get(p.id);
+            const bucket = profileUpdates.get(p.id);
             if (!bucket) return p;
-            const profileExisting = new Map(p.servers.map((s) => [s.id, s]));
-            for (const [id, s] of bucket) {
-              profileExisting.set(id, s);
-            }
-            const mergedServers = Array.from(profileExisting.values());
-            mergedServers.sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
-            return { ...p, servers: mergedServers };
+            const merged = Array.from(bucket.values());
+            merged.sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
+            return { ...p, servers: merged };
           });
 
-          return { servers: newServers, activeServer: updatedActive, profiles: newProfiles };
+          // activeServer fallback
+          const currentActive = state.activeServer;
+          let updatedActive: Server | null;
+          if (currentActive) {
+            updatedActive = allServers.find((s) => s.id === currentActive.id) ?? null;
+          } else {
+            updatedActive = null;
+          }
+          if (!updatedActive && topServers.length > 0) {
+            updatedActive = topServers[0];
+          }
+
+          return { servers: topServers, profiles: newProfiles, activeServer: updatedActive };
         });
       };
 
-      const scheduleServersDiscoveredFlush = () => {
-        if (serversDiscoveredFlushScheduled) return;
-        serversDiscoveredFlushScheduled = true;
-        setTimeout(flushServersDiscovered, SERVERS_DISCOVERED_FLUSH_MS);
+      const scheduleServerTestedFlush = () => {
+        if (serverTestedFlushScheduled) return;
+        serverTestedFlushScheduled = true;
+        setTimeout(flushServerTested, SERVER_TESTED_FLUSH_MS);
       };
 
-      const unlistenServersDiscovered = await listen<{
-        profile_id: string;
-        servers: RustServerProfile[];
-      }>('servers-discovered', (event) => {
-        const chunk = event.payload.servers;
-        if (chunk.length === 0) return;
-        serversDiscoveredBuffer.push({ profileId: event.payload.profile_id, servers: chunk });
-        scheduleServersDiscoveredFlush();
-      });
-
-      // Per-server streaming test results — update individual rows as
+      // Per-server streaming test results — buffered with 100ms flush
       // results arrive. Emitted by batch_test and process_servers_incremental.
       // Supports all phases: init, cache, preflight, batch, error.
       const unlistenServerTested = await listen<{
@@ -1298,81 +1340,21 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         behindCdn: boolean | null;
         error: string | null;
       }>('server-tested', (event) => {
-        const {
-          serverId,
-          phase,
-          staticData,
-          pingMs,
-          exitServer,
-          exitFlag,
-          exitCountryName,
-          exitCityName,
-          behindCdn,
-        } = event.payload;
-        set((state) => {
-          const existing = new Map(state.servers.map((s) => [s.id, s]));
-
-          if (phase === 'init' && staticData) {
-            // Create a new server entry from staticData
-            const newServer: Server = {
-              id: serverId,
-              name: staticData.originalName || staticData.server + ':' + String(staticData.port),
-              protocol: staticData.protocol,
-              server: staticData.server,
-              port: staticData.port,
-              flag: staticData.flag ?? undefined,
-              countryName: staticData.countryName ?? undefined,
-              ping: undefined,
-              behindCdn: false,
-            };
-            existing.set(serverId, newServer);
-          } else {
-            // Update existing server — merge deltas
-            const s = existing.get(serverId);
-            if (s) {
-              existing.set(serverId, {
-                ...s,
-                ...(pingMs !== null && { ping: pingMs }),
-                ...(exitServer != null && { exitServer }),
-                ...(exitFlag != null && { exitFlag }),
-                ...(exitCountryName != null && { exitCountryName }),
-                ...(exitCityName != null && { exitCityName }),
-                ...(behindCdn !== null && { behindCdn }),
-              });
-            }
-            // If server doesn't exist yet (e.g. cache phase before init), skip
-          }
-
-          const newServers = Array.from(existing.values());
-          newServers.sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
-
-          // Also update profiles if this server belongs to one
-          const profileId = event.payload.profileId;
-          const newProfiles = state.profiles.map((p) => {
-            if (p.id !== profileId) return p;
-            const profileExisting = new Map(p.servers.map((s) => [s.id, s]));
-            const updated = existing.get(serverId);
-            if (updated) {
-              profileExisting.set(serverId, updated);
-            }
-            const merged = Array.from(profileExisting.values());
-            merged.sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
-            return { ...p, servers: merged };
-          });
-
-          const currentActive = state.activeServer;
-          let updatedActive: Server | null;
-          if (currentActive) {
-            updatedActive = newServers.find((s) => s.id === currentActive.id) ?? null;
-          } else {
-            updatedActive = null;
-          }
-          if (!updatedActive && newServers.length > 0) {
-            updatedActive = newServers[0];
-          }
-
-          return { servers: newServers, profiles: newProfiles, activeServer: updatedActive };
+        const e = event.payload;
+        serverTestedBuffer.set(e.serverId, {
+          serverId: e.serverId,
+          phase: e.phase,
+          profileId: e.profileId,
+          staticData: e.staticData ?? undefined,
+          pingMs: e.pingMs,
+          exitServer: e.exitServer,
+          exitFlag: e.exitFlag,
+          exitCountryName: e.exitCountryName,
+          exitCityName: e.exitCityName,
+          behindCdn: e.behindCdn,
+          error: e.error,
         });
+        scheduleServerTestedFlush();
       });
 
       return () => {
@@ -1382,7 +1364,6 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         unlistenRefresh();
         unlistenProxyProgress();
         unlistenFailover();
-        unlistenServersDiscovered();
         unlistenServerTested();
       };
     },

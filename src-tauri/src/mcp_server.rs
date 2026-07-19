@@ -57,7 +57,7 @@ fn binary_name() -> &'static str {
     }
 }
 
-fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
+async fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
     std::fs::create_dir_all(&data_dir).map_err(|e| format!("data dir: {e}"))?;
     let logger = Arc::new(Mutex::new(Logger::new(1000, None)));
     let settings_mgr = SettingsManager::new(data_dir.clone());
@@ -67,13 +67,11 @@ fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
     let process_mgr = ProcessManager::new(bin_path.clone());
 
     // Initialize database
-    let db = tauri::async_runtime::block_on(async { crate::db::init_db(&data_dir).await })
+    let db = crate::db::init_db(&data_dir).await
         .map_err(|e| format!("Failed to init DB: {e}"))?;
 
     // One-time migration from JSON
-    if let Err(e) =
-        tauri::async_runtime::block_on(async { crate::db::migrate_from_json(&db, &data_dir).await })
-    {
+    if let Err(e) = crate::db::migrate_from_json(&db, &data_dir).await {
         tracing::warn!(target: "db", "JSON migration warning (non-fatal): {e}");
     }
 
@@ -1991,7 +1989,7 @@ impl ServerHandler for Handler {
 pub fn run(data_dir: PathBuf) -> Result<(), String> {
     let rt = tokio::runtime::Runtime::new().map_err(|e| format!("tokio: {e}"))?;
     rt.block_on(async {
-        let state = mk_state(data_dir)?;
+        let state = mk_state(data_dir).await?;
 
         // Start the batcher background task for batch testing
         crate::cleanup_stale_temp_dirs();

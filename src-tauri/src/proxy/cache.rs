@@ -1357,6 +1357,7 @@ pub async fn batch_test_incremental(
     if total == 0 {
         return;
     }
+    let now = chrono::Utc::now().timestamp();
 
     // Queue all servers to the BatchingEngine via cache
     let mut pending = Vec::with_capacity(total);
@@ -1397,6 +1398,19 @@ pub async fn batch_test_incremental(
                     behind_cdn: Some(p.behind_cdn),
                     error: None,
                 });
+                // Write test history
+                let _ = db.call({
+                    let sid = server_id.clone();
+                    let eip = p.exit_ip.clone();
+                    move |conn| {
+                        conn.execute(
+                            "INSERT INTO test_history (server_id, tested_at, ping_ms, exit_ip, success, phase)
+                             VALUES (?1, ?2, ?3, ?4, 1, 'batch')",
+                            rusqlite::params![sid, now, p.ping_ms as i64, eip],
+                        )?;
+                        Ok::<_, rusqlite::Error>(())
+                    }
+                }).await;
                 positives.push(p);
             }
             Ok((server_id, Ok(Err(e)))) => {
@@ -1413,6 +1427,21 @@ pub async fn batch_test_incremental(
                     behind_cdn: None,
                     error: Some(e.clone()),
                 });
+                // Write test history
+                let _ = db
+                    .call({
+                        let sid = server_id.clone();
+                        let err = e.clone();
+                        move |conn| {
+                            conn.execute(
+                            "INSERT INTO test_history (server_id, tested_at, success, error, phase)
+                             VALUES (?1, ?2, 0, ?3, 'batch')",
+                            rusqlite::params![sid, now, err],
+                        )?;
+                            Ok::<_, rusqlite::Error>(())
+                        }
+                    })
+                    .await;
                 negatives.push((server_id, e));
             }
             _ => {}
@@ -1428,6 +1457,18 @@ pub async fn batch_test_incremental(
 
     // Final flush
     flush_cache_batch(db, &positives, &negatives).await;
+
+    // Cleanup: keep as long as negative cache (NEGATIVE_MAX_TTL_SECS = 32 days)
+    let cutoff = now - (NEGATIVE_MAX_TTL_SECS as i64); // keep as long as negative cache
+    let _ = db
+        .call(move |conn| {
+            conn.execute(
+                "DELETE FROM test_history WHERE tested_at < ?1",
+                rusqlite::params![cutoff],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        })
+        .await;
 }
 
 // ============================================================================
