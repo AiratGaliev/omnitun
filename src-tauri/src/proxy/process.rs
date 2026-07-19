@@ -498,7 +498,9 @@ impl ProcessManager {
             #[cfg(target_os = "linux")]
             unsafe {
                 cmd.pre_exec(|| {
-                    extern "C" { fn prctl(option: i32, arg2: u64, ...) -> i32; }
+                    extern "C" {
+                        fn prctl(option: i32, arg2: u64, ...) -> i32;
+                    }
                     prctl(1, 9);
                     Ok(())
                 });

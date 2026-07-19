@@ -515,7 +515,9 @@ fn build_vmess(profile: &ServerProfile) -> Value {
     if let Some(t_type) = &profile.transport_type {
         match t_type.as_str() {
             "ws" => {
-                let host = profile.transport_host.clone()
+                let host = profile
+                    .transport_host
+                    .clone()
                     .filter(|h| !h.is_empty())
                     .or_else(|| profile.sni.clone())
                     .filter(|h| !h.is_empty())

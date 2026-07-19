@@ -313,7 +313,10 @@ impl Installer {
 
         // Fallback 2: Yandex Translate hack (whitelist-friendly, works when
         // GitHub and ghproxy are blocked).
-        let yandex_url = format!("https://translate.yandex.ru/translate?lang=en-en&url={}", url);
+        let yandex_url = format!(
+            "https://translate.yandex.ru/translate?lang=en-en&url={}",
+            url
+        );
         match reqwest::get(&yandex_url).await {
             Ok(resp) if resp.status().is_success() => {
                 resp.bytes().await.map(|b| b.to_vec()).map_err(|e| {

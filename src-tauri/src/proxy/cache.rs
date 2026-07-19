@@ -18,7 +18,6 @@
 //! - Negative cache entries have exponential backoff TTL.
 
 use crate::logging::{log, LogLevel, LogSource, Logger};
-use crate::proxy::persistence;
 use crate::proxy::port_pool::PortPool;
 use crate::proxy::ServerProfile;
 use moka::future::Cache;
@@ -198,7 +197,11 @@ pub struct ServerCache {
     /// This allows `get_or_test()` to queue requests even before the batcher starts.
     pending_rx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<BatchRequest>>>>,
     /// Path to data directory for persistence.
+    #[allow(dead_code)]
     data_dir: Arc<Path>,
+    /// Synchronous SQLite connection for cache persistence.
+    /// All cache operations write through to the `server_cache` table.
+    sync_conn: Arc<std::sync::Mutex<rusqlite::Connection>>,
     /// Whether the batcher has been started.
     batcher_started: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -217,8 +220,30 @@ impl ServerCache {
     /// This allows the cache to be created early and queue requests before the
     /// batcher is fully initialized.
     pub fn new(data_dir: &Path) -> Self {
-        // Load persisted entries from disk
-        let persisted = persistence::load_cache(data_dir);
+        // Open synchronous SQLite connection for cache persistence
+        let db_path = data_dir.join("omnitun.db");
+        let sync_conn = match rusqlite::Connection::open(&db_path) {
+            Ok(c) => {
+                let _ = c.execute_batch(
+                    "PRAGMA journal_mode=WAL;
+                     PRAGMA synchronous=NORMAL;
+                     PRAGMA busy_timeout=5000;
+                     PRAGMA foreign_keys=ON;",
+                );
+                let _ = c.execute_batch(crate::db::migrations::CREATE_TABLES_SQL);
+                c
+            }
+            Err(e) => {
+                tracing::error!(target: "cache", "Failed to open cache DB: {e} — using in-memory");
+                let c = rusqlite::Connection::open_in_memory().expect("in-memory DB failed");
+                let _ = c.execute_batch(crate::db::migrations::CREATE_TABLES_SQL);
+                c
+            }
+        };
+        let sync_conn = Arc::new(std::sync::Mutex::new(sync_conn));
+
+        // Load persisted entries from SQLite
+        let persisted = Self::load_from_sqlite(&sync_conn);
         let persisted_count = persisted.len();
 
         let store = Arc::new(RwLock::new(persisted));
@@ -241,6 +266,7 @@ impl ServerCache {
             batch_tx,
             pending_rx: Arc::new(Mutex::new(Some(batch_rx))),
             data_dir: Arc::from(data_dir.to_path_buf()),
+            sync_conn,
             batcher_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -932,8 +958,7 @@ impl ServerCache {
         // 🚫 ANTI-REGRESSION: removing negative entries here defeats the
         // entire negative cache optimization.
         store.retain(|key, entry| {
-            all_active_ids.contains(key)
-                || matches!(entry.status, CacheStatus::Negative { .. })
+            all_active_ids.contains(key) || matches!(entry.status, CacheStatus::Negative { .. })
         });
         let removed = before - store.len();
 
@@ -993,19 +1018,194 @@ impl ServerCache {
         }
     }
 
-    /// Persist the current store to disk.
+    /// Persist the current store to the `server_cache` SQLite table.
     pub async fn save_to_disk(&self) {
         let store = self.store.read().await;
-        persistence::save_cache(&self.data_dir, &store);
+        let conn = self.sync_conn.lock().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        if let Err(e) = conn.execute("DELETE FROM server_cache", []) {
+            tracing::error!(target: "cache", "Failed to clear cache in SQLite: {e}");
+            return;
+        }
+        for (_key, entry) in store.iter() {
+            let (
+                status,
+                ping_ms,
+                exit_ip,
+                exit_flag,
+                exit_country_name,
+                exit_city_name,
+                behind_cdn,
+                consecutive_successes,
+                consecutive_failures,
+                previously_worked,
+                first_failure_at,
+                last_failure_at,
+                reason,
+            ) = match &entry.status {
+                CacheStatus::Positive {
+                    ping_ms,
+                    exit_ip,
+                    exit_flag,
+                    exit_country,
+                    exit_city,
+                    behind_cdn,
+                    consecutive_successes,
+                } => (
+                    "positive",
+                    Some(*ping_ms as i64),
+                    exit_ip.clone(),
+                    exit_flag.clone(),
+                    exit_country.clone(),
+                    exit_city.clone(),
+                    *behind_cdn as i32,
+                    *consecutive_successes as i32,
+                    0i32,
+                    1i32,
+                    None::<i64>,
+                    None::<i64>,
+                    None::<String>,
+                ),
+                CacheStatus::Negative {
+                    first_failure_at,
+                    last_failure_at,
+                    consecutive_failures,
+                    previously_worked,
+                    reason,
+                } => (
+                    "negative",
+                    None::<i64>,
+                    None::<String>,
+                    None::<String>,
+                    None::<String>,
+                    None::<String>,
+                    0i32,
+                    0i32,
+                    *consecutive_failures as i32,
+                    *previously_worked as i32,
+                    Some(*first_failure_at),
+                    Some(*last_failure_at),
+                    Some(reason.clone()),
+                ),
+            };
+            if let Err(e) = conn.execute(
+                "INSERT OR REPLACE INTO server_cache
+                 (server_hash, status, ping_ms, exit_ip, exit_flag,
+                  exit_country_name, exit_city_name, behind_cdn,
+                  consecutive_successes, consecutive_failures,
+                  previously_worked, first_failure_at, last_failure_at,
+                  reason, tested_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+                         ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                rusqlite::params![
+                    entry.server_id,
+                    status,
+                    ping_ms,
+                    exit_ip,
+                    exit_flag,
+                    exit_country_name,
+                    exit_city_name,
+                    behind_cdn,
+                    consecutive_successes,
+                    consecutive_failures,
+                    previously_worked,
+                    first_failure_at,
+                    last_failure_at,
+                    reason,
+                    now,
+                ],
+            ) {
+                tracing::error!(target: "cache", "Failed to save cache entry: {e}");
+            }
+        }
     }
 
-    /// Load persisted cache from disk into the store.
+    /// Load server_cache entries from SQLite into the in-memory store.
+    /// Replaces the current store contents with data from SQLite.
     pub async fn load_from_disk(&self) {
-        let persisted = persistence::load_cache(&self.data_dir);
-        let count = persisted.len();
+        let entries = Self::load_from_sqlite(&self.sync_conn);
+        let count = entries.len();
         let mut store = self.store.write().await;
-        *store = persisted;
-        tracing::info!(target: "cache", "[Cache] loaded {count} entries from disk");
+        *store = entries;
+        tracing::info!(target: "cache", "[Cache] loaded {count} entries from SQLite");
+    }
+
+    /// Get a locked handle to the synchronous SQLite connection.
+    /// Returns `None` if the mutex is poisoned.
+    /// Used by MCP commands to perform direct SQLite operations.
+    pub fn get_sync_conn(&self) -> Option<std::sync::MutexGuard<'_, rusqlite::Connection>> {
+        self.sync_conn.lock().ok()
+    }
+
+    /// Load all cache entries from SQLite.
+    /// Used at startup to hydrate the in-memory store.
+    fn load_from_sqlite(
+        conn: &Arc<std::sync::Mutex<rusqlite::Connection>>,
+    ) -> HashMap<String, CacheEntry> {
+        let guard = match conn.lock() {
+            Ok(g) => g,
+            Err(_) => return HashMap::new(),
+        };
+        let mut stmt = match guard.prepare(
+            "SELECT server_hash, status, ping_ms, exit_ip, exit_flag,
+                    exit_country_name, exit_city_name, behind_cdn,
+                    consecutive_successes, consecutive_failures,
+                    previously_worked, first_failure_at, last_failure_at,
+                    reason, tested_at
+             FROM server_cache",
+        ) {
+            Ok(s) => s,
+            Err(_) => return HashMap::new(),
+        };
+        let rows = match stmt.query_map([], |row| {
+            let status: String = row.get("status")?;
+            Ok((
+                row.get::<_, String>("server_hash")?,
+                CacheEntry {
+                    server_id: row.get("server_hash")?,
+                    last_updated: row.get("tested_at")?,
+                    status: match status.as_str() {
+                        "positive" => CacheStatus::Positive {
+                            ping_ms: row.get::<_, Option<i64>>("ping_ms")?.unwrap_or(0) as u64,
+                            exit_ip: row.get("exit_ip")?,
+                            exit_flag: row.get("exit_flag")?,
+                            exit_country: row.get("exit_country_name")?,
+                            exit_city: row.get("exit_city_name")?,
+                            behind_cdn: row.get::<_, Option<i32>>("behind_cdn")?.unwrap_or(0) != 0,
+                            consecutive_successes: row
+                                .get::<_, Option<i32>>("consecutive_successes")?
+                                .unwrap_or(0)
+                                as u32,
+                        },
+                        _ => CacheStatus::Negative {
+                            first_failure_at: row
+                                .get::<_, Option<i64>>("first_failure_at")?
+                                .unwrap_or(0),
+                            last_failure_at: row
+                                .get::<_, Option<i64>>("last_failure_at")?
+                                .unwrap_or(0),
+                            consecutive_failures: row
+                                .get::<_, Option<i32>>("consecutive_failures")?
+                                .unwrap_or(0)
+                                as u32,
+                            previously_worked: row
+                                .get::<_, Option<i32>>("previously_worked")?
+                                .unwrap_or(0)
+                                != 0,
+                            reason: row.get::<_, Option<String>>("reason")?.unwrap_or_default(),
+                        },
+                    },
+                },
+            ))
+        }) {
+            Ok(r) => r,
+            Err(_) => return HashMap::new(),
+        };
+        let mut map = HashMap::new();
+        for row in rows.flatten() {
+            map.insert(row.0, row.1);
+        }
+        map
     }
 
     /// Get the number of positive entries in the store.
@@ -1078,7 +1278,6 @@ mod tests {
         let ttl = calculate_negative_ttl(1, false);
         assert_eq!(ttl.as_secs(), 86400);
     }
-
 
     #[test]
     fn test_negative_ttl_exponential_backoff() {

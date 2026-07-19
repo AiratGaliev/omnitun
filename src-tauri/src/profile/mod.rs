@@ -1,3 +1,4 @@
+use crate::db::DbPool;
 use crate::proxy::{ErrorCode, ProxyError, ServerProfile};
 use crate::subscription::SubscriptionProfile;
 use std::collections::HashSet;
@@ -38,37 +39,303 @@ pub(crate) fn proxy_port_from_app(app: &AppHandle) -> Option<u16> {
 
 pub struct ProfileManager {
     profiles: Vec<SubscriptionProfile>,
-    file_path: PathBuf,
+    /// The async DbPool — reserved for future streaming pipeline.
+    /// Currently unused; all load/save go through `sync_conn`.
+    #[allow(dead_code)]
+    db: DbPool,
+    /// Path to the data directory (used to open the sync SQLite connection).
+    _data_dir: PathBuf,
+    /// Synchronous connection for load/save operations.
+    /// Wrapped in `Mutex` because `rusqlite::Connection` is `!Sync`
+    /// (it uses `RefCell` internally). The outer `Arc<Mutex<ProfileManager>>`
+    /// guarantees exclusive access, but the type system requires `Sync`
+    /// for MCP server's `&ServerState` across `.await` points.
+    sync_conn: std::sync::Mutex<rusqlite::Connection>,
 }
 
 impl ProfileManager {
-    pub fn new(data_dir: PathBuf) -> Self {
+    pub fn new(data_dir: PathBuf, db: DbPool) -> Self {
+        // Open a synchronous connection for load/save using the same DB path.
+        // If the async connection was created via init_db, the DB file already exists.
+        let db_path = data_dir.join("omnitun.db");
+
+        // Ensure the directory exists for the DB file
+        let _ = std::fs::create_dir_all(&data_dir);
+
+        let sync_conn = match rusqlite::Connection::open(&db_path) {
+            Ok(c) => {
+                // Apply schema if tables don't exist yet (fresh DB)
+                let _ = c.execute_batch(
+                    "PRAGMA journal_mode=WAL;
+                     PRAGMA synchronous=NORMAL;
+                     PRAGMA busy_timeout=5000;
+                     PRAGMA foreign_keys=ON;",
+                );
+                // Try to create tables — fails silently if they already exist
+                let _ = c.execute_batch(crate::db::migrations::CREATE_TABLES_SQL);
+                c
+            }
+            Err(e) => {
+                tracing::error!(target: "db", "Failed to open sync DB connection: {e}");
+                // Use an in-memory DB as fallback — profiles will be empty
+                let c = rusqlite::Connection::open_in_memory()
+                    .expect("Failed to create in-memory DB fallback");
+                let _ = c.execute_batch(crate::db::migrations::CREATE_TABLES_SQL);
+                c
+            }
+        };
+
         Self {
             profiles: Vec::new(),
-            file_path: data_dir.join("profiles.json"),
+            db,
+            _data_dir: data_dir,
+            sync_conn: std::sync::Mutex::new(sync_conn),
         }
     }
 
     pub fn load(&mut self) -> Result<(), ProxyError> {
-        match std::fs::read_to_string(&self.file_path) {
-            Ok(json) => {
-                let profiles: Vec<SubscriptionProfile> =
-                    serde_json::from_str(&json).map_err(|e| {
-                        ProxyError::subscription(
-                            ErrorCode::SubscriptionSaveFailed,
-                            format!("Failed to parse profiles.json: {e}"),
-                        )
-                    })?;
-                self.profiles = profiles;
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // First launch — no profiles yet
-                self.profiles = Vec::new();
-                Ok(())
-            }
-            Err(e) => Err(ProxyError::Io(e)),
+        // Use the synchronous connection — lock once for all queries.
+        let conn = self.sync_conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, url, updated_at, last_tested,
+                    traffic_used, traffic_total, traffic_expiry
+             FROM profiles ORDER BY updated_at DESC",
+            )
+            .map_err(|e| {
+                ProxyError::subscription(
+                    ErrorCode::SubscriptionSaveFailed,
+                    format!("Failed to query profiles: {e}"),
+                )
+            })?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>("id")?,
+                    row.get::<_, String>("name")?,
+                    row.get::<_, String>("url")?,
+                    row.get::<_, String>("updated_at")?,
+                    row.get::<_, Option<String>>("last_tested")?,
+                    row.get::<_, Option<u64>>("traffic_used")?,
+                    row.get::<_, Option<u64>>("traffic_total")?,
+                    row.get::<_, Option<String>>("traffic_expiry")?,
+                ))
+            })
+            .map_err(|e| {
+                ProxyError::subscription(
+                    ErrorCode::SubscriptionSaveFailed,
+                    format!("Failed to query profiles: {e}"),
+                )
+            })?;
+
+        // Collect profile tuples first — drop the rows/stmt before querying servers
+        #[allow(clippy::type_complexity)]
+        let mut profile_tuples: Vec<(
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<u64>,
+            Option<u64>,
+            Option<String>,
+        )> = Vec::new();
+        for row in rows {
+            let (
+                id,
+                name,
+                url,
+                updated_at,
+                last_tested,
+                traffic_used,
+                traffic_total,
+                traffic_expiry,
+            ) = row.map_err(|e| {
+                ProxyError::subscription(
+                    ErrorCode::SubscriptionSaveFailed,
+                    format!("Failed to read profile row: {e}"),
+                )
+            })?;
+            profile_tuples.push((
+                id,
+                name,
+                url,
+                updated_at,
+                last_tested,
+                traffic_used,
+                traffic_total,
+                traffic_expiry,
+            ));
         }
+
+        // Drop stmt so conn is available for the server queries
+        drop(stmt);
+
+        // Now query servers for each profile (separate passes, no borrow conflict)
+        let mut profiles: Vec<SubscriptionProfile> = Vec::with_capacity(profile_tuples.len());
+        for (id, name, url, updated_at, last_tested, traffic_used, traffic_total, traffic_expiry) in
+            &profile_tuples
+        {
+            let mut srv_stmt = conn
+                .prepare("SELECT * FROM servers WHERE profile_id = ?1 ORDER BY ping_ms ASC")
+                .map_err(|e| {
+                    ProxyError::subscription(
+                        ErrorCode::SubscriptionSaveFailed,
+                        format!("Failed to query servers: {e}"),
+                    )
+                })?;
+            let servers = srv_stmt
+                .query_map(rusqlite::params![id], map_server_row)
+                .map_err(|e| {
+                    ProxyError::subscription(
+                        ErrorCode::SubscriptionSaveFailed,
+                        format!("Failed to query servers: {e}"),
+                    )
+                })?;
+            let mut server_vec = Vec::new();
+            for s in servers {
+                match s {
+                    Ok(srv) => server_vec.push(srv),
+                    Err(e) => {
+                        return Err(ProxyError::subscription(
+                            ErrorCode::SubscriptionSaveFailed,
+                            format!("Failed to read server row: {e}"),
+                        ))
+                    }
+                }
+            }
+            profiles.push(SubscriptionProfile {
+                id: id.clone(),
+                name: name.clone(),
+                url: url.clone(),
+                updated_at: updated_at.clone(),
+                last_tested: last_tested.clone(),
+                traffic_used: *traffic_used,
+                traffic_total: *traffic_total,
+                traffic_expiry: traffic_expiry.clone(),
+                servers: server_vec,
+            });
+        }
+        self.profiles = profiles;
+        Ok(())
+    }
+
+    /// Save in-memory profiles to SQLite.
+    /// Uses the synchronous connection — safe to call from sync contexts.
+    pub fn save(&mut self) -> Result<(), ProxyError> {
+        let mut conn = self.sync_conn.lock().unwrap();
+        let tx = conn.transaction().map_err(|e| {
+            ProxyError::subscription(
+                ErrorCode::SubscriptionSaveFailed,
+                format!("Failed to start transaction: {e}"),
+            )
+        })?;
+
+        // Delete ALL existing servers — we rewrite the full list
+        tx.execute("DELETE FROM servers", []).map_err(|e| {
+            ProxyError::subscription(
+                ErrorCode::SubscriptionSaveFailed,
+                format!("Failed to delete servers: {e}"),
+            )
+        })?;
+
+        for profile in &self.profiles {
+            // Upsert profile
+            tx.execute(
+                "INSERT OR REPLACE INTO profiles
+                 (id, name, url, updated_at, last_tested,
+                  traffic_used, traffic_total, traffic_expiry)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    profile.id,
+                    profile.name,
+                    profile.url,
+                    profile.updated_at,
+                    profile.last_tested,
+                    profile.traffic_used,
+                    profile.traffic_total,
+                    profile.traffic_expiry,
+                ],
+            )
+            .map_err(|e| {
+                ProxyError::subscription(
+                    ErrorCode::SubscriptionSaveFailed,
+                    format!("Failed to upsert profile: {e}"),
+                )
+            })?;
+
+            for server in &profile.servers {
+                tx.execute(
+                    "INSERT OR REPLACE INTO servers
+                     (profile_id, server_hash, protocol, server, port,
+                      uuid, password, method, sni, flow,
+                      public_key, private_key,
+                      transport_type, transport_path, transport_host,
+                      reality_pbk, reality_sid,
+                      wg_local_address, wg_allowed_ips, wg_dns, wg_mtu, wg_keepalive,
+                      username,
+                      ping_ms, behind_cdn,
+                      flag, country_name, city_name,
+                      exit_server, exit_flag, exit_country_name, exit_city_name,
+                      original_name)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                             ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                             ?18, ?19, ?20, ?21, ?22, ?23,
+                             ?24, ?25, ?26, ?27, ?28,
+                             ?29, ?30, ?31, ?32, ?33)",
+                    rusqlite::params![
+                        profile.id,
+                        server.id, // server_hash = deterministic ID
+                        server.protocol,
+                        server.server,
+                        server.port,
+                        server.uuid,
+                        server.password,
+                        server.method,
+                        server.sni,
+                        server.flow,
+                        server.public_key,
+                        server.private_key,
+                        server.transport_type,
+                        server.transport_path,
+                        server.transport_host,
+                        server.reality_pbk,
+                        server.reality_sid,
+                        server.wg_local_address,
+                        server.wg_allowed_ips,
+                        server.wg_dns,
+                        server.wg_mtu,
+                        server.wg_keepalive,
+                        server.username,
+                        server.ping_ms,
+                        server.behind_cdn as i32,
+                        server.flag,
+                        server.country_name,
+                        server.city_name,
+                        server.exit_server,
+                        server.exit_flag,
+                        server.exit_country_name,
+                        server.exit_city_name,
+                        server.original_name,
+                    ],
+                )
+                .map_err(|e| {
+                    ProxyError::subscription(
+                        ErrorCode::SubscriptionSaveFailed,
+                        format!("Failed to upsert server: {e}"),
+                    )
+                })?;
+            }
+        }
+
+        tx.commit().map_err(|e| {
+            ProxyError::subscription(
+                ErrorCode::SubscriptionSaveFailed,
+                format!("Failed to commit transaction: {e}"),
+            )
+        })?;
+
+        Ok(())
     }
 
     /// Run GeoIP enrichment on all servers missing country/city fields.
@@ -165,29 +432,6 @@ impl ProfileManager {
             }
             profile.servers = deduped;
         }
-    }
-
-    pub fn save(&self) -> Result<(), ProxyError> {
-        let json = serde_json::to_string_pretty(&self.profiles).map_err(|e| {
-            ProxyError::subscription(
-                ErrorCode::SubscriptionSaveFailed,
-                format!("Failed to serialize profiles: {e}"),
-            )
-        })?;
-        let tmp = self.file_path.with_extension("json.tmp");
-        std::fs::write(&tmp, &json).map_err(|e| {
-            ProxyError::subscription(
-                ErrorCode::SubscriptionSaveFailed,
-                format!("Failed to write temp profiles: {e}"),
-            )
-        })?;
-        std::fs::rename(&tmp, &self.file_path).map_err(|e| {
-            ProxyError::subscription(
-                ErrorCode::SubscriptionSaveFailed,
-                format!("Failed to rename profiles: {e}"),
-            )
-        })?;
-        Ok(())
     }
 
     pub fn list(&self) -> &[SubscriptionProfile] {
@@ -448,6 +692,45 @@ impl TestEngine {
     }
 }
 
+/// Map a row from the `servers` table to a `ServerProfile`.
+/// Handles all 33 columns with proper Option/NULL handling.
+fn map_server_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ServerProfile> {
+    Ok(ServerProfile {
+        id: row.get("server_hash")?,
+        protocol: row.get("protocol")?,
+        server: row.get("server")?,
+        port: row.get("port")?,
+        uuid: row.get("uuid")?,
+        password: row.get("password")?,
+        method: row.get("method")?,
+        sni: row.get("sni")?,
+        flow: row.get("flow")?,
+        public_key: row.get("public_key")?,
+        private_key: row.get("private_key")?,
+        transport_type: row.get("transport_type")?,
+        transport_path: row.get("transport_path")?,
+        transport_host: row.get("transport_host")?,
+        reality_pbk: row.get("reality_pbk")?,
+        reality_sid: row.get("reality_sid")?,
+        wg_local_address: row.get("wg_local_address")?,
+        wg_allowed_ips: row.get("wg_allowed_ips")?,
+        wg_dns: row.get("wg_dns")?,
+        wg_mtu: row.get("wg_mtu")?,
+        wg_keepalive: row.get("wg_keepalive")?,
+        username: row.get("username")?,
+        ping_ms: row.get("ping_ms")?,
+        behind_cdn: row.get::<_, Option<i32>>("behind_cdn")?.unwrap_or(0) != 0,
+        flag: row.get("flag")?,
+        country_name: row.get("country_name")?,
+        city_name: row.get("city_name")?,
+        exit_server: row.get("exit_server")?,
+        exit_flag: row.get("exit_flag")?,
+        exit_country_name: row.get("exit_country_name")?,
+        exit_city_name: row.get("exit_city_name")?,
+        original_name: row.get("original_name")?,
+    })
+}
+
 static TEST_ENGINE: std::sync::Mutex<Option<TestEngine>> = std::sync::Mutex::new(None);
 /// Prevents concurrent `clash_api_test` calls — one test at a time.
 static TEST_ENGINE_BUSY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -509,9 +792,9 @@ pub(crate) async fn ensure_test_engine(
             }
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
-        }
+    }
 
-        if let Some((pid, clash_port, socks_port, pm)) = last_result {
+    if let Some((pid, clash_port, socks_port, pm)) = last_result {
         let engine = TestEngine {
             pid,
             clash_port,
@@ -552,18 +835,15 @@ async fn spawn_test_engine(
     use serde_json::json;
     use std::time::Duration;
 
-    let binary_path = data_dir.join("binaries").join(
-        crate::proxy::installer::Installer::binary_name(),
-    );
+    let binary_path = data_dir
+        .join("binaries")
+        .join(crate::proxy::installer::Installer::binary_name());
     if !binary_path.exists() {
         tracing::warn!(target: "subscription", "Testing engine: sing-box not installed at {:?}", binary_path);
         return None;
     }
 
-    let test_dir = std::env::temp_dir().join(format!(
-        "omnitun-engine-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let test_dir = std::env::temp_dir().join(format!("omnitun-engine-{}", uuid::Uuid::new_v4()));
     if std::fs::create_dir_all(&test_dir).is_err() {
         tracing::warn!(target: "subscription", "Testing engine: failed to create temp dir");
         return None;
@@ -1120,7 +1400,15 @@ pub async fn process_servers_inner(
     // DNS resolve + GeoIP enrichment happen AFTER preflight in their own
     // spawn loop (step 4). The preflight ping is used for the UI during
     // loading; batch test fills the definitive value.
-    let preflight_pings = clash_api_test(&unique, data_dir, settings, cache.map(|c| c.as_ref()), app_handle, profile_id).await;
+    let preflight_pings = clash_api_test(
+        &unique,
+        data_dir,
+        settings,
+        cache.map(|c| c.as_ref()),
+        app_handle,
+        profile_id,
+    )
+    .await;
 
     // 3b. Pre-filter: servers without Clash API ping → negative cache.
     //     BUT: if testing engine returned 0 pings (all failed),
@@ -1129,7 +1417,9 @@ pub async fn process_servers_inner(
         if let Some(cache) = cache.as_ref() {
             let mut dead_ids = std::collections::HashSet::new();
             for server in &unique {
-                if preflight_pings.contains_key(&server.id) { continue; }
+                if preflight_pings.contains_key(&server.id) {
+                    continue;
+                }
                 dead_ids.insert(server.id.clone());
             }
 
@@ -1199,7 +1489,12 @@ pub async fn process_servers_inner(
                 server.exit_city_name = None;
             }
             // Replace hostname with resolved IP for config generation
-            if server.server.contains('.') && !server.server.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            if server.server.contains('.')
+                && !server
+                    .server
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.')
+            {
                 server.server = ip.clone();
             }
         }
@@ -1438,12 +1733,30 @@ pub async fn process_servers_inner(
     ready_servers
 }
 
+/// Create an in-memory SQLite database for tests.
+#[cfg(test)]
+async fn test_db() -> crate::db::DbPool {
+    let conn = tokio_rusqlite::Connection::open(":memory:").await.unwrap();
+    conn.call(|inner| -> Result<(), rusqlite::Error> {
+        inner.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;",
+        )?;
+        inner.execute_batch(crate::db::migrations::CREATE_TABLES_SQL)?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    std::sync::Arc::new(conn)
+}
+
 /// Test all servers that passed ping using sing-box and Clash API.
 /// Generates a single config with ALL servers as outbounds, starts sing-box,
 /// tests each via GET /proxies/{tag}/delay, returns servers with real latency.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::DbPool;
 
     fn test_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1453,27 +1766,27 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn test_new_creates_empty_manager() {
-        let mgr = ProfileManager::new(PathBuf::from("/tmp/test"));
+    #[tokio::test]
+    async fn test_new_creates_empty_manager() {
+        let mgr = ProfileManager::new(PathBuf::from("/tmp/test"), test_db().await);
         assert!(mgr.list().is_empty());
     }
 
-    #[test]
-    fn test_load_nonexistent_file_returns_empty() {
+    #[tokio::test]
+    async fn test_load_nonexistent_file_returns_empty() {
         let dir = test_dir("nonexistent");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let mut mgr = ProfileManager::new(dir.clone());
+        let mut mgr = ProfileManager::new(dir.clone(), test_db().await);
         mgr.load().unwrap();
         assert!(mgr.list().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn test_save_and_load_roundtrip() {
+    #[tokio::test]
+    async fn test_save_and_load_roundtrip() {
         let dir = test_dir("roundtrip");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1491,13 +1804,13 @@ mod tests {
         };
 
         {
-            let mut mgr = ProfileManager::new(dir.clone());
+            let mut mgr = ProfileManager::new(dir.clone(), test_db().await);
             mgr.profiles.push(profile);
             mgr.save().unwrap();
         }
 
         {
-            let mut mgr = ProfileManager::new(dir.clone());
+            let mut mgr = ProfileManager::new(dir.clone(), test_db().await);
             mgr.load().unwrap();
             assert_eq!(mgr.list().len(), 1);
             assert_eq!(mgr.list()[0].name, "Test");
@@ -1935,13 +2248,13 @@ mod extra_tests {
         Ok(())
     }
 
-    #[test]
-    fn test_remove_nonexistent_returns_error() {
+    #[tokio::test]
+    async fn test_remove_nonexistent_returns_error() {
         let dir = test_dir("remove_err");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let mut mgr = ProfileManager::new(dir.clone());
+        let mut mgr = ProfileManager::new(dir.clone(), test_db().await);
         let result = mgr.remove("nonexistent");
         assert!(result.is_err());
 

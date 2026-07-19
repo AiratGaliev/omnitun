@@ -1,4 +1,5 @@
 #![recursion_limit = "512"]
+pub mod db;
 pub mod events;
 pub mod logging;
 pub mod profile;
@@ -359,7 +360,12 @@ async fn start_proxy(
                                 // (set when auto_connect_fastest=false), PUT
                                 // works for manual failover. For 'urltest'
                                 // groups, log a warning and skip the switch.
-                                let switch_ok = match client.put(&switch_url).json(&body).send().await {
+                                let switch_ok = match client
+                                    .put(&switch_url)
+                                    .json(&body)
+                                    .send()
+                                    .await
+                                {
                                     Ok(resp) if resp.status().is_success() => true,
                                     Ok(resp) => {
                                         tracing::warn!(target: "proxy",
@@ -1516,60 +1522,63 @@ async fn test_servers(
 
     // Phase 1: brief read lock — get existing servers + old ping values
     let (servers, old_ping) = {
-            let mgr = state.manager.lock().await;
-            let idx = mgr.list().iter().position(|p| p.id == id).ok_or_else(|| {
-                ProxyError::subscription(
-                    crate::proxy::ErrorCode::SubscriptionNotFound,
-                    "Profile not found",
-                )
-            })?;
-            // Clear negative cache for this profile's servers if force=true.
-            if force.unwrap_or(false) {
-                if let Some(cache) = app.try_state::<Arc<ServerCache>>() {
-                    let ids: Vec<String> = mgr.list()[idx]
-                        .servers
-                        .iter()
-                        .map(|s| s.id.clone())
-                        .collect();
-                    cache.clear_negative_for_ids(&ids).await;
-                }
+        let mgr = state.manager.lock().await;
+        let idx = mgr.list().iter().position(|p| p.id == id).ok_or_else(|| {
+            ProxyError::subscription(
+                crate::proxy::ErrorCode::SubscriptionNotFound,
+                "Profile not found",
+            )
+        })?;
+        // Clear negative cache for this profile's servers if force=true.
+        if force.unwrap_or(false) {
+            if let Some(cache) = app.try_state::<Arc<ServerCache>>() {
+                let ids: Vec<String> = mgr.list()[idx]
+                    .servers
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect();
+                cache.clear_negative_for_ids(&ids).await;
             }
-            // Save old ping values for fallback if engine fails.
-            let old_ping: std::collections::HashMap<String, Option<u64>> = mgr.list()[idx]
-                .servers
-                .iter()
-                .map(|s| (s.id.clone(), s.ping_ms))
-                .collect();
-            // Clone servers, reset ping_ms so they get re-tested
-            let servers = mgr.list()[idx]
-                .servers
-                .iter()
-                .map(|s| {
-                    let mut s = s.clone();
-                    s.ping_ms = None;
-                    s
-                })
-                .collect::<Vec<_>>();
-            (servers, old_ping)
-        }; // lock released
+        }
+        // Save old ping values for fallback if engine fails.
+        let old_ping: std::collections::HashMap<String, Option<u64>> = mgr.list()[idx]
+            .servers
+            .iter()
+            .map(|s| (s.id.clone(), s.ping_ms))
+            .collect();
+        // Clone servers, reset ping_ms so they get re-tested
+        let servers = mgr.list()[idx]
+            .servers
+            .iter()
+            .map(|s| {
+                let mut s = s.clone();
+                s.ping_ms = None;
+                s
+            })
+            .collect::<Vec<_>>();
+        (servers, old_ping)
+    }; // lock released
 
     // Phase 2: Clash API ping + pre-filter (dead servers → negative cache)
     crate::proxy::geoip::reset_ipguide_rate_limit();
     let data_dir = match app.path().app_data_dir() {
         Ok(d) => d,
-        Err(_) => return Err(ProxyError::process(
-            crate::proxy::ErrorCode::ProcessNotReachable,
-            "Cannot access app data directory".to_string(),
-        )),
+        Err(_) => {
+            return Err(ProxyError::process(
+                crate::proxy::ErrorCode::ProcessNotReachable,
+                "Cannot access app data directory".to_string(),
+            ))
+        }
     };
     let settings = app
         .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
         .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
         .unwrap_or_default();
     let cache = {
-        let state = app
-            .try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>();
-        state.as_ref().map(|s| -> std::sync::Arc<crate::proxy::cache::ServerCache> { (**s).clone() })
+        let state = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>();
+        state
+            .as_ref()
+            .map(|s| -> std::sync::Arc<crate::proxy::cache::ServerCache> { (**s).clone() })
     };
     let pings = crate::profile::clash_api_test(
         &servers,
@@ -1578,7 +1587,8 @@ async fn test_servers(
         cache.as_deref(),
         Some(&app),
         &id,
-    ).await;
+    )
+    .await;
 
     // Pre-filter: servers without ping → negative cache, remove from profile
     // If testing engine returned 0 pings, skip filtering (transient failure).
@@ -1588,7 +1598,9 @@ async fn test_servers(
         if let Some(cache) = test_cache.as_ref() {
             let mut dead_ids = std::collections::HashSet::new();
             for server in &tested {
-                if pings.contains_key(&server.id) { continue; }
+                if pings.contains_key(&server.id) {
+                    continue;
+                }
                 dead_ids.insert(server.id.clone());
             }
             if !dead_ids.is_empty() {
@@ -1602,7 +1614,8 @@ async fn test_servers(
                 tested.retain(|s| !dead_ids.contains(&s.id));
                 let n = before - tested.len();
                 log(
-                    &app, &logger,
+                    &app,
+                    &logger,
                     LogLevel::Info,
                     LogSource::Cache,
                     format!("Removed {n} dead server(s) via Clash API test"),
@@ -1611,7 +1624,8 @@ async fn test_servers(
         }
     } else {
         log(
-            &app, &logger,
+            &app,
+            &logger,
             LogLevel::Info,
             LogSource::Cache,
             "Testing engine returned 0 pings — keeping all servers (transient)".into(),
@@ -1971,7 +1985,27 @@ pub fn run() {
             app.manage(Mutex::new(settings_mgr));
             app.manage(Mutex::new(settings));
 
-            let mut profile_manager = ProfileManager::new(data_dir);
+            // ── Database (SQLite) ──────────────────────────────────────────────
+            let db = tauri::async_runtime::block_on(async {
+                crate::db::init_db(&data_dir).await
+            })
+            .unwrap_or_else(|e| {
+                tracing::error!(target: "db", "Failed to initialize database: {e}");
+                std::process::exit(1);
+            });
+
+            // One-time migration from profiles.json / cache.json to SQLite.
+            // Only runs if the SQLite database is empty (no profiles) and JSON
+            // files exist. Idempotent — safe to call every startup.
+            if let Err(e) = tauri::async_runtime::block_on(async {
+                crate::db::migrate_from_json(&db, &data_dir).await
+            }) {
+                tracing::warn!(target: "db", "JSON migration warning (non-fatal): {e}");
+            }
+
+            app.manage(db.clone());
+
+            let mut profile_manager = ProfileManager::new(data_dir, db);
             profile_manager.load().unwrap_or_else(|e| {
                 tracing::error!(target: "subscription", "Failed to load profiles: {e} — starting with empty profile list");
                 // logger not available yet, but we can continue with empty

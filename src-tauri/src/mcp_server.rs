@@ -65,7 +65,19 @@ fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
     crate::proxy::batcher::set_configured_test_url(&settings.test_url, settings.test_use_tls);
     let bin_path = data_dir.join("binaries").join(binary_name());
     let process_mgr = ProcessManager::new(bin_path.clone());
-    let mut profile_mgr = super::profile::ProfileManager::new(data_dir.clone());
+
+    // Initialize database
+    let db = tauri::async_runtime::block_on(async { crate::db::init_db(&data_dir).await })
+        .map_err(|e| format!("Failed to init DB: {e}"))?;
+
+    // One-time migration from JSON
+    if let Err(e) =
+        tauri::async_runtime::block_on(async { crate::db::migrate_from_json(&db, &data_dir).await })
+    {
+        tracing::warn!(target: "db", "JSON migration warning (non-fatal): {e}");
+    }
+
+    let mut profile_mgr = super::profile::ProfileManager::new(data_dir.clone(), db.clone());
     let _ = profile_mgr.load();
 
     // Create cache, port pool, and cancellation token
@@ -352,7 +364,7 @@ impl Handler {
             guard.clone()
         };
         let state_clone = self.state.clone();
-        drop(state);  // release tokio::Mutex BEFORE spawning watchdog
+        drop(state); // release tokio::Mutex BEFORE spawning watchdog
         spawn_proxy_watchdog(cancel_token, state_clone, pid, actual_port, auto_reconnect);
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Proxy started (PID {pid}) on port {actual_port}"
@@ -538,16 +550,17 @@ impl Handler {
                     .await;
                     {
                         let mut state = bg_state.lock().await;
-                        if let Some(profile) =
-                            state.profile_mgr.list_mut().iter_mut().find(|p| p.id == bg_id)
+                        if let Some(profile) = state
+                            .profile_mgr
+                            .list_mut()
+                            .iter_mut()
+                            .find(|p| p.id == bg_id)
                         {
                             profile.servers = enriched;
-                            profile.updated_at =
-                                chrono::Utc::now().to_rfc3339();
+                            profile.updated_at = chrono::Utc::now().to_rfc3339();
                         }
                         // Borrow of profile_mgr ended — safe to call save()
-                        let profile_exists = state.profile_mgr.list().iter()
-                            .any(|p| p.id == bg_id);
+                        let profile_exists = state.profile_mgr.list().iter().any(|p| p.id == bg_id);
                         if !profile_exists {
                             tracing::warn!(target: "subscription",
                                 "Background refresh: profile {bg_id} not found in manager");
@@ -555,7 +568,10 @@ impl Handler {
                             tracing::warn!(target: "subscription",
                                 "Failed to save profile {bg_id} after refresh: {e}");
                         } else {
-                            let server_count = state.profile_mgr.list().iter()
+                            let server_count = state
+                                .profile_mgr
+                                .list()
+                                .iter()
                                 .find(|p| p.id == bg_id)
                                 .map_or(0, |p| p.servers.len());
                             tracing::info!(target: "subscription",
@@ -643,7 +659,7 @@ impl Handler {
         cache.handle_subscription_refresh(&remaining_ids).await;
         cache.save_to_disk().await;
 
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
         state
             .profile_mgr
             .save()
@@ -865,7 +881,10 @@ impl Handler {
     /// Clear all cache entries (for testing).
     async fn cmd_clear_cache(&self) -> Result<CallToolResult, ErrorData> {
         let state = self.state.lock().await;
-        crate::proxy::persistence::clear_cache(&state.data_dir);
+        // Clear SQLite server_cache table (cache.json is no longer used)
+        if let Some(conn) = state.cache.get_sync_conn() {
+            let _ = conn.execute("DELETE FROM server_cache", []);
+        }
         state.cache.load_from_disk().await;
         Ok(CallToolResult::success(vec![ContentBlock::text(
             "Cache cleared",
