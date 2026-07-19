@@ -3,7 +3,6 @@ pub mod cache;
 pub mod config;
 pub mod geoip;
 pub mod installer;
-pub mod persistence;
 pub mod port_pool;
 pub mod process;
 

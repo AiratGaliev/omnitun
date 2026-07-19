@@ -118,16 +118,40 @@ pub fn emit_proxy_progress(app_handle: &AppHandle, phase: &str, message: impl In
 /// Per-server test result — emitted immediately when each server's test
 /// completes, so the frontend can update rows incrementally instead of
 /// waiting for the whole batch.
+///
+/// Fields:
+/// - `phase`: "init" | "cache" | "preflight" | "batch" | "error"
+/// - `static_data`: populated only at phase="init" (protocol, server, port, flag)
+/// - Dynamic metrics: ping_ms, exit_* fields, behind_cdn
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerTestedEvent {
     pub profile_id: String,
+    /// Phase identifier: "init" | "cache" | "preflight" | "batch" | "error"
+    pub phase: String,
     pub server_id: String,
+    /// Static data — only populated when phase="init"
+    pub static_data: Option<ServerStaticData>,
+    /// Dynamic metrics — populated in cache/preflight/batch phases
     pub ping_ms: Option<u64>,
-    pub outlet_ip: Option<String>,
-    pub exit_country: Option<String>,
-    pub success: bool,
+    pub exit_server: Option<String>,
+    pub exit_flag: Option<String>,
+    pub exit_country_name: Option<String>,
+    pub exit_city_name: Option<String>,
+    pub behind_cdn: Option<bool>,
     pub error: Option<String>,
+}
+
+/// Static server fields sent once at init phase.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerStaticData {
+    pub protocol: String,
+    pub server: String,
+    pub port: u16,
+    pub original_name: String,
+    pub flag: Option<String>,
+    pub country_name: Option<String>,
 }
 
 pub fn emit_server_tested(app: &AppHandle, event: ServerTestedEvent) {

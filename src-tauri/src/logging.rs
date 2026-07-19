@@ -517,7 +517,7 @@ pub fn setup_logging(log_dir: &Path) -> (broadcast::Receiver<LogEntry>, PathBuf)
         .init();
 
     // Bridge the `log` crate to `tracing` — all `log::info!()`, `log::error!()`,
-    // etc. calls throughout the codebase (cache.rs, geoip.rs, persistence.rs,
+    // etc. calls throughout the codebase (cache.rs, geoip.rs,
     // profile/mod.rs, installer.rs, process.rs, port_pool.rs, lib.rs) are
     // forwarded to tracing and appear in JSONL + UI.
     let _ = tracing_log::LogTracer::init();

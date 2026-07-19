@@ -96,7 +96,40 @@ pub async fn run(
         let count = batch.len();
         tracing::info!(target: "cache", "[Batcher] processing batch of {count} server(s)");
 
-        process_batch(batch, &cache, &port_pool, &data_dir, &cancel).await;
+        process_batch(batch, Some(&cache), &port_pool, &data_dir, &cancel).await;
+    }
+}
+
+/// Background worker entry point for stateless batch processing.
+///
+/// Same as `run()` but does NOT take a `ServerCache` — the caller (e.g.
+/// `batch_test_incremental` in `cache.rs`) handles cache + SQLite writes.
+/// The engine only sends results via `oneshot` channels.
+pub async fn run_streaming(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<BatchRequest>,
+    port_pool: Arc<PortPool>,
+    data_dir: PathBuf,
+    cancel: Arc<std::sync::Mutex<CancellationToken>>,
+) {
+    tracing::info!(target: "cache", "[Batcher] streaming engine started");
+
+    loop {
+        let batch = match collect_batch(&mut rx).await {
+            Some(b) => b,
+            None => {
+                tracing::info!(target: "cache", "[Batcher] streaming channel closed — shutting down");
+                return;
+            }
+        };
+
+        if batch.is_empty() {
+            continue;
+        }
+
+        let count = batch.len();
+        tracing::info!(target: "cache", "[Batcher] streaming processing batch of {count} server(s)");
+
+        process_batch(batch, None::<&ServerCache>, &port_pool, &data_dir, &cancel).await;
     }
 }
 
@@ -131,7 +164,7 @@ async fn collect_batch(
 /// Process a batch of servers through sing-box.
 async fn process_batch(
     batch: Vec<BatchRequest>,
-    cache: &ServerCache,
+    cache: Option<&ServerCache>,
     port_pool: &PortPool,
     data_dir: &Path,
     cancel: &Arc<std::sync::Mutex<CancellationToken>>,
@@ -483,9 +516,11 @@ async fn process_batch(
                     tested_at: chrono::Utc::now().timestamp(),
                 };
 
-                cache
-                    .update_positive(&result.server_id, positive.clone())
-                    .await;
+                if let Some(cache) = cache {
+                    cache
+                        .update_positive(&result.server_id, positive.clone())
+                        .await;
+                }
                 let _ = req.reply.send(Ok(positive));
                 success_count += 1;
                 match result.outlet_ip {
@@ -496,7 +531,9 @@ async fn process_batch(
                 }
             }
             Ok((req, Err(e))) => {
-                cache.update_negative(&req.server.id, e.clone()).await;
+                if let Some(cache) = cache {
+                    cache.update_negative(&req.server.id, e.clone()).await;
+                }
                 let _ = req.reply.send(Err(e));
                 fail_count += 1;
             }
@@ -537,7 +574,9 @@ async fn process_batch(
     }
 
     // 8. Save cache
-    cache.save_to_disk().await;
+    if let Some(cache) = cache {
+        cache.save_to_disk().await;
+    }
 
     tracing::info!(
         target: "cache",
@@ -882,6 +921,7 @@ mod tests {
             let _ = tx.send(BatchRequest {
                 server: ServerProfile::default(),
                 profile_id: String::new(),
+                cancel: CancellationToken::new(),
                 reply: tokio::sync::oneshot::channel().0,
             });
         }
@@ -905,6 +945,7 @@ mod tests {
             let _ = tx.send(BatchRequest {
                 server: ServerProfile::default(),
                 profile_id: String::new(),
+                cancel: CancellationToken::new(),
                 reply: tokio::sync::oneshot::channel().0,
             });
         }

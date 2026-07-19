@@ -529,8 +529,8 @@ describe('store — profile management', () => {
 
     mockInvoke.mockResolvedValueOnce([makeRustProfile()]);
     await useAppStore.getState().loadProfiles();
-    // Always picks fastest — srv-1 (ping 50) over srv-2 (ping 100)
-    expect(useAppStore.getState().activeServer?.id).toBe('srv-1');
+    // Now current is alive in list — keep it, don't flip to fastest
+    expect(useAppStore.getState().activeServer?.id).toBe('srv-2');
   });
 
   it('loadProfiles handles invoke failure gracefully', async () => {

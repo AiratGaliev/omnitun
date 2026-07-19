@@ -335,10 +335,20 @@ pub async fn migrate_from_json(db: &DbPool, data_dir: &Path) -> Result<(), Strin
         tracing::info!(target: "db", "Migrated {count} cache entries from cache.json");
     }
 
-    // ── Cleanup old JSON files (optional, keep for fallback) ───────────
-    // We keep the JSON files for now — they serve as a backup. They can
-    // be removed in a future cleanup step after the SQLite migration is
-    // confirmed stable.
+    // ── Cleanup old JSON files ────────────────────────────────────
+    // SQLite migration is stable — delete old JSON files that are no longer needed.
+    let profiles_path = data_dir.join("profiles.json");
+    let cache_path = data_dir.join("cache.json");
+    for json_path in [&profiles_path, &cache_path] {
+        if json_path.exists() {
+            match std::fs::remove_file(json_path) {
+                Ok(_) => tracing::info!(target: "db", "Deleted old JSON file {:?}", json_path),
+                Err(e) => {
+                    tracing::warn!(target: "db", "Failed to delete old JSON file {:?}: {e}", json_path)
+                }
+            }
+        }
+    }
 
     Ok(())
 }

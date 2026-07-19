@@ -346,19 +346,29 @@ async function getBestServer(
   autoSelect: boolean,
   currentActiveId?: string,
 ): Promise<Server | null> {
-  if (!autoSelect || servers.length === 0) {
+  if (servers.length === 0) return null;
+
+  // Always prefer the current active server if it still exists
+  if (currentActiveId) {
     const matched = servers.find((s) => s.id === currentActiveId);
     if (matched) return matched;
-    if (servers.length > 0) return servers[0];
-    return null;
   }
+
+  // Current is gone (or never set) — need to pick
+  if (!autoSelect) {
+    return servers.length > 0 ? servers[0] : null;
+  }
+
+  // autoSelect: ask backend for best alternative (excludes dead current)
   const best = await invoke<RustServerProfile | null>('pick_replacement_server', {
-    current_server_id: '',
+    current_server_id: currentActiveId ?? '',
   }).catch(() => null);
   if (best) {
-    return servers.find((s) => s.id === best.id) ?? null;
+    const found = servers.find((s) => s.id === best.id);
+    if (found) return found;
+    return servers.length > 0 ? servers[0] : null;
   }
-  return servers[0] ?? null;
+  return servers.length > 0 ? servers[0] : null;
 }
 
 export const useAppStore = create<ProxyStore>((set, get) => {
@@ -422,9 +432,15 @@ export const useAppStore = create<ProxyStore>((set, get) => {
     setServers: (servers) => {
       set((state) => {
         const currentActive = state.activeServer;
-        const updatedActive = currentActive
-          ? (servers.find((s) => s.id === currentActive.id) ?? currentActive)
-          : null;
+        let updatedActive: Server | null;
+        if (currentActive) {
+          updatedActive = servers.find((s) => s.id === currentActive.id) ?? null;
+        } else {
+          updatedActive = null;
+        }
+        if (!updatedActive && servers.length > 0) {
+          updatedActive = servers[0];
+        }
         return { servers, activeServer: updatedActive };
       });
     },
@@ -1205,9 +1221,15 @@ export const useAppStore = create<ProxyStore>((set, get) => {
           const newServers = Array.from(existing.values());
           newServers.sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
           const currentActive = state.activeServer;
-          const updatedActive = currentActive
-            ? (newServers.find((s) => s.id === currentActive.id) ?? currentActive)
-            : null;
+          let updatedActive: Server | null;
+          if (currentActive) {
+            updatedActive = newServers.find((s) => s.id === currentActive.id) ?? null;
+          } else {
+            updatedActive = null;
+          }
+          if (!updatedActive && newServers.length > 0) {
+            updatedActive = newServers[0];
+          }
 
           const byProfile = new Map<string, Map<string, Server>>();
           for (const { profileId, servers } of validChunks) {
@@ -1254,30 +1276,102 @@ export const useAppStore = create<ProxyStore>((set, get) => {
       });
 
       // Per-server streaming test results — update individual rows as
-      // results arrive. Emitted by test_servers_live and by
-      // batch_test (cache.rs emits server-tested events).
-      // Updates individual server rows incrementally.
+      // results arrive. Emitted by batch_test and process_servers_incremental.
+      // Supports all phases: init, cache, preflight, batch, error.
       const unlistenServerTested = await listen<{
         profileId: string;
+        phase: string;
         serverId: string;
+        staticData: {
+          protocol: string;
+          server: string;
+          port: number;
+          originalName: string;
+          flag: string | null;
+          countryName: string | null;
+        } | null;
         pingMs: number | null;
-        outletIp: string | null;
-        exitCountry: string | null;
-        success: boolean;
+        exitServer: string | null;
+        exitFlag: string | null;
+        exitCountryName: string | null;
+        exitCityName: string | null;
+        behindCdn: boolean | null;
         error: string | null;
       }>('server-tested', (event) => {
-        const { serverId, pingMs, success: _success } = event.payload;
+        const {
+          serverId,
+          phase,
+          staticData,
+          pingMs,
+          exitServer,
+          exitFlag,
+          exitCountryName,
+          exitCityName,
+          behindCdn,
+        } = event.payload;
         set((state) => {
-          const newServers = state.servers.map((s) =>
-            s.id === serverId ? { ...s, ping: pingMs ?? undefined } : s,
-          );
-          const newProfiles = state.profiles.map((p) => ({
-            ...p,
-            servers: p.servers.map((s) =>
-              s.id === serverId ? { ...s, ping: pingMs ?? undefined } : s,
-            ),
-          }));
-          return { servers: newServers, profiles: newProfiles };
+          const existing = new Map(state.servers.map((s) => [s.id, s]));
+
+          if (phase === 'init' && staticData) {
+            // Create a new server entry from staticData
+            const newServer: Server = {
+              id: serverId,
+              name: staticData.originalName || staticData.server + ':' + String(staticData.port),
+              protocol: staticData.protocol,
+              server: staticData.server,
+              port: staticData.port,
+              flag: staticData.flag ?? undefined,
+              countryName: staticData.countryName ?? undefined,
+              ping: undefined,
+              behindCdn: false,
+            };
+            existing.set(serverId, newServer);
+          } else {
+            // Update existing server — merge deltas
+            const s = existing.get(serverId);
+            if (s) {
+              existing.set(serverId, {
+                ...s,
+                ...(pingMs !== null && { ping: pingMs }),
+                ...(exitServer != null && { exitServer }),
+                ...(exitFlag != null && { exitFlag }),
+                ...(exitCountryName != null && { exitCountryName }),
+                ...(exitCityName != null && { exitCityName }),
+                ...(behindCdn !== null && { behindCdn }),
+              });
+            }
+            // If server doesn't exist yet (e.g. cache phase before init), skip
+          }
+
+          const newServers = Array.from(existing.values());
+          newServers.sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
+
+          // Also update profiles if this server belongs to one
+          const profileId = event.payload.profileId;
+          const newProfiles = state.profiles.map((p) => {
+            if (p.id !== profileId) return p;
+            const profileExisting = new Map(p.servers.map((s) => [s.id, s]));
+            const updated = existing.get(serverId);
+            if (updated) {
+              profileExisting.set(serverId, updated);
+            }
+            const merged = Array.from(profileExisting.values());
+            merged.sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
+            return { ...p, servers: merged };
+          });
+
+          const currentActive = state.activeServer;
+          let updatedActive: Server | null;
+          if (currentActive) {
+            updatedActive = newServers.find((s) => s.id === currentActive.id) ?? null;
+          } else {
+            updatedActive = null;
+          }
+          if (!updatedActive && newServers.length > 0) {
+            updatedActive = newServers[0];
+          }
+
+          return { servers: newServers, profiles: newProfiles, activeServer: updatedActive };
         });
       });
 

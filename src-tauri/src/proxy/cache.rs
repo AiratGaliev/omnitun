@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -210,6 +210,7 @@ pub struct ServerCache {
 pub struct BatchRequest {
     pub server: ServerProfile,
     pub profile_id: String,
+    pub cancel: CancellationToken,
     pub reply: tokio::sync::oneshot::Sender<Result<PositiveResult, String>>,
 }
 
@@ -340,7 +341,7 @@ impl ServerCache {
                                 let cache = self.clone();
                                 let srv = server.clone();
                                 tokio::spawn(async move {
-                                    let rx = cache.queue_test(&srv, "");
+                                    let rx = cache.queue_test(&srv, "", CancellationToken::new());
                                     match rx.await {
                                         Ok(Ok(r)) => {
                                             tracing::info!(target: "cache", "SWR refresh ok for {}", r.server_id)
@@ -383,7 +384,7 @@ impl ServerCache {
         }
 
         // 3. Queue a fresh test via the batch worker and wait
-        let rx = self.queue_test(server, "");
+        let rx = self.queue_test(server, "", CancellationToken::new());
         rx.await
             .map_err(|_| "Batch worker dropped the request".to_string())?
     }
@@ -472,15 +473,17 @@ impl ServerCache {
 
     /// Queue a server test in the batch channel and return a oneshot receiver.
     /// Does NOT block — caller must await the receiver separately.
-    fn queue_test(
+    pub(crate) fn queue_test(
         &self,
         server: &ServerProfile,
         profile_id: &str,
+        cancel: CancellationToken,
     ) -> tokio::sync::oneshot::Receiver<Result<PositiveResult, String>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if let Err(e) = self.batch_tx.send(BatchRequest {
             server: server.clone(),
             profile_id: profile_id.to_string(),
+            cancel,
             reply: tx,
         }) {
             tracing::error!(
@@ -497,7 +500,7 @@ impl ServerCache {
         &self,
         server: &ServerProfile,
     ) -> tokio::sync::oneshot::Receiver<Result<PositiveResult, String>> {
-        self.queue_test(server, "")
+        self.queue_test(server, "", CancellationToken::new())
     }
 
     /// Update the store with a negative result.
@@ -727,7 +730,8 @@ impl ServerCache {
                 // CDN-skip — batch test skipped, exit_* kept as None per I-CDN-1
             } else {
                 // Queue for batch test (don't await yet!)
-                let rx = self.queue_test(server, profile_id);
+                let cancel = cancel.clone().unwrap_or_default();
+                let rx = self.queue_test(server, profile_id, cancel);
                 pending.push((server.clone(), rx));
                 result_slots.push(None);
                 // Record the actual result_slots index for this server.
@@ -800,11 +804,15 @@ impl ServerCache {
                                 app,
                                 crate::events::ServerTestedEvent {
                                     profile_id: profile_id.to_string(),
+                                    phase: "batch".into(),
                                     server_id: s.id.clone(),
+                                    static_data: None,
                                     ping_ms: Some(positive.ping_ms),
-                                    outlet_ip: positive.exit_ip.clone(),
-                                    exit_country: positive.exit_country.clone(),
-                                    success: true,
+                                    exit_server: positive.exit_ip.clone(),
+                                    exit_flag: positive.exit_flag.clone(),
+                                    exit_country_name: positive.exit_country.clone(),
+                                    exit_city_name: positive.exit_city.clone(),
+                                    behind_cdn: Some(s.behind_cdn),
                                     error: None,
                                 },
                             );
@@ -826,11 +834,15 @@ impl ServerCache {
                                 app,
                                 crate::events::ServerTestedEvent {
                                     profile_id: profile_id.to_string(),
+                                    phase: "error".into(),
                                     server_id: s.id.clone(),
+                                    static_data: None,
                                     ping_ms: None,
-                                    outlet_ip: None,
-                                    exit_country: None,
-                                    success: false,
+                                    exit_server: None,
+                                    exit_flag: None,
+                                    exit_country_name: None,
+                                    exit_city_name: None,
+                                    behind_cdn: None,
                                     error: Some(e),
                                 },
                             );
@@ -852,11 +864,15 @@ impl ServerCache {
                                 app,
                                 crate::events::ServerTestedEvent {
                                     profile_id: profile_id.to_string(),
+                                    phase: "error".into(),
                                     server_id: s.id.clone(),
+                                    static_data: None,
                                     ping_ms: None,
-                                    outlet_ip: None,
-                                    exit_country: None,
-                                    success: false,
+                                    exit_server: None,
+                                    exit_flag: None,
+                                    exit_country_name: None,
+                                    exit_city_name: None,
+                                    behind_cdn: None,
                                     error: Some("batch worker dropped".into()),
                                 },
                             );
@@ -1225,6 +1241,193 @@ impl ServerCache {
             .filter(|e| matches!(e.status, CacheStatus::Negative { .. }))
             .count()
     }
+}
+
+/// Flush a batch of positive/negative results to the SQLite `server_cache` table.
+///
+/// Uses a single transaction for the batch. `consecutive_successes` is
+/// incremented on positive hit; `consecutive_failures` on negative hit.
+/// This is the direct-to-SQLite version that replaces the old moka+store path.
+pub async fn flush_cache_batch(
+    db: &crate::db::DbPool,
+    positives: &[PositiveResult],
+    negatives: &[(String, String)], // (server_id, reason)
+) {
+    if positives.is_empty() && negatives.is_empty() {
+        return;
+    }
+    let now = chrono::Utc::now().timestamp();
+
+    let positives_owned: Vec<PositiveResult> = positives.to_vec();
+    let negatives_owned: Vec<(String, String)> = negatives.to_vec();
+
+    let result: Result<(), tokio_rusqlite::Error<rusqlite::Error>> = db
+        .call(move |conn| {
+            let tx = conn.transaction()?;
+            for p in &positives_owned {
+                // On CONFLICT: increment consecutive_successes, reset failures
+                tx.execute(
+                    "INSERT INTO server_cache
+                 (server_hash, status, ping_ms, exit_ip, exit_flag,
+                  exit_country_name, exit_city_name, behind_cdn,
+                  consecutive_successes, previously_worked, tested_at)
+                 VALUES (?1, 'positive', ?2, ?3, ?4, ?5, ?6, ?7, 1, 1, ?8)
+                 ON CONFLICT(server_hash) DO UPDATE SET
+                     status = 'positive',
+                     ping_ms = excluded.ping_ms,
+                     exit_ip = excluded.exit_ip,
+                     exit_flag = excluded.exit_flag,
+                     exit_country_name = excluded.exit_country_name,
+                     exit_city_name = excluded.exit_city_name,
+                     behind_cdn = excluded.behind_cdn,
+                     tested_at = excluded.tested_at,
+                     consecutive_successes = server_cache.consecutive_successes + 1,
+                     previously_worked = 1,
+                     consecutive_failures = 0,
+                     first_failure_at = NULL,
+                     last_failure_at = NULL,
+                     reason = NULL",
+                    rusqlite::params![
+                        p.server_id,
+                        p.ping_ms,
+                        p.exit_ip,
+                        p.exit_flag,
+                        p.exit_country,
+                        p.exit_city,
+                        p.behind_cdn,
+                        now
+                    ],
+                )?;
+            }
+            for (sid, reason) in &negatives_owned {
+                tx.execute(
+                    "INSERT INTO server_cache
+                 (server_hash, status, reason, tested_at,
+                  consecutive_failures, previously_worked, first_failure_at, last_failure_at)
+                 VALUES (?1, 'negative', ?2, ?3, 1, 0, ?3, ?3)
+                 ON CONFLICT(server_hash) DO UPDATE SET
+                     status = 'negative',
+                     reason = excluded.reason,
+                     tested_at = excluded.tested_at,
+                     consecutive_failures = CASE
+                         WHEN server_cache.status = 'negative'
+                         THEN server_cache.consecutive_failures + 1
+                         ELSE 1
+                     END,
+                     previously_worked = CASE
+                         WHEN server_cache.status = 'positive' THEN 1
+                         ELSE server_cache.previously_worked
+                     END,
+                     first_failure_at = CASE
+                         WHEN server_cache.status = 'negative' THEN server_cache.first_failure_at
+                         ELSE excluded.first_failure_at
+                     END,
+                     last_failure_at = excluded.last_failure_at,
+                     consecutive_successes = 0,
+                     ping_ms = NULL, exit_ip = NULL, exit_flag = NULL,
+                     exit_country_name = NULL, exit_city_name = NULL, behind_cdn = 0",
+                    rusqlite::params![sid, reason, now],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await;
+    if let Err(e) = result {
+        tracing::error!(target: "cache", "flush_cache_batch failed: {e}");
+    }
+}
+
+/// Incremental batch test: sends servers to the BatchingEngine via cache,
+/// writes results to SQLite, and emits per-server events through `event_tx`.
+///
+/// Unlike the old `batch_test()`, this function:
+/// - Uses `cache.queue_test()` to send requests to the background worker
+/// - Writes results to SQLite via `flush_cache_batch`
+/// - Emits `ServerTestedEvent` via `event_tx` for streaming UI updates
+pub async fn batch_test_incremental(
+    cache: &ServerCache,
+    servers: &[ServerProfile],
+    cancel: Option<CancellationToken>,
+    profile_id: &str,
+    event_tx: &mpsc::UnboundedSender<crate::events::ServerTestedEvent>,
+    db: &crate::db::DbPool,
+) {
+    let total = servers.len();
+    if total == 0 {
+        return;
+    }
+
+    // Queue all servers to the BatchingEngine via cache
+    let mut pending = Vec::with_capacity(total);
+    for server in servers {
+        let cancel = cancel.clone().unwrap_or_default();
+        let rx = cache.queue_test(server, profile_id, cancel);
+        pending.push((server.id.clone(), rx));
+    }
+
+    // Await results
+    let mut set = tokio::task::JoinSet::new();
+    for (server_id, rx) in pending {
+        set.spawn(async move { (server_id, rx.await) });
+    }
+
+    let mut positives: Vec<PositiveResult> = Vec::new();
+    let mut negatives: Vec<(String, String)> = Vec::new();
+
+    while let Some(res) = set.join_next().await {
+        if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+            set.abort_all();
+            break;
+        }
+        match res {
+            Ok((server_id, Ok(Ok(positive)))) => {
+                let p = positive.clone();
+                // Emit event
+                let _ = event_tx.send(crate::events::ServerTestedEvent {
+                    profile_id: profile_id.to_string(),
+                    phase: "batch".into(),
+                    server_id: server_id.clone(),
+                    static_data: None,
+                    ping_ms: Some(p.ping_ms),
+                    exit_server: p.exit_ip.clone(),
+                    exit_flag: p.exit_flag.clone(),
+                    exit_country_name: p.exit_country.clone(),
+                    exit_city_name: p.exit_city.clone(),
+                    behind_cdn: Some(p.behind_cdn),
+                    error: None,
+                });
+                positives.push(p);
+            }
+            Ok((server_id, Ok(Err(e)))) => {
+                let _ = event_tx.send(crate::events::ServerTestedEvent {
+                    profile_id: profile_id.to_string(),
+                    phase: "error".into(),
+                    server_id: server_id.clone(),
+                    static_data: None,
+                    ping_ms: None,
+                    exit_server: None,
+                    exit_flag: None,
+                    exit_country_name: None,
+                    exit_city_name: None,
+                    behind_cdn: None,
+                    error: Some(e.clone()),
+                });
+                negatives.push((server_id, e));
+            }
+            _ => {}
+        }
+
+        // Flush every 50 results
+        if positives.len() >= 50 || negatives.len() >= 50 {
+            flush_cache_batch(db, &positives, &negatives).await;
+            positives.clear();
+            negatives.clear();
+        }
+    }
+
+    // Final flush
+    flush_cache_batch(db, &positives, &negatives).await;
 }
 
 // ============================================================================

@@ -1,12 +1,12 @@
 use crate::db::DbPool;
 use crate::proxy::{ErrorCode, ProxyError, ServerProfile};
 use crate::subscription::SubscriptionProfile;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 /// Get proxy port to route subscription fetch through the active proxy.
@@ -1119,6 +1119,499 @@ pub(crate) async fn clash_api_test(
     preflight_pings
 }
 
+/// Get old server keys from SQLite for ID preservation.
+/// Returns a HashMap of (dedup_key → server_id).
+async fn get_old_servers_map(
+    profile_id: &str,
+    db: &DbPool,
+) -> Result<HashMap<String, String>, ProxyError> {
+    let pid = profile_id.to_string();
+    db.call(move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT server_hash, protocol, server, port, uuid, password, method, transport_type
+             FROM servers WHERE profile_id = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pid], |row| {
+            let server_hash: String = row.get(0)?;
+            let protocol: String = row.get(1)?;
+            let server: String = row.get(2)?;
+            let port: u16 = row.get(3)?;
+            let uuid: Option<String> = row.get(4)?;
+            let password: Option<String> = row.get(5)?;
+            let method: Option<String> = row.get(6)?;
+            let transport: Option<String> = row.get(7)?;
+            let key = format!(
+                "{}://{}:{}@{}:{}:{}/{}",
+                protocol,
+                server,
+                port,
+                uuid.unwrap_or_default(),
+                password.unwrap_or_default(),
+                method.unwrap_or_default(),
+                transport.unwrap_or_default()
+            );
+            Ok((key, server_hash))
+        })?;
+        rows.collect::<rusqlite::Result<HashMap<String, String>>>()
+    })
+    .await
+    .map_err(|e| {
+        ProxyError::subscription(
+            ErrorCode::SubscriptionSaveFailed,
+            format!("Failed to query old servers: {e}"),
+        )
+    })
+}
+
+/// Three-phase server processing with incremental event emission and
+/// SQLite persistence.
+///
+/// Phase 0 (init): prepare + INSERT + emit static data
+/// Phase 1 (cache): emit fresh cached entries from server_cache table
+/// Phase 2 (preflight): Clash API ping test + pre-filter dead servers
+/// Phase 3 (batch): deep test via BatchingEngine, write results to SQLite
+///
+/// Each phase emits `ServerTestedEvent` via `event_tx` so the frontend
+/// sees servers appear incrementally.
+#[allow(clippy::too_many_arguments)]
+pub async fn process_servers_incremental(
+    data_dir: &Path,
+    settings: &crate::settings::AppSettings,
+    servers: Vec<ServerProfile>,
+    profile_id: &str,
+    cancel: CancellationToken,
+    event_tx: mpsc::UnboundedSender<crate::events::ServerTestedEvent>,
+    db: &DbPool,
+    cache: &crate::proxy::cache::ServerCache,
+) -> Vec<ServerProfile> {
+    let initial_count = servers.len();
+
+    // ═══ PHASE 0: Prepare + INSERT ═══════════════════════════════════
+    let old_index = get_old_servers_map(profile_id, db)
+        .await
+        .unwrap_or_default();
+
+    let unique = tokio::task::spawn_blocking({
+        let servers = servers.clone();
+        let settings = settings.clone();
+        move || {
+            let mut servers = servers;
+            // ID preservation
+            for server in &mut servers {
+                let key = format!(
+                    "{}://{}:{}@{}:{}:{}/{}",
+                    server.protocol,
+                    server.server,
+                    server.port,
+                    server.uuid.as_deref().unwrap_or(""),
+                    server.password.as_deref().unwrap_or(""),
+                    server.method.as_deref().unwrap_or(""),
+                    server.transport_type.as_deref().unwrap_or("")
+                );
+                if let Some(old_id) = old_index.get(&key) {
+                    server.id = old_id.clone();
+                }
+            }
+            // Dedup by key
+            let mut seen = std::collections::HashSet::new();
+            servers.retain(|s| {
+                seen.insert(format!(
+                    "{}://{}:{}@{}:{}:{}/{}",
+                    s.protocol,
+                    s.server,
+                    s.port,
+                    s.uuid.as_deref().unwrap_or(""),
+                    s.password.as_deref().unwrap_or(""),
+                    s.method.as_deref().unwrap_or(""),
+                    s.transport_type.as_deref().unwrap_or("")
+                ))
+            });
+
+            // Keyword CDN pre-check
+            for s in &mut servers {
+                if !s.behind_cdn {
+                    let lower_name = s.original_name.to_lowercase();
+                    if lower_name.contains("workers.dev") || lower_name.contains("pages.dev") {
+                        s.behind_cdn = true;
+                        s.assert_no_cdn_exit_data("keyword_cdn");
+                    }
+                }
+            }
+
+            // User filters
+            if !settings.allowed_protocols.is_empty() {
+                servers.retain(|s| settings.allowed_protocols.contains(&s.protocol));
+            }
+            if !settings.blocked_protocols.is_empty() {
+                servers.retain(|s| !settings.blocked_protocols.contains(&s.protocol));
+            }
+
+            servers
+        }
+    })
+    .await
+    .unwrap_or_default();
+
+    tracing::info!(target: "subscription",
+        "Phase 0: {}/{} servers unique after dedup+filter",
+        unique.len(), initial_count);
+
+    // INSERT to SQLite
+    let pid = profile_id.to_string();
+    let servers_for_insert = unique.clone();
+    let _ = db
+        .call(
+            move |conn| -> Result<(), tokio_rusqlite::Error<rusqlite::Error>> {
+                let tx = conn.transaction()?;
+                // Delete old servers for this profile
+                tx.execute(
+                    "DELETE FROM servers WHERE profile_id = ?1",
+                    rusqlite::params![pid],
+                )?;
+                for s in &servers_for_insert {
+                    tx.execute(
+                        "INSERT INTO servers
+                 (profile_id, server_hash, protocol, server, port,
+                  uuid, password, method, sni, flow,
+                  public_key, private_key,
+                  transport_type, transport_path, transport_host,
+                  reality_pbk, reality_sid,
+                  wg_local_address, wg_allowed_ips, wg_dns, wg_mtu, wg_keepalive,
+                  username, ping_ms, behind_cdn, flag, country_name, city_name,
+                  exit_server, exit_flag, exit_country_name, exit_city_name, original_name)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,
+                         ?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,
+                         ?29,?30,?31,?32,?33)",
+                        rusqlite::params![
+                            pid,
+                            s.id,
+                            s.protocol,
+                            s.server,
+                            s.port,
+                            s.uuid,
+                            s.password,
+                            s.method,
+                            s.sni,
+                            s.flow,
+                            s.public_key,
+                            s.private_key,
+                            s.transport_type,
+                            s.transport_path,
+                            s.transport_host,
+                            s.reality_pbk,
+                            s.reality_sid,
+                            s.wg_local_address,
+                            s.wg_allowed_ips,
+                            s.wg_dns,
+                            s.wg_mtu,
+                            s.wg_keepalive,
+                            s.username,
+                            s.ping_ms,
+                            s.behind_cdn as i32,
+                            s.flag,
+                            s.country_name,
+                            s.city_name,
+                            s.exit_server,
+                            s.exit_flag,
+                            s.exit_country_name,
+                            s.exit_city_name,
+                            s.original_name,
+                        ],
+                    )?;
+                }
+                tx.commit()?;
+                Ok(())
+            },
+        )
+        .await;
+
+    // Emit init events
+    let pid = profile_id.to_string();
+    for s in &unique {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let _ = event_tx.send(crate::events::ServerTestedEvent {
+            profile_id: pid.clone(),
+            phase: "init".into(),
+            server_id: s.id.clone(),
+            static_data: Some(crate::events::ServerStaticData {
+                protocol: s.protocol.clone(),
+                server: s.server.clone(),
+                port: s.port,
+                original_name: s.original_name.clone(),
+                flag: s.flag.clone(),
+                country_name: s.country_name.clone(),
+            }),
+            ping_ms: None,
+            exit_server: None,
+            exit_flag: None,
+            exit_country_name: None,
+            exit_city_name: None,
+            behind_cdn: Some(s.behind_cdn),
+            error: None,
+        });
+    }
+
+    if cancel.is_cancelled() {
+        tracing::info!(target: "subscription", "Refresh cancelled during Phase 0");
+        return Vec::new();
+    }
+
+    // ═══ PHASE 1: Cache hit ══════════════════════════════════════════
+    let fresh_cutoff = chrono::Utc::now().timestamp() - 600; // 10 min POSITIVE_STALE_SECS
+    let cached_server_ids: std::collections::HashSet<String> = {
+        let pid = profile_id.to_string();
+        let cutoff = fresh_cutoff;
+        match db
+            .call(
+                move |conn| -> Result<Vec<String>, tokio_rusqlite::Error<rusqlite::Error>> {
+                    let mut stmt = conn.prepare(
+                        "SELECT s.server_hash
+                 FROM servers s
+                 JOIN server_cache c ON s.server_hash = c.server_hash
+                 WHERE s.profile_id = ?1 AND c.status = 'positive' AND c.tested_at >= ?2",
+                    )?;
+                    let rows = stmt.query_map(rusqlite::params![pid, cutoff], |row| {
+                        row.get::<_, String>(0)
+                    })?;
+                    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+                },
+            )
+            .await
+        {
+            Ok(ids) => ids.into_iter().collect(),
+            Err(_) => std::collections::HashSet::new(),
+        }
+    };
+
+    // Emit cached servers — they get the cached ping + exit data
+    let mut needs_batch: Vec<ServerProfile> = Vec::new();
+    let mut cache_hit_count = 0usize;
+    for s in unique {
+        if cached_server_ids.contains(&s.id) {
+            // Emit cached event
+            let _ = event_tx.send(crate::events::ServerTestedEvent {
+                profile_id: profile_id.to_string(),
+                phase: "cache".into(),
+                server_id: s.id.clone(),
+                static_data: None,
+                ping_ms: s.ping_ms,
+                exit_server: s.exit_server.clone(),
+                exit_flag: s.exit_flag.clone(),
+                exit_country_name: s.exit_country_name.clone(),
+                exit_city_name: s.exit_city_name.clone(),
+                behind_cdn: Some(s.behind_cdn),
+                error: None,
+            });
+            cache_hit_count += 1;
+        } else {
+            needs_batch.push(s);
+        }
+    }
+    tracing::info!(target: "subscription",
+        "Phase 1: {cache_hit_count} cache hits, {} servers need batch test",
+        needs_batch.len());
+
+    if cancel.is_cancelled() {
+        tracing::info!(target: "subscription", "Refresh cancelled during Phase 1");
+        return Vec::new();
+    }
+
+    // ═══ PHASE 2: Preflight (Clash API) ══════════════════════════════
+    if needs_batch.is_empty() {
+        tracing::info!(target: "subscription", "All servers cached — skipping preflight and batch");
+        return needs_batch;
+    }
+
+    let preflight_pings = clash_api_test(
+        &needs_batch,
+        data_dir,
+        settings,
+        None::<&crate::proxy::cache::ServerCache>,
+        None::<&AppHandle>,
+        profile_id,
+    )
+    .await;
+
+    let ping_count = preflight_pings.len();
+    if ping_count > 0 && ping_count < needs_batch.len() {
+        // Pre-filter: dead servers go to negative cache
+        let dead_count = needs_batch.len() - ping_count;
+        let dead_ids: std::collections::HashSet<String> = needs_batch
+            .iter()
+            .filter(|s| !preflight_pings.contains_key(&s.id))
+            .map(|s| s.id.clone())
+            .collect();
+
+        // Write dead servers to negative cache
+        let dead: Vec<(String, String)> = dead_ids
+            .iter()
+            .map(|id| (id.clone(), "Clash API preflight: no ping".into()))
+            .collect();
+        crate::proxy::cache::flush_cache_batch(db, &[], &dead).await;
+
+        // Emit error events for the dead servers
+        for sid in &dead_ids {
+            let _ = event_tx.send(crate::events::ServerTestedEvent {
+                profile_id: profile_id.to_string(),
+                phase: "error".into(),
+                server_id: sid.clone(),
+                static_data: None,
+                ping_ms: None,
+                exit_server: None,
+                exit_flag: None,
+                exit_country_name: None,
+                exit_city_name: None,
+                behind_cdn: None,
+                error: Some("Clash API preflight failed".into()),
+            });
+        }
+
+        needs_batch.retain(|s| !dead_ids.contains(&s.id));
+        tracing::info!(target: "subscription",
+            "Phase 2 pre-filter: {dead_count} dead servers moved to negative cache");
+    }
+
+    if ping_count == 0 && !needs_batch.is_empty() {
+        tracing::warn!(target: "subscription",
+            "Pre-flight returned 0 pings — keeping all servers (transient)");
+    }
+
+    // Emit preflight ping events for servers that got a Clash API response.
+    for server in &needs_batch {
+        if let Some(ping) = preflight_pings.get(&server.id).copied() {
+            let _ = event_tx.send(crate::events::ServerTestedEvent {
+                profile_id: profile_id.to_string(),
+                phase: "preflight".into(),
+                server_id: server.id.clone(),
+                static_data: None,
+                ping_ms: Some(ping),
+                exit_server: None,
+                exit_flag: None,
+                exit_country_name: None,
+                exit_city_name: None,
+                behind_cdn: Some(server.behind_cdn),
+                error: None,
+            });
+        }
+    }
+
+    // ═══ PHASE 1.5: DNS resolve + GeoIP + CDN entry detection ════════
+    if needs_batch.is_empty() {
+        return needs_batch;
+    }
+
+    // Lazy init GeoIP
+    if !crate::proxy::geoip::is_ready() {
+        let geo_dir = data_dir.join("geoip");
+        let city_path = geo_dir.join("GeoLite2-City.mmdb");
+        if city_path.exists() {
+            let _ = crate::proxy::geoip::init_city(&city_path);
+        }
+        let asn_path = geo_dir.join("GeoLite2-ASN.mmdb");
+        if asn_path.exists() && !crate::proxy::geoip::is_asn_ready() {
+            let _ = crate::proxy::geoip::init_asn(&asn_path);
+        }
+        let ipinfo_path = geo_dir.join("ipinfo_lite.mmdb");
+        if ipinfo_path.exists() && !crate::proxy::geoip::is_ipinfo_ready() {
+            let _ = crate::proxy::geoip::init_ipinfo(&ipinfo_path);
+        }
+        if !crate::proxy::geoip::is_cdn_ready() {
+            let _ = crate::proxy::geoip::init_cdn_ranges(&geo_dir);
+        }
+    }
+
+    let mut dns_set = tokio::task::JoinSet::new();
+    for s in &needs_batch {
+        let sid = s.id.clone();
+        let host = s.server.clone();
+        let port = s.port;
+        dns_set.spawn(async move {
+            tokio::net::lookup_host(&format!("{}:{}", host, port))
+                .await
+                .ok()
+                .and_then(|mut a| a.next())
+                .map(|addr| (sid, addr.ip().to_string()))
+        });
+    }
+    let mut dns_results: HashMap<String, String> = HashMap::new();
+    while let Some(res) = dns_set.join_next().await {
+        if let Ok(Some((sid, ip))) = res {
+            dns_results.insert(sid, ip);
+        }
+    }
+
+    for s in &mut needs_batch {
+        if let Some(ip) = dns_results.get(&s.id) {
+            // Entry GeoIP
+            if let Some(info) = crate::proxy::geoip::resolve_hostname(ip).await {
+                if s.country_name.is_none() {
+                    s.country_name = Some(info.country_name.clone());
+                }
+                if s.flag.is_none() {
+                    s.flag = Some(info.country_code.clone());
+                }
+            }
+            // CDN entry detection
+            if !s.behind_cdn && crate::proxy::geoip::is_cdn_entry_ip(ip) {
+                s.behind_cdn = true;
+                s.assert_no_cdn_exit_data("entry_ip_match");
+                s.exit_server = None;
+                s.exit_flag = None;
+                s.exit_country_name = None;
+                s.exit_city_name = None;
+            }
+        }
+        // Set ping from preflight
+        if let Some(ping) = preflight_pings.get(&s.id).copied() {
+            s.ping_ms = Some(ping);
+        }
+    }
+
+    // Write preflight pings to SQLite
+    if !preflight_pings.is_empty() {
+        let pid = profile_id.to_string();
+        let pings = preflight_pings.clone();
+        let _ = db
+            .call(
+                move |conn| -> Result<(), tokio_rusqlite::Error<rusqlite::Error>> {
+                    let tx = conn.transaction()?;
+                    for (sid, ping) in &pings {
+                        tx.execute(
+                    "UPDATE servers SET ping_ms = ?1 WHERE server_hash = ?2 AND profile_id = ?3",
+                    rusqlite::params![ping, sid, pid],
+                )?;
+                    }
+                    tx.commit()?;
+                    Ok(())
+                },
+            )
+            .await;
+    }
+
+    // ═══ PHASE 3: Deep batch test ════════════════════════════════════
+    if needs_batch.is_empty() {
+        return needs_batch;
+    }
+
+    crate::proxy::cache::batch_test_incremental(
+        cache,
+        &needs_batch,
+        Some(cancel),
+        profile_id,
+        &event_tx,
+        db,
+    )
+    .await;
+
+    tracing::info!(target: "subscription",
+        "Phase 3 (batch): {} servers sent to BatchingEngine", needs_batch.len());
+
+    // Return the servers — caller (lib.rs) does the final commit
+    needs_batch
+}
+
 /// Deduplicate servers, apply user filters, run ping, enrich GeoIP flag.
 /// Logs each step (dedup count, testing, unreachable count, final count).
 ///
@@ -1756,8 +2249,6 @@ async fn test_db() -> crate::db::DbPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::DbPool;
-
     fn test_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "omnitun-profile-test-{}-{}",
