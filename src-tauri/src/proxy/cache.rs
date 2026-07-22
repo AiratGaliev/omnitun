@@ -797,6 +797,15 @@ impl ServerCache {
                             s.exit_flag = positive.exit_flag.clone();
                             s.exit_country_name = positive.exit_country.clone();
                             s.exit_city_name = positive.exit_city.clone();
+                            // Fallback: if batch test couldn't determine outlet IP,
+                            // use entry server IP (comment in db/mod.rs v3 migration:
+                            // "If behind_cdn = 0, exit_server must be set (either from
+                            // batch test or fallback to entry server)").
+                            if s.exit_server.is_none() {
+                                // server field may be hostname, but we already
+                                // have the entry IP from the server struct.
+                                s.exit_server = Some(s.server.clone());
+                            }
                         }
                         // Emit per-server event for streaming UI updates.
                         if let Some(app) = app_ref {
@@ -1032,6 +1041,24 @@ impl ServerCache {
         if removed > 0 {
             tracing::info!(target:"cache", "[Cache] cleared {} negative entries (force re-test)", removed);
         }
+    }
+
+    /// Insert a negative entry into the in-memory store (keeps get_cache_stats
+    /// in sync with SQLite after manual test_profile writes).
+    pub async fn add_negative(&self, server_id: &str, reason: &str) {
+        let mut store = self.store.write().await;
+        let now = chrono::Utc::now().timestamp();
+        store.insert(server_id.to_string(), CacheEntry {
+            server_id: server_id.to_string(),
+            last_updated: now,
+            status: CacheStatus::Negative {
+                consecutive_failures: 1,
+                first_failure_at: now,
+                last_failure_at: now,
+                previously_worked: false,
+                reason: reason.to_string(),
+            },
+        });
     }
 
     /// Persist the current store to the `server_cache` SQLite table.

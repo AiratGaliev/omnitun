@@ -63,8 +63,352 @@ pub async fn init_db(data_dir: &Path) -> Result<DbPool, String> {
             tracing::info!(target: "db", "Database migrated to schema v1");
         }
 
-        // Future migrations:
-        // if current_version < 2 { migrate_v2(inner)?; pragma_update(None, "user_version", 2)?; }
+        // Schema v2: enforce NOT NULL on servers.ping_ms, servers.flag, servers.country_name
+        //
+        // ── ANTI-REGRESSION ─────────────────────────────────────────────────
+        // ping_ms, flag, country_name must NEVER contain default/dummy values
+        // (0, 'UN', 'Unknown'). If they are NULL, the pipeline has a REAL bug —
+        // a server reached the servers table without batch test or GeoIP.
+        // Do NOT add defaults or unwrap_or — let the NOT NULL constraint fail
+        // and surface the bug immediately. Every server in this table MUST have
+        // been through batch_test_incremental (for ping_ms) and GeoIP resolution
+        // (for flag, country_name).
+        // ────────────────────────────────────────────────────────────────────
+        //
+        if current_version < 2 {
+            tracing::info!(target: "db", "Migrating to schema v2: adding NOT NULL constraints");
+
+            // Remove rows with NULL ping_ms — they indicate pipeline failure
+            let deleted_ping = inner.execute(
+                "DELETE FROM servers WHERE ping_ms IS NULL",
+                [],
+            )?;
+            if deleted_ping > 0 {
+                tracing::warn!(
+                    target: "db",
+                    "v2 migration: removed {} server(s) with NULL ping_ms (pipeline defect)",
+                    deleted_ping,
+                );
+            }
+
+            // Drop stale intermediate table if it exists from a previous run.
+            inner.execute("DROP TABLE IF EXISTS servers_v2", [])?;
+            inner.execute_batch(
+
+                "CREATE TABLE IF NOT EXISTS servers_v2 (
+                    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    server_hash TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    server TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    uuid TEXT,
+                    password TEXT,
+                    method TEXT,
+                    sni TEXT,
+                    flow TEXT,
+                    public_key TEXT,
+                    private_key TEXT,
+                    transport_type TEXT,
+                    transport_path TEXT,
+                    transport_host TEXT,
+                    reality_pbk TEXT,
+                    reality_sid TEXT,
+                    wg_local_address TEXT,
+                    wg_allowed_ips TEXT,
+                    wg_dns TEXT,
+                    wg_mtu INTEGER,
+                    wg_keepalive INTEGER,
+                    username TEXT,
+                    ping_ms INTEGER NOT NULL,
+                    behind_cdn INTEGER DEFAULT 0,
+                    flag TEXT NOT NULL,
+                    country_name TEXT NOT NULL,
+                    city_name TEXT,
+                    exit_server TEXT,
+                    exit_flag TEXT,
+                    exit_country_name TEXT,
+                    exit_city_name TEXT,
+                    original_name TEXT,
+                    sort_order INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (profile_id, server_hash)
+                );
+
+                INSERT INTO servers_v2
+                    SELECT * FROM servers;
+
+                DROP TABLE servers;
+
+                ALTER TABLE servers_v2 RENAME TO servers;
+
+                CREATE INDEX IF NOT EXISTS idx_servers_profile_ping
+                    ON servers(profile_id, ping_ms);
+                CREATE INDEX IF NOT EXISTS idx_servers_exit_flag
+                    ON servers(exit_flag) WHERE exit_flag IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_servers_protocol
+                    ON servers(protocol);
+            ")?;
+
+            inner.pragma_update(None, "user_version", 2)?;
+            tracing::info!(target: "db", "Database migrated to schema v2");
+        }
+
+        // Schema v3: CDN servers must not have exit data
+        //
+        // ── ANTI-REGRESSION ─────────────────────────────────────────────────
+        // If behind_cdn = 1, then exit_server, exit_flag, exit_country_name
+        // and exit_city_name MUST be NULL. If the pipeline writes exit data
+        // for a CDN server, the CHECK constraint will fail immediately.
+        // If behind_cdn = 0, exit_server must be set (either from batch test
+        // or fallback to entry server).
+        // ────────────────────────────────────────────────────────────────────
+        if current_version < 3 {
+            tracing::info!(target: "db", "Migrating to schema v3: CDN exit data constraint");
+
+            inner.execute("DROP TABLE IF EXISTS servers_v3", [])?;
+            inner.execute_batch(
+                "CREATE TABLE IF NOT EXISTS servers_v3 (
+                    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    server_hash TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    server TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    uuid TEXT,
+                    password TEXT,
+                    method TEXT,
+                    sni TEXT,
+                    flow TEXT,
+                    public_key TEXT,
+                    private_key TEXT,
+                    transport_type TEXT,
+                    transport_path TEXT,
+                    transport_host TEXT,
+                    reality_pbk TEXT,
+                    reality_sid TEXT,
+                    wg_local_address TEXT,
+                    wg_allowed_ips TEXT,
+                    wg_dns TEXT,
+                    wg_mtu INTEGER,
+                    wg_keepalive INTEGER,
+                    username TEXT,
+                    ping_ms INTEGER NOT NULL,
+                    behind_cdn INTEGER DEFAULT 0,
+                    flag TEXT NOT NULL,
+                    country_name TEXT NOT NULL,
+                    city_name TEXT,
+                    exit_server TEXT,
+                    exit_flag TEXT,
+                    exit_country_name TEXT,
+                    exit_city_name TEXT,
+                    original_name TEXT,
+                    sort_order INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (profile_id, server_hash),
+                    CHECK(
+                        (behind_cdn = 1 AND exit_server IS NULL AND exit_flag IS NULL
+                                         AND exit_country_name IS NULL AND exit_city_name IS NULL)
+                        OR
+                        (behind_cdn = 0 AND exit_server IS NOT NULL)
+                    )
+                );
+
+                INSERT INTO servers_v3 SELECT * FROM servers;
+
+                DROP TABLE servers;
+
+                ALTER TABLE servers_v3 RENAME TO servers;
+
+                CREATE INDEX IF NOT EXISTS idx_servers_profile_ping
+                    ON servers(profile_id, ping_ms);
+                CREATE INDEX IF NOT EXISTS idx_servers_exit_flag
+                    ON servers(exit_flag) WHERE exit_flag IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_servers_protocol
+                    ON servers(protocol);
+            ")?;
+
+            inner.pragma_update(None, "user_version", 3)?;
+            tracing::info!(target: "db", "Database migrated to schema v3");
+        }
+
+        // Schema v4: NOT NULL on behind_cdn, sort_order, original_name
+        //
+        // behind_cdn is a boolean — NULL is meaningless. Default 0 (not CDN)
+        // is semantically correct for the common case, unlike ping_ms/flag/
+        // country_name where defaults would mask pipeline bugs.
+        // sort_order and original_name always have values from the parser.
+        if current_version < 4 {
+            tracing::info!(target: "db", "Migrating to schema v4: NOT NULL on behind_cdn, sort_order, original_name");
+
+            // Fix any existing NULLs before the constraint
+            inner.execute("UPDATE servers SET behind_cdn = 0 WHERE behind_cdn IS NULL", [])?;
+            inner.execute("UPDATE servers SET sort_order = 0 WHERE sort_order IS NULL", [])?;
+            inner.execute("UPDATE servers SET original_name = '' WHERE original_name IS NULL", [])?;
+
+            inner.execute("DROP TABLE IF EXISTS servers_v4", [])?;
+            inner.execute_batch(
+                "CREATE TABLE IF NOT EXISTS servers_v4 (
+                    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    server_hash TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    server TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    uuid TEXT,
+                    password TEXT,
+                    method TEXT,
+                    sni TEXT,
+                    flow TEXT,
+                    public_key TEXT,
+                    private_key TEXT,
+                    transport_type TEXT,
+                    transport_path TEXT,
+                    transport_host TEXT,
+                    reality_pbk TEXT,
+                    reality_sid TEXT,
+                    wg_local_address TEXT,
+                    wg_allowed_ips TEXT,
+                    wg_dns TEXT,
+                    wg_mtu INTEGER,
+                    wg_keepalive INTEGER,
+                    username TEXT,
+                    ping_ms INTEGER NOT NULL,
+                    behind_cdn INTEGER NOT NULL DEFAULT 0,
+                    flag TEXT NOT NULL,
+                    country_name TEXT NOT NULL,
+                    city_name TEXT,
+                    exit_server TEXT,
+                    exit_flag TEXT,
+                    exit_country_name TEXT,
+                    exit_city_name TEXT,
+                    original_name TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (profile_id, server_hash),
+                    CHECK(
+                        (behind_cdn = 1 AND exit_server IS NULL AND exit_flag IS NULL
+                                         AND exit_country_name IS NULL AND exit_city_name IS NULL)
+                        OR
+                        (behind_cdn = 0 AND exit_server IS NOT NULL)
+                    )
+                );
+
+                INSERT INTO servers_v4 SELECT * FROM servers;
+
+                DROP TABLE servers;
+
+                ALTER TABLE servers_v4 RENAME TO servers;
+
+                CREATE INDEX IF NOT EXISTS idx_servers_profile_ping
+                    ON servers(profile_id, ping_ms);
+                CREATE INDEX IF NOT EXISTS idx_servers_exit_flag
+                    ON servers(exit_flag) WHERE exit_flag IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_servers_protocol
+                    ON servers(protocol);
+            ")?;
+
+            inner.pragma_update(None, "user_version", 4)?;
+            tracing::info!(target: "db", "Database migrated to schema v4");
+        }
+
+        // Schema v5: ensure NOT NULL constraints are really enforced.
+        // Previous migrations used IF NOT EXISTS on intermediate tables which
+        // silently skipped schema changes when a stale table existed.
+        if current_version < 5 {
+            tracing::info!(target: "db", "Migrating to schema v5: force NOT NULL constraints");
+
+            // Clean up any NULL-ping rows that slipped through
+            let deleted = inner.execute("DELETE FROM servers WHERE ping_ms IS NULL", [])?;
+            if deleted > 0 {
+                tracing::warn!(
+                    target: "db",
+                    "v5 migration: removed {} server(s) with NULL ping_ms",
+                    deleted,
+                );
+            }
+
+            inner.execute("DROP TABLE IF EXISTS servers_v5", [])?;
+            inner.execute_batch(
+                "CREATE TABLE IF NOT EXISTS servers_v5 (
+                    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+                    server_hash TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    server TEXT NOT NULL,
+                    port INTEGER NOT NULL,
+                    uuid TEXT,
+                    password TEXT,
+                    method TEXT,
+                    sni TEXT,
+                    flow TEXT,
+                    public_key TEXT,
+                    private_key TEXT,
+                    transport_type TEXT,
+                    transport_path TEXT,
+                    transport_host TEXT,
+                    reality_pbk TEXT,
+                    reality_sid TEXT,
+                    wg_local_address TEXT,
+                    wg_allowed_ips TEXT,
+                    wg_dns TEXT,
+                    wg_mtu INTEGER,
+                    wg_keepalive INTEGER,
+                    username TEXT,
+                    ping_ms INTEGER NOT NULL,
+                    behind_cdn INTEGER NOT NULL DEFAULT 0,
+                    flag TEXT NOT NULL,
+                    country_name TEXT NOT NULL,
+                    city_name TEXT,
+                    exit_server TEXT,
+                    exit_flag TEXT,
+                    exit_country_name TEXT,
+                    exit_city_name TEXT,
+                    original_name TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (profile_id, server_hash),
+                    CHECK(
+                        (behind_cdn = 1 AND exit_server IS NULL AND exit_flag IS NULL
+                                         AND exit_country_name IS NULL AND exit_city_name IS NULL)
+                        OR
+                        (behind_cdn = 0 AND exit_server IS NOT NULL)
+                    )
+                );
+
+                INSERT INTO servers_v5 SELECT * FROM servers;
+
+                DROP TABLE servers;
+
+                ALTER TABLE servers_v5 RENAME TO servers;
+
+                CREATE INDEX IF NOT EXISTS idx_servers_profile_ping
+                    ON servers(profile_id, ping_ms);
+                CREATE INDEX IF NOT EXISTS idx_servers_exit_flag
+                    ON servers(exit_flag) WHERE exit_flag IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_servers_protocol
+                    ON servers(protocol);
+            ")?;
+
+            inner.pragma_update(None, "user_version", 5)?;
+            tracing::info!(target: "db", "Database migrated to schema v5");
+        }
+
+        // v6 → UNIQUE server_hash (cross-profile dedup enforcement)
+        if current_version < 6 {
+            // Delete duplicate server_hashes before creating the UNIQUE index
+            inner.execute_batch(
+                "DELETE FROM servers WHERE rowid NOT IN (
+                    SELECT MIN(rowid) FROM servers GROUP BY server_hash
+                );"
+            )?;
+            inner.execute_batch(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_servers_server_hash_unique
+                 ON servers(server_hash);"
+            )?;
+            inner.pragma_update(None, "user_version", 6)?;
+            tracing::info!(target: "db", "Database migrated to schema v6 (UNIQUE server_hash)");
+        }
 
         Ok(())
     })

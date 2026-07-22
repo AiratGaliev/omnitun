@@ -4,7 +4,7 @@
  *   - addProfile: pending profile appears immediately, _refreshingIds tracked,
  *     error cleanup, profileId passed to backend
  *   - importProfileContent: same pending-profile pattern
- *   - servers-discovered: updates both state.servers and profile.servers
+ *   - servers-discovered (deprecated → server-tested): updates both state.servers and profile.servers
  *     incrementally; orphaned servers guarded
  *   - refreshProfile: lastUpdated set to now on error (not future)
  *
@@ -317,7 +317,10 @@ describe('addProfile success path', () => {
 });
 
 describe('orphaned servers guard in servers-discovered flush', () => {
-  it('servers-discovered for a non-existent profile does NOT add servers to state.servers', async () => {
+  // Deprecated: servers-discovered was replaced by server-tested.
+  // These tests are preserved for reference but skipped because
+  // the event no longer exists in the backend.
+  it.skip('servers-discovered for a non-existent profile does NOT add servers to state.servers', async () => {
     const { useAppStore } = await initStore();
 
     // No profiles in the store. Emit a servers-discovered event for a
@@ -336,7 +339,7 @@ describe('orphaned servers guard in servers-discovered flush', () => {
     expect(state.profiles).toHaveLength(0);
   });
 
-  it('after addProfile fails, late servers-discovered events do not leave orphaned servers', async () => {
+  it.skip('after addProfile fails, late servers-discovered events do not leave orphaned servers', async () => {
     const { useAppStore } = await initStore();
 
     // Start addProfile — it will fail

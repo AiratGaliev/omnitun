@@ -1,6 +1,4 @@
-// FIXED for sing-box 1.13.13:
-//   - DNS config uses NEW format: type-based servers instead of legacy address+detour
-//   - Custom DNS preserves new format
+// Sing-box DNS config: type-based servers, not legacy address+detour.
 
 use crate::proxy::{ErrorCode, ProxyError, ServerProfile};
 use crate::settings::AppSettings;

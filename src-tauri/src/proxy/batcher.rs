@@ -696,7 +696,6 @@ async fn test_single_server(
     //    На каждой попытке перебираем все URL, а не только первый.
     //    Prepend the user-configured test URL (from settings) as the
     //    first URL to try. If it fails, fall back to the hardcoded TEST_URLS.
-    //    Previously, CONFIGURED_TEST_URL was completely ignored here.
     let configured = CONFIGURED_TEST_URL
         .read()
         .map(|u| u.clone())

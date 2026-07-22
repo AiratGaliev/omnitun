@@ -7,7 +7,7 @@
 
 /// Current schema version.
 #[allow(dead_code)]
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 6;
 
 /// Schema version 1 — initial tables.
 pub(crate) const CREATE_TABLES_SQL: &str = "

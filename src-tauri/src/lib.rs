@@ -1361,7 +1361,7 @@ async fn refresh_subscription(
                 "Refresh failed, bumping updated_at: {e}"
             );
             let re_enriched = if !old_servers.is_empty() {
-                crate::profile::process_servers(
+                crate::profile::process_servers_incremental_from_app(
                     &app,
                     old_servers
                         .into_iter()
@@ -1417,8 +1417,43 @@ async fn refresh_subscription(
         .map(|s| (s.id.clone(), s.ping_ms))
         .collect();
 
+    // Extract state for incremental pipeline
+    let data_dir = app.path().app_data_dir().unwrap_or_default();
+    let settings = app
+        .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
+        .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
+        .unwrap_or_default();
+    let cache = match app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+        Some(c) => (*c).clone(),
+        None => return Err(ProxyError::process(
+            crate::proxy::ErrorCode::ProcessNotReachable,
+            "no cache",
+        )),
+    };
+    let db = match app.try_state::<crate::db::DbPool>() {
+        Some(d) => (*d).clone(),
+        None => return Err(ProxyError::process(
+            crate::proxy::ErrorCode::ProcessNotReachable,
+            "no db",
+        )),
+    };
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Spawn drain task: forward events from the channel to the Tauri frontend
+    let app_drain = app.clone();
+    let drain = tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            crate::events::emit_server_tested(&app_drain, event);
+        }
+    });
+
     // process_servers: ping + batch_test + GeoIP (long, no lock)
-    servers = crate::profile::process_servers(&app, servers, &id).await;
+    servers = crate::profile::process_servers_incremental(&data_dir, &settings, servers, &id,
+        cancel_token, event_tx, &db, &cache, Some(&app)).await;
+
+    // Drain remaining events (channel closed when event_tx dropped by function return)
+    drain.await.ok();
 
     // Restore preserved exit data
     for server in &mut servers {
@@ -1498,9 +1533,8 @@ async fn refresh_subscription(
 ///     Re-tests EXISTING servers to keep latency/exit-IP fresh.
 ///     Cadence: `auto_test_interval`.
 ///
-/// `process_servers_inner` is reused — it already skips batch-test for
-/// servers with fresh positive cache, so testing is cheap when servers
-/// haven't changed.
+/// Re-tests existing servers via Clash API ping. Batch test is skipped — only
+/// pings are refreshed. Servers with fresh positive cache keep their data.
 ///
 /// Updates `last_tested` (not `updated_at`) so the test timer doesn't
 /// immediately re-test after a refresh.
@@ -1587,40 +1621,98 @@ async fn test_servers(
         cache.as_deref(),
         Some(&app),
         &id,
+        app.try_state::<crate::db::DbPool>().as_deref(),
     )
     .await;
 
     // Pre-filter: servers without ping → negative cache, remove from profile
     // If testing engine returned 0 pings, skip filtering (transient failure).
+    // If more than 50% of servers are dead, it's likely an engine failure —
+    // restore old pings instead of burning the profile.
     let mut tested: Vec<crate::proxy::ServerProfile> = servers;
-    let test_cache = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>();
     if !pings.is_empty() {
-        if let Some(cache) = test_cache.as_ref() {
-            let mut dead_ids = std::collections::HashSet::new();
-            for server in &tested {
-                if pings.contains_key(&server.id) {
-                    continue;
+        let dead: Vec<(String, String)> = tested.iter()
+            .filter(|s| !pings.contains_key(&s.id))
+            .map(|s| (s.id.clone(), "Clash API test: no ping".into()))
+            .collect();
+        // Exclude servers with active negative cache TTL — clash_api_test
+        // skipped them, they are NOT dead, just not due for retest yet.
+        let ttl_exempt: std::collections::HashSet<String> = if let Some(db) = app.try_state::<crate::db::DbPool>().as_deref() {
+            let dead_ids: Vec<String> = dead.iter().map(|(id, _)| id.clone()).collect();
+            let r: Vec<String> = db.call(move |conn| -> Result<Vec<String>, tokio_rusqlite::Error<rusqlite::Error>> {
+                let mut stmt = conn.prepare(
+                    "SELECT server_hash FROM server_cache WHERE status = 'negative'"
+                )?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                Ok(rows.collect::<Result<Vec<_>, _>>().unwrap_or_default())
+            }).await.unwrap_or_default();
+            let exempt: std::collections::HashSet<String> = dead_ids.into_iter().filter(|sid| r.contains(sid)).collect();
+            exempt
+        } else { std::collections::HashSet::new() };
+        let dead: Vec<(String, String)> = dead.into_iter()
+            .filter(|(id, _)| !ttl_exempt.contains(id))
+            .collect();
+        // Guard: if >50% dead, it's engine failure — keep old pings
+        if dead.len() > tested.len() / 2 {
+            tracing::warn!(target: "cache", "Auto-test engine failure: {}/{} servers dead — restoring old pings",
+                dead.len(), tested.len());
+            for server in &mut tested {
+                if let Some(old) = old_ping.get(&server.id) {
+                    server.ping_ms = *old;
                 }
-                dead_ids.insert(server.id.clone());
             }
-            if !dead_ids.is_empty() {
-                for sid in &dead_ids {
-                    cache
-                        .update_negative(sid, "Clash API test: no ping".to_string())
-                        .await;
+        } else {
+            if let Some(db) = app.try_state::<crate::db::DbPool>().as_deref() {
+                let now = chrono::Utc::now().timestamp();
+                // Previously-worked servers get tested_at = 0 (sentinel):
+                // TTL filter in clash_api_test will NOT skip them until
+                // auto-refresh normalizes tested_at to a real timestamp.
+                let dead_records: Vec<(String, String, i64)> = dead.iter()
+                    .map(|(id, reason)| {
+                        let ts = if old_ping.get(id).and_then(|o| *o).is_some() {
+                            0i64 // previously worked — retest every cycle
+                        } else {
+                            now
+                        };
+                        (id.clone(), reason.clone(), ts)
+                    })
+                    .collect();
+                let dead_clone = dead_records.clone();
+                let _ = db.call(move |conn| -> Result<(), tokio_rusqlite::Error<rusqlite::Error>> {
+                    let mut stmt = conn.prepare(
+                        "INSERT OR REPLACE INTO server_cache
+                         (server_hash, status, tested_at, reason, consecutive_failures, first_failure_at, last_failure_at)
+                         VALUES (?1, 'negative', ?2, ?3, 1, ?2, ?2)"
+                    )?;
+                    for (sid, reason, ts) in &dead_clone {
+                        stmt.execute(rusqlite::params![sid, ts, reason])?;
+                    }
+                    Ok(())
+                }).await;
+            }
+            // Also update in-memory cache for the caller
+            if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+                for (sid, reason) in &dead {
+                    cache.update_negative(sid, reason.clone()).await;
                 }
-                cache.save_to_disk().await;
-                let before = tested.len();
-                tested.retain(|s| !dead_ids.contains(&s.id));
-                let n = before - tested.len();
-                log(
-                    &app,
-                    &logger,
-                    LogLevel::Info,
-                    LogSource::Cache,
-                    format!("Removed {n} dead server(s) via Clash API test"),
-                );
             }
+            // Keep dead servers in the profile with ping_ms = None
+            // so the test engine hash stays stable across cycles.
+            // Negative cache TTL (exponential backoff) governs retest timing.
+            let dead_ids: std::collections::HashSet<String> = dead.iter().map(|(id, _)| id.clone()).collect();
+            let n = dead.len();
+            for s in &mut tested {
+                if dead_ids.contains(&s.id) {
+                    s.ping_ms = None;
+                }
+            }
+            log(
+                &app,
+                &logger,
+                LogLevel::Info,
+                LogSource::Cache,
+                format!("Marked {n} servers as dead (kept in profile, TTL backoff)"),
+            );
         }
     } else {
         log(
@@ -2661,7 +2753,7 @@ async fn import_subscription_content(
     // Use the profile_id passed by the frontend so refresh-progress
     // events carry the REAL profile ID — the frontend can then attach
     // progress to the pending profile in its state.
-    let servers = crate::profile::process_servers(&app, servers, &profile_id).await;
+    let servers = crate::profile::process_servers_incremental_from_app(&app, servers, &profile_id).await;
 
     // Persist cache to disk so batch-test results survive app restart.
     if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
@@ -2761,7 +2853,7 @@ async fn import_subscription_file(
     // Pre-generate profile_id so refresh-progress events emitted during
     // process_servers carry the REAL profile ID.
     let profile_id = uuid::Uuid::new_v4().to_string();
-    let servers = crate::profile::process_servers(&app, servers, &profile_id).await;
+    let servers = crate::profile::process_servers_incremental_from_app(&app, servers, &profile_id).await;
     let server_count = servers.len();
 
     // Persist cache to disk so batch-test results survive app restart.

@@ -88,7 +88,8 @@ pub fn emit_proxy_progress(app_handle: &AppHandle, phase: &str, message: impl In
 ///
 /// Fields:
 /// - `phase`: "init" | "cache" | "preflight" | "batch" | "error"
-/// - `static_data`: populated only at phase="init" (protocol, server, port, flag)
+/// - `static_data`: server metadata (protocol, server, port, originalName, flag, countryName).
+///   Populated at phase="init" and phase="batch". At other phases may be None.
 /// - Dynamic metrics: ping_ms, exit_* fields, behind_cdn
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,7 +98,7 @@ pub struct ServerTestedEvent {
     /// Phase identifier: "init" | "cache" | "preflight" | "batch" | "error"
     pub phase: String,
     pub server_id: String,
-    /// Static data — only populated when phase="init"
+    /// Static data — populated at phase="init" and phase="batch"
     pub static_data: Option<ServerStaticData>,
     /// Dynamic metrics — populated in cache/preflight/batch phases
     pub ping_ms: Option<u64>,
@@ -122,7 +123,61 @@ pub struct ServerStaticData {
 }
 
 pub fn emit_server_tested(app: &AppHandle, event: ServerTestedEvent) {
-    let _ = app.emit("server-tested", event);
+    let _ = app.emit("server-tested", &event);
+    // Concise summary for readable logs
+    match event.phase.as_str() {
+        "init" => {
+            if let Some(sd) = &event.static_data {
+                tracing::info!(
+                    target: "events",
+                    "server-tested [{}/{}] phase=init — {} {}:{}",
+                    &event.profile_id[..8], &event.server_id[..8],
+                    sd.protocol, sd.server, sd.port,
+                );
+            }
+        }
+        "cache" => {
+            if let Some(ping) = event.ping_ms {
+                tracing::info!(
+                    target: "events",
+                    "server-tested [{}/{}] phase=cache — ping={}ms",
+                    &event.profile_id[..8], &event.server_id[..8], ping,
+                );
+            }
+        }
+        "batch" => {
+            let exit = match (&event.exit_server, event.behind_cdn) {
+                (Some(ip), _) => format!("outlet={}", ip),
+                (None, Some(true)) => "CDN (no outlet)".into(),
+                (None, _) => "outlet=—".into(),
+            };
+            if let Some(ping) = event.ping_ms {
+                tracing::info!(
+                    target: "events",
+                    "server-tested [{}/{}] phase=batch — ping={}ms {}",
+                    &event.profile_id[..8], &event.server_id[..8], ping, exit,
+                );
+            }
+        }
+        _ => {
+            // error, preflight — concise fallback
+            if let Some(err) = &event.error {
+                tracing::info!(
+                    target: "events",
+                    "server-tested [{}/{}] phase={} — error: {}",
+                    &event.profile_id[..8], &event.server_id[..8],
+                    event.phase, err,
+                );
+            } else if let Some(ping) = event.ping_ms {
+                tracing::info!(
+                    target: "events",
+                    "server-tested [{}/{}] phase={} — ping={}ms",
+                    &event.profile_id[..8], &event.server_id[..8],
+                    event.phase, ping,
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

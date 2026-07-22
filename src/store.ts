@@ -154,6 +154,7 @@ interface ProxyStore {
   clearLogs: () => void;
   completeOnboarding: () => void;
   acceptTerms: () => void;
+  isRefreshing: (profileId: string) => boolean;
   setSpeeds: (speeds: { up: number; down: number }) => void;
   toggleConnection: () => Promise<void>;
   initListener: () => Promise<() => void>;
@@ -490,7 +491,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         const newProfiles = stateSnap.profiles.map((p) =>
           p.id === profileId ? { ...p, ...updated } : p,
         );
-        const allServers = newProfiles.flatMap((p) => p.servers);
+        const allServers = newProfiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
 
         const newActive = await getBestServer(
           allServers,
@@ -514,7 +515,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
           const { [profileId]: _rp, ...remainingProgress } = state.refreshProgress;
           return {
             profiles: remainingProfiles,
-            servers: remainingProfiles.flatMap((p) => p.servers),
+            servers: remainingProfiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity)),
             _refreshingIds: state._refreshingIds.filter((rid) => rid !== profileId),
             refreshProgress: remainingProgress,
           };
@@ -569,7 +570,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         const newProfiles = stateSnap.profiles.map((p) =>
           p.id === profileId ? { ...p, ...updated } : p,
         );
-        const allServers = newProfiles.flatMap((p) => p.servers);
+        const allServers = newProfiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
 
         const newActive = await getBestServer(
           allServers,
@@ -592,7 +593,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
           const { [profileId]: _rp, ...remainingProgress } = state.refreshProgress;
           return {
             profiles: remainingProfiles,
-            servers: remainingProfiles.flatMap((p) => p.servers),
+            servers: remainingProfiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity)),
             _refreshingIds: state._refreshingIds.filter((rid) => rid !== profileId),
             refreshProgress: remainingProgress,
           };
@@ -656,7 +657,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         const newProfilesForSelection = stateSnap.profiles.map((p) =>
           p.id === id ? { ...p, ...updated } : p,
         );
-        const allServersForSelection = newProfilesForSelection.flatMap((p) => p.servers);
+        const allServersForSelection = newProfilesForSelection.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
         const newActiveServer = await getBestServer(
           allServersForSelection,
           stateSnap.settings.autoConnectFastest,
@@ -665,7 +666,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
 
         set((state) => {
           const newProfiles = state.profiles.map((p) => (p.id === id ? { ...p, ...updated } : p));
-          const allServers = newProfiles.flatMap((p) => p.servers);
+          const allServers = newProfiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
           const activeStillValid = newActiveServer
             ? allServers.some((s) => s.id === newActiveServer.id)
             : false;
@@ -690,13 +691,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         });
         throw e;
       } finally {
-        set((state) => {
-          const { [id]: _rp, ...remainingProgress } = state.refreshProgress;
-          return {
-            _refreshingIds: state._refreshingIds.filter((rid) => rid !== id),
-            refreshProgress: remainingProgress,
-          };
-        });
+        set((state) => ({
+          _refreshingIds: state._refreshingIds.filter((rid) => rid !== id),
+        }));
       }
     },
 
@@ -717,7 +714,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         set((state) => {
           const { [id]: _rp, ...remainingProgress } = state.refreshProgress;
           const newProfiles = state.profiles.map((p) => (p.id === id ? { ...p, ...updated } : p));
-          const allServers = newProfiles.flatMap((p) => p.servers);
+          const allServers = newProfiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
           return { profiles: newProfiles, servers: allServers, refreshProgress: remainingProgress };
         });
       } catch (e) {
@@ -742,7 +739,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
       try {
         const results = await invoke<RustSubscriptionProfile[]>('get_subscriptions');
         const profiles = results.map(mapRustProfile);
-        const allServers = profiles.flatMap((p) => p.servers);
+        const allServers = profiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
         const state = get();
 
         const newActive = await getBestServer(
@@ -901,6 +898,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
       set({ hasAcceptedTerms: true });
       get().addLog('Terms of service accepted', 'success', 'system');
     },
+    isRefreshing: (profileId) => get()._refreshingIds.includes(profileId),
     setSpeeds: (speeds) => {
       set({ speeds });
     },
@@ -1232,36 +1230,54 @@ export const useAppStore = create<ProxyStore>((set, get) => {
           // Build a Map from current state.servers
           const existing = new Map(state.servers.map((s) => [s.id, s]));
 
-          // Process all buffered events
+          // Process all buffered events — each event carries complete server data
           for (const e of entries) {
-            if (e.phase === 'init' && e.staticData) {
-              const newServer: Server = {
+            // Build server entry from whatever data the event carries
+            const staticInfo = e.staticData
+              ? {
+                  name: e.staticData.originalName || e.staticData.server + ':' + String(e.staticData.port),
+                  protocol: e.staticData.protocol,
+                  server: e.staticData.server,
+                  port: e.staticData.port,
+                  // Only include flag/countryName when the event actually has them.
+                  // Spreading `undefined` over existing data would clear the correct
+                  // GeoIP that was already saved from a previous refresh.
+                  ...(e.staticData.flag != null && { flag: e.staticData.flag }),
+                  ...(e.staticData.countryName != null && { countryName: e.staticData.countryName }),
+                }
+              : undefined;
+
+            const s = existing.get(e.serverId);
+            if (s) {
+              // Update existing server with new data
+              existing.set(e.serverId, {
+                ...s,
+                ...(staticInfo ?? {}),
+                ...(e.pingMs !== null && { ping: e.pingMs }),
+                ...(e.exitServer != null && { exitServer: e.exitServer }),
+                ...(e.exitFlag != null && { exitFlag: e.exitFlag }),
+                ...(e.exitCountryName != null && { exitCountryName: e.exitCountryName }),
+                ...(e.exitCityName != null && { exitCityName: e.exitCityName }),
+                ...(e.behindCdn !== null && { behindCdn: e.behindCdn }),
+              });
+            } else if (e.staticData && e.phase !== 'init') {
+              // Only create a server entry when the event carries GeoIP data
+              // (flag, countryName). Phase 1 cache events are emitted BEFORE
+              // GeoIP enrichment — they have ping/exit from cache but no
+              // flag/country. The re-emission after Phase 1.5 (or batch Phase 3)
+              // carries the complete data. Showing servers without GeoIP would
+              // make the UI flicker: raw entry → enriched → final invoke result.
+              if (e.staticData.flag == null && e.staticData.countryName == null) continue;
+              // Create new server from event data.
+              existing.set(e.serverId, {
                 id: e.serverId,
-                name:
-                  e.staticData.originalName ||
-                  e.staticData.server + ':' + String(e.staticData.port),
-                protocol: e.staticData.protocol,
-                server: e.staticData.server,
-                port: e.staticData.port,
-                flag: e.staticData.flag ?? undefined,
-                countryName: e.staticData.countryName ?? undefined,
-                ping: undefined,
-                behindCdn: false,
-              };
-              existing.set(e.serverId, newServer);
-            } else {
-              const s = existing.get(e.serverId);
-              if (s) {
-                existing.set(e.serverId, {
-                  ...s,
-                  ...(e.pingMs !== null && { ping: e.pingMs }),
-                  ...(e.exitServer != null && { exitServer: e.exitServer }),
-                  ...(e.exitFlag != null && { exitFlag: e.exitFlag }),
-                  ...(e.exitCountryName != null && { exitCountryName: e.exitCountryName }),
-                  ...(e.exitCityName != null && { exitCityName: e.exitCityName }),
-                  ...(e.behindCdn !== null && { behindCdn: e.behindCdn }),
-                });
-              }
+                name: staticInfo?.name ?? e.serverId,
+                ...(staticInfo ?? {}),
+                ping: e.pingMs ?? undefined,
+                exitServer: e.exitServer ?? undefined,
+                exitFlag: e.exitFlag ?? undefined,
+                behindCdn: e.behindCdn ?? false,
+              });
             }
           }
 
@@ -1283,7 +1299,11 @@ export const useAppStore = create<ProxyStore>((set, get) => {
               profileUpdates.set(e.profileId, bucket);
             }
             const updated = existing.get(e.serverId);
-            if (updated) {
+            // Don't count init-phase servers in profile.servers — they haven't
+            // been tested yet. Only servers with test results (cache/preflight/batch)
+            // appear in the profile count during refresh. The final count is set
+            // by the invoke result (refreshProfile → set()).
+            if (updated && e.phase !== 'init') {
               bucket.set(e.serverId, updated);
             }
           }

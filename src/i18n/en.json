@@ -208,6 +208,7 @@
   "ipinfoDownloadFailed": "IPinfo database download failed",
   "testingServers": "Testing",
   "testingServersDesc": "Testing servers from the subscription. The first available nodes will appear here automatically.",
+  "updatingServers": "Updating",
   "startingSingbox": "Starting sing-box",
   "acquiringPorts": "Acquiring ports",
   "cached": "Cached",

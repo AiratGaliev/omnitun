@@ -280,15 +280,9 @@ const ProfileItem = memo(function ProfileItem({
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-medium text-emerald-400 flex items-center gap-1.5">
                       <Loader2 size={12} className="animate-spin" />
-                      {progress.phase === 'testing'
-                        ? `${t('testingServers')}: ${String(progress.tested)}/${String(progress.total)} (${String(Math.round((progress.tested / Math.max(1, progress.total)) * 100))}%)${progress.cache_hits > 0 ? ` · +${String(progress.cache_hits)} ${t('cached').toLowerCase()}` : ''}`
-                        : progress.phase === 'ping'
-                          ? `Ping: ${String(progress.tested)}/${String(progress.total)} (${String(Math.round((progress.tested / Math.max(1, progress.total)) * 100))}%)`
-                          : progress.phase === 'singbox_starting'
-                            ? t('startingSingbox')
-                            : progress.phase === 'acquiring_ports'
-                              ? t('acquiringPorts')
-                              : progress.phase}
+                      {useAppStore.getState().isRefreshing(progress.profile_id)
+                        ? `${t('updatingServers')}: ${String(progress.tested)}/${String(progress.total)} (${String(Math.round((progress.tested / Math.max(1, progress.total)) * 100))}%)${progress.cache_hits > 0 ? ` · +${String(progress.cache_hits)} ${t('cached').toLowerCase()}` : ''}`
+                        : `${t('testingServers')}: ${String(progress.tested)}/${String(progress.total)} (${String(Math.round((progress.tested / Math.max(1, progress.total)) * 100))}%)${progress.cache_hits > 0 ? ` · +${String(progress.cache_hits)} ${t('cached').toLowerCase()}` : ''}`}
                     </span>
                     <span className="text-[11px] text-zinc-500">
                       {progress.cache_hits > 0 && (

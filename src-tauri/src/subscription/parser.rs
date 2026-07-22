@@ -1,13 +1,5 @@
-// FIXED:
-//   - parse_http now correctly stores `username` field (was hardcoded to None,
-//     which broke HTTP proxy servers with authentication).
-//   - parse_socks already stored `username` correctly (verified).
-//
-// All other functions are unchanged from the original codebase.
-
 use crate::proxy::{ProxyError, ServerProfile};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 /// Replace the random UUID with a deterministic hash of server fields.
 /// This ensures the same subscription data always produces the same
@@ -23,9 +15,9 @@ fn determinize_id(s: &mut ServerProfile) {
         s.method.as_deref().unwrap_or(""),
         s.transport_type.as_deref().unwrap_or(""),
     );
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    s.id = format!("{:016x}", hasher.finish());
+    // Stable polynomial hash ensures same server = same ID across sessions (unlike DefaultHasher which uses random keys per process).
+    let hash = key.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+    s.id = format!("{:016x}", hash);
 }
 
 pub fn parse_subscription(data: &str) -> Result<Vec<ServerProfile>, ProxyError> {
@@ -664,12 +656,8 @@ fn parse_socks(uri: &str) -> Option<ServerProfile> {
 fn parse_http(uri: &str) -> Option<ServerProfile> {
     // http://user:pass@server:port#Remark
     // https://user:pass@server:port#Remark
-    //
-    // FIXED: previously this function extracted `user` from the URI but never
-    // stored it in the ServerProfile — the `username` field was hardcoded to
-    // `None`. This silently broke HTTP proxy servers that require username/
-    // password authentication: sing-box would emit a `password` field without
-    // a matching `username`, causing the outbound to fail authentication.
+    // HTTP proxy requires `username` field — sing-box rejects outbound
+    // with only `password` but no matching `username`.
     let stripped = uri
         .strip_prefix("http://")
         .or_else(|| uri.strip_prefix("https://"))?;
@@ -1074,5 +1062,30 @@ mod tests {
         );
         assert_eq!(p.wg_mtu, Some(1280), "wg_mtu MUST be stored");
         assert_eq!(p.wg_keepalive, Some(25), "wg_keepalive MUST be stored");
+    }
+
+    #[test]
+    fn test_polynomial_hash_stable() {
+        let uri = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.2:8443?flow=xtls-rprx-vision&sni=127.0.0.2#Test";
+        let mut p1 = parse_uri(uri).unwrap();
+        let mut p2 = parse_uri(uri).unwrap();
+        determinize_id(&mut p1);
+        determinize_id(&mut p2);
+        assert_eq!(p1.id, p2.id, "same server data must produce same hash");
+        let uri3 = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.3:8443?flow=xtls-rprx-vision&sni=127.0.0.3#Test";
+        let mut p3 = parse_uri(uri3).unwrap();
+        determinize_id(&mut p3);
+        assert_ne!(p1.id, p3.id, "different servers must produce different hashes");
+        assert_eq!(p1.id.len(), 16, "hash must be 16 hex chars");
+        assert!(p1.id.chars().all(|c| c.is_ascii_hexdigit()), "hash must be hex");
+    }
+
+    #[test]
+    fn test_polynomial_hash_not_uuid() {
+        let uri = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.2:8443?flow=xtls-rprx-vision&sni=127.0.0.2#Test";
+        let mut p = parse_uri(uri).unwrap();
+        determinize_id(&mut p);
+        assert_eq!(p.id.len(), 16, "polynomial hash must be 16 hex chars");
+        assert!(!p.id.contains('-'), "must not contain dashes (UUID would)");
     }
 }

@@ -1,7 +1,4 @@
-// FIXED:
-//   - Proper PID tracking for elevated processes (find sing-box.exe instead of cmd.exe)
-//   - sing-box stdout/stderr redirected to log file for crash diagnostics
-//   - DNS migrated to sing-box 1.12+ format — deprecated env vars removed
+// PID tracking for elevated processes + stdout/stderr redirected to log file.
 //
 // PID file: stores the main proxy's PID in `<data_dir>/singbox.pid` so that
 // stale processes from a previous (killed) session are cleaned up on next
