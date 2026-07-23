@@ -16,8 +16,8 @@
 //! Tauri path once the MCP path is validated in production.
 
 use crate::proxy::{
-    config, process::ProcessManager, ErrorCode, ProxyError, ServerProfile,
-    ACTIVE_SERVER_ID, LAST_PROFILE, LastConnection,
+    config, process::ProcessManager, ErrorCode, LastConnection, ProxyError, ServerProfile,
+    ACTIVE_SERVER_ID, LAST_PROFILE,
 };
 use crate::settings::AppSettings;
 use std::path::PathBuf;
@@ -108,17 +108,13 @@ pub async fn start_proxy_core(params: StartProxyParams) -> Result<StartedProxy, 
 
     // 6. Set ACTIVE_SERVER_ID to the primary server (all_servers[0]).
     {
-        let mut active = ACTIVE_SERVER_ID
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut active = ACTIVE_SERVER_ID.lock().unwrap_or_else(|e| e.into_inner());
         *active = Some(all_servers[0].id.clone());
     }
 
     // 7. Set LAST_PROFILE for watchdog auto-reconnect.
     {
-        let mut last = LAST_PROFILE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut last = LAST_PROFILE.lock().unwrap_or_else(|e| e.into_inner());
         *last = Some(LastConnection {
             all_servers: all_servers.clone(),
             routing_mode: routing_mode.clone(),
@@ -171,9 +167,7 @@ async fn wait_for_proxy_ready_local(pid: u32, proxy_port: u16) -> Result<u32, Pr
     loop {
         attempts += 1;
 
-        if crate::proxy::CONNECTION_CANCELLING
-            .load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if crate::proxy::CONNECTION_CANCELLING.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(ProxyError::process(
                 ErrorCode::ProcessNotReachable,
                 "Connection cancelled by user",
@@ -208,8 +202,10 @@ async fn wait_for_proxy_ready_local(pid: u32, proxy_port: u16) -> Result<u32, Pr
                     return Ok(attempts);
                 }
                 let probe_client = match reqwest::Client::builder()
-                    .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}"))
-                        .map_err(|e| format!("probe proxy build error: {e}"))?)
+                    .proxy(
+                        reqwest::Proxy::all(format!("http://127.0.0.1:{proxy_port}"))
+                            .map_err(|e| format!("probe proxy build error: {e}"))?,
+                    )
                     .timeout(std::time::Duration::from_millis(800))
                     .build()
                 {
@@ -221,7 +217,8 @@ async fn wait_for_proxy_ready_local(pid: u32, proxy_port: u16) -> Result<u32, Pr
                 };
                 match probe_client
                     .get("http://cp.cloudflare.com/generate_204")
-                    .send().await
+                    .send()
+                    .await
                 {
                     Ok(resp) if resp.status().is_success() => {
                         tracing::info!(target: "proxy", "Proxy ready after {attempts} attempt(s) (TCP+HTTP)");

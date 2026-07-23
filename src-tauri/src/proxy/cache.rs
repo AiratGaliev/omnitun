@@ -593,6 +593,18 @@ impl ServerCache {
         None
     }
 
+    /// Get any positive entry from the persistent store, regardless of freshness.
+    /// Used as fallback when batch test fails — stale data is better than no data.
+    pub async fn get_positive(&self, server_id: &str) -> Option<PositiveResult> {
+        let store = self.store.read().await;
+        match store.get(server_id) {
+            Some(entry) if matches!(entry.status, CacheStatus::Positive { .. }) => {
+                entry.to_positive()
+            }
+            _ => None,
+        }
+    }
+
     /// Batch-test all servers that passed ping. Fills the cache
     /// and returns results.
     ///
@@ -707,9 +719,9 @@ impl ServerCache {
                 // и нестабильный (CDN anycast, Workers, WARP). Clash API preflight
                 // уже подтвердил базовую связность, чего достаточно для CDN-узлов.
                 cdn_skip_count += 1;
-                if let Some(l) = &logger {
+                if let (Some(l), Some(app)) = (&logger, &app_ref) {
                     log(
-                        app_ref.unwrap(),
+                        app,
                         l,
                         LogLevel::Info,
                         LogSource::Cache,
@@ -740,8 +752,8 @@ impl ServerCache {
             }
         }
 
-        if let Some(l) = &logger {
-            log(app_ref.unwrap(), l, LogLevel::Info, LogSource::Cache,
+        if let (Some(l), Some(app)) = (&logger, &app_ref) {
+            log(app, l, LogLevel::Info, LogSource::Cache,
                 format!("[Cache] batch_test: {total} total, {cache_hits} cache hits, {cdn_skip_count} CDN skip, {queued} queued"));
         }
 
@@ -765,9 +777,9 @@ impl ServerCache {
         while let Some(res) = set.join_next().await {
             if let Some(ref token) = cancel {
                 if token.is_cancelled() {
-                    if let Some(l) = &logger {
+                    if let (Some(l), Some(app)) = (&logger, &app_ref) {
                         log(
-                            app_ref.unwrap(),
+                            app,
                             l,
                             LogLevel::Info,
                             LogSource::Cache,
@@ -797,15 +809,6 @@ impl ServerCache {
                             s.exit_flag = positive.exit_flag.clone();
                             s.exit_country_name = positive.exit_country.clone();
                             s.exit_city_name = positive.exit_city.clone();
-                            // Fallback: if batch test couldn't determine outlet IP,
-                            // use entry server IP (comment in db/mod.rs v3 migration:
-                            // "If behind_cdn = 0, exit_server must be set (either from
-                            // batch test or fallback to entry server)").
-                            if s.exit_server.is_none() {
-                                // server field may be hostname, but we already
-                                // have the entry IP from the server struct.
-                                s.exit_server = Some(s.server.clone());
-                            }
                         }
                         // Emit per-server event for streaming UI updates.
                         if let Some(app) = app_ref {
@@ -829,9 +832,9 @@ impl ServerCache {
                     }
                     Ok(Err(e)) => {
                         failed += 1;
-                        if let Some(l) = &logger {
+                        if let (Some(l), Some(app)) = (&logger, &app_ref) {
                             log(
-                                app_ref.unwrap(),
+                                app,
                                 l,
                                 LogLevel::Warning,
                                 LogSource::Cache,
@@ -859,9 +862,9 @@ impl ServerCache {
                     }
                     Err(_) => {
                         failed += 1;
-                        if let Some(l) = &logger {
+                        if let (Some(l), Some(app)) = (&logger, &app_ref) {
                             log(
-                                app_ref.unwrap(),
+                                app,
                                 l,
                                 LogLevel::Error,
                                 LogSource::Cache,
@@ -894,8 +897,9 @@ impl ServerCache {
                     result_slots[idx] = Some(s);
                 }
 
+                if let Some(app) = app_ref.as_ref() {
                 crate::events::emit_refresh_progress(
-                    app_ref.unwrap(),
+                    app,
                     crate::events::RefreshProgress {
                         profile_id: profile_id.to_string(),
                         total,
@@ -908,15 +912,16 @@ impl ServerCache {
                         last_tested: None,
                     },
                 );
+                }
             } else {
                 // JoinError: task panicked or was cancelled — fill slot with TCP-ping data
                 // to avoid panicking on the final .unwrap()
                 failed += 1;
                 if use_tracing {
                     tracing::warn!(target: "cache", "[Cache] batch_test task panicked or was cancelled");
-                } else if let Some(l) = &logger {
+                } else if let (Some(l), Some(app)) = (&logger, &app_ref) {
                     log(
-                        app_ref.unwrap(),
+                        app,
                         l,
                         LogLevel::Warning,
                         LogSource::Cache,
@@ -952,9 +957,9 @@ impl ServerCache {
         if use_tracing {
             tracing::info!(target: "cache",
                 "[Cache] batch_test done: {completed}/{queued} completed, {failed} failed");
-        } else if let Some(l) = &logger {
+        } else if let (Some(l), Some(app)) = (&logger, &app_ref) {
             log(
-                app_ref.unwrap(),
+                app,
                 l,
                 LogLevel::Info,
                 LogSource::Cache,
@@ -1043,33 +1048,11 @@ impl ServerCache {
         }
     }
 
-    /// Insert a negative entry into the in-memory store (keeps get_cache_stats
-    /// in sync with SQLite after manual test_profile writes).
-    pub async fn add_negative(&self, server_id: &str, reason: &str) {
-        let mut store = self.store.write().await;
-        let now = chrono::Utc::now().timestamp();
-        store.insert(server_id.to_string(), CacheEntry {
-            server_id: server_id.to_string(),
-            last_updated: now,
-            status: CacheStatus::Negative {
-                consecutive_failures: 1,
-                first_failure_at: now,
-                last_failure_at: now,
-                previously_worked: false,
-                reason: reason.to_string(),
-            },
-        });
-    }
-
     /// Persist the current store to the `server_cache` SQLite table.
     pub async fn save_to_disk(&self) {
         let store = self.store.read().await;
         let conn = self.sync_conn.lock().unwrap();
         let now = chrono::Utc::now().timestamp();
-        if let Err(e) = conn.execute("DELETE FROM server_cache", []) {
-            tracing::error!(target: "cache", "Failed to clear cache in SQLite: {e}");
-            return;
-        }
         for (_key, entry) in store.iter() {
             let (
                 status,
@@ -1471,7 +1454,18 @@ pub async fn batch_test_incremental(
                     .await;
                 negatives.push((server_id, e));
             }
-            _ => {}
+            Err(join_err) => {
+                tracing::warn!(
+                    target: "cache",
+                    "[batch_test_incremental] JoinSet task panicked or JoinError: {join_err}",
+                );
+            }
+            _ => {
+                tracing::warn!(
+                    target: "cache",
+                    "[batch_test_incremental] oneshot receiver dropped — batch worker may have crashed",
+                );
+            }
         }
 
         // Flush every 50 results

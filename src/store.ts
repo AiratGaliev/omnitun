@@ -491,7 +491,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         const newProfiles = stateSnap.profiles.map((p) =>
           p.id === profileId ? { ...p, ...updated } : p,
         );
-        const allServers = newProfiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
+        const allServers = newProfiles
+          .flatMap((p) => p.servers)
+          .sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
 
         const newActive = await getBestServer(
           allServers,
@@ -515,7 +517,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
           const { [profileId]: _rp, ...remainingProgress } = state.refreshProgress;
           return {
             profiles: remainingProfiles,
-            servers: remainingProfiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity)),
+            servers: remainingProfiles
+              .flatMap((p) => p.servers)
+              .sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity)),
             _refreshingIds: state._refreshingIds.filter((rid) => rid !== profileId),
             refreshProgress: remainingProgress,
           };
@@ -570,7 +574,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         const newProfiles = stateSnap.profiles.map((p) =>
           p.id === profileId ? { ...p, ...updated } : p,
         );
-        const allServers = newProfiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
+        const allServers = newProfiles
+          .flatMap((p) => p.servers)
+          .sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
 
         const newActive = await getBestServer(
           allServers,
@@ -593,7 +599,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
           const { [profileId]: _rp, ...remainingProgress } = state.refreshProgress;
           return {
             profiles: remainingProfiles,
-            servers: remainingProfiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity)),
+            servers: remainingProfiles
+              .flatMap((p) => p.servers)
+              .sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity)),
             _refreshingIds: state._refreshingIds.filter((rid) => rid !== profileId),
             refreshProgress: remainingProgress,
           };
@@ -657,7 +665,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         const newProfilesForSelection = stateSnap.profiles.map((p) =>
           p.id === id ? { ...p, ...updated } : p,
         );
-        const allServersForSelection = newProfilesForSelection.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
+        const allServersForSelection = newProfilesForSelection
+          .flatMap((p) => p.servers)
+          .sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
         const newActiveServer = await getBestServer(
           allServersForSelection,
           stateSnap.settings.autoConnectFastest,
@@ -666,7 +676,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
 
         set((state) => {
           const newProfiles = state.profiles.map((p) => (p.id === id ? { ...p, ...updated } : p));
-          const allServers = newProfiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
+          const allServers = newProfiles
+            .flatMap((p) => p.servers)
+            .sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
           const activeStillValid = newActiveServer
             ? allServers.some((s) => s.id === newActiveServer.id)
             : false;
@@ -714,7 +726,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
         set((state) => {
           const { [id]: _rp, ...remainingProgress } = state.refreshProgress;
           const newProfiles = state.profiles.map((p) => (p.id === id ? { ...p, ...updated } : p));
-          const allServers = newProfiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
+          const allServers = newProfiles
+            .flatMap((p) => p.servers)
+            .sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
           return { profiles: newProfiles, servers: allServers, refreshProgress: remainingProgress };
         });
       } catch (e) {
@@ -739,7 +753,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
       try {
         const results = await invoke<RustSubscriptionProfile[]>('get_subscriptions');
         const profiles = results.map(mapRustProfile);
-        const allServers = profiles.flatMap((p) => p.servers).sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
+        const allServers = profiles
+          .flatMap((p) => p.servers)
+          .sort((a, b) => (a.ping ?? Infinity) - (b.ping ?? Infinity));
         const state = get();
 
         const newActive = await getBestServer(
@@ -1235,7 +1251,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
             // Build server entry from whatever data the event carries
             const staticInfo = e.staticData
               ? {
-                  name: e.staticData.originalName || e.staticData.server + ':' + String(e.staticData.port),
+                  name:
+                    e.staticData.originalName ||
+                    e.staticData.server + ':' + String(e.staticData.port),
                   protocol: e.staticData.protocol,
                   server: e.staticData.server,
                   port: e.staticData.port,
@@ -1243,7 +1261,9 @@ export const useAppStore = create<ProxyStore>((set, get) => {
                   // Spreading `undefined` over existing data would clear the correct
                   // GeoIP that was already saved from a previous refresh.
                   ...(e.staticData.flag != null && { flag: e.staticData.flag }),
-                  ...(e.staticData.countryName != null && { countryName: e.staticData.countryName }),
+                  ...(e.staticData.countryName != null && {
+                    countryName: e.staticData.countryName,
+                  }),
                 }
               : undefined;
 

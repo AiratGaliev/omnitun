@@ -59,7 +59,22 @@ fn binary_name() -> &'static str {
 
 async fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
     std::fs::create_dir_all(&data_dir).map_err(|e| format!("data dir: {e}"))?;
-    let logger = Arc::new(Mutex::new(Logger::new(1000, None)));
+
+    // Set up tracing (JSONL file) so pipeline logs are captured
+    let log_dir = data_dir.join("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let (log_rx_tmp, log_file_path) = crate::logging::setup_logging(&log_dir);
+    let mut log_rx = log_rx_tmp;
+    // Spawn the broadcast receiver to prevent channel buildup, matching
+    // the Tauri app's pattern. Pipeline logs go through tracing → JSONL file.
+    tokio::spawn(async move {
+        while let Ok(_entry) = log_rx.recv().await {
+            // MCP server doesn't have Tauri events, but we consume the
+            // broadcast to keep the channel from blocking.
+        }
+    });
+
+    let logger = Arc::new(Mutex::new(Logger::new(1000, Some(log_file_path))));
     let settings_mgr = SettingsManager::new(data_dir.clone());
     let settings = settings_mgr.load().unwrap_or_default();
     crate::proxy::batcher::set_configured_test_url(&settings.test_url, settings.test_use_tls);
@@ -450,6 +465,17 @@ impl Handler {
         let url_owned = url.to_string();
         let profile_id = uuid::Uuid::new_v4().to_string();
 
+        // Check for duplicate URL before fetching
+        {
+            let state = self.state.lock().await;
+            if state.profile_mgr.list().iter().any(|p| p.url == url_owned) {
+                return Err(ErrorData::invalid_params(
+                    format!("Subscription with URL '{}' already exists", url_owned),
+                    None,
+                ));
+            }
+        }
+
         // Fetch + parse + process_servers (ping + batch test), same as Tauri path.
         // Servers only appear in the profile AFTER full testing (no raw saves).
         let (data_dir, settings, cache) = {
@@ -470,14 +496,12 @@ impl Handler {
                 .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
         };
 
-        let servers = crate::profile::process_servers_inner(
+        let servers = crate::profile::process_servers_headless(
             &data_dir,
             &settings,
             servers,
             &profile_id,
-            Some(&cache),
-            None,
-            &[],
+            &cache,
         )
         .await;
 
@@ -512,7 +536,7 @@ impl Handler {
             .to_string();
 
         // Phase 1: read lock — get URL + old servers + settings + data_dir
-        let (url, old_servers, data_dir, settings, cache) = {
+        let (url, _old_servers, data_dir, settings, cache) = {
             let state = self.state.lock().await;
             let profile = state
                 .profile_mgr
@@ -536,14 +560,12 @@ impl Handler {
         tokio::spawn(async move {
             match crate::subscription::fetch_subscription(&url, None).await {
                 Ok(servers) => {
-                    let enriched = crate::profile::process_servers_inner(
+                    let enriched = crate::profile::process_servers_headless(
                         &data_dir,
                         &settings,
                         servers,
                         &bg_id,
-                        Some(&cache),
-                        None,
-                        &old_servers,
+                        &cache,
                     )
                     .await;
                     {
@@ -770,11 +792,28 @@ impl Handler {
             .and_then(|v| v.as_u64())
             .unwrap_or(100) as usize;
         let state = self.state.lock().await;
-        let entries = state
-            ._logger
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entries();
+        let logger = state._logger.lock().unwrap_or_else(|e| e.into_inner());
+        let mut entries = logger.entries();
+
+        // Also read from tracing JSONL file for cross-session continuity.
+        // Pipeline code (batch testing, subscription refresh) uses tracing::info!
+        // directly, which only goes to the JSONL file, not the ring buffer.
+        if let Some(ref path) = logger._log_file {
+            if path.exists() {
+                let file_entries = crate::logging::read_tracing_log_file(path, logger.max_entries);
+                let existing_ids: std::collections::HashSet<String> =
+                    entries.iter().map(|e| e.id.clone()).collect();
+                for e in file_entries {
+                    if !existing_ids.contains(&e.id) {
+                        entries.push(e);
+                    }
+                }
+            }
+        }
+        drop(logger);
+
+        entries.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
+
         let filtered: Vec<_> = entries
             .iter()
             .filter(|e| {
@@ -1000,14 +1039,12 @@ impl Handler {
             let data_dir = state.data_dir.clone();
             let cache = state.cache.clone();
             drop(state);
-            let processed = crate::profile::process_servers_inner(
+            let processed = crate::profile::process_servers_headless(
                 &data_dir,
                 &crate::settings::AppSettings::default(),
                 servers,
                 &profile_id,
-                Some(&cache),
-                None,
-                &[],
+                &cache,
             )
             .await;
             (processed, data_dir, cache)
@@ -1812,11 +1849,22 @@ impl ServerHandler for Handler {
                     let pid = crate::proxy::PROXY_PID.load(std::sync::atomic::Ordering::Relaxed);
                     let port =
                         crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                    let proxy_port =
+                        crate::proxy::PROXY_PORT.load(std::sync::atomic::Ordering::Relaxed);
+                    let binary_installed = {
+                        let s = self.state.lock().await;
+                        s.bin_path.exists()
+                    };
+                    let status_str = if pid > 0 { "connected" } else { "disconnected" };
                     let status = serde_json::json!({
+                        "status": status_str,
                         "connected": pid > 0,
                         "pid": pid,
-                        "proxy_port": crate::proxy::PROXY_PORT.load(std::sync::atomic::Ordering::Relaxed),
+                        "proxy_port": proxy_port,
                         "clash_api_port": port,
+                        "binary_installed": binary_installed,
+                        "active_server_id": "",
+                        "uptime_secs": serde_json::Value::Null,
                     });
                     let json =
                         serde_json::to_string_pretty(&status).unwrap_or_else(|_| "{}".into());
@@ -1828,11 +1876,25 @@ impl ServerHandler for Handler {
                 }
                 "omnitun://logs/recent" => {
                     let s = self.state.lock().await;
-                    let entries = s
-                        ._logger
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .entries();
+                    let logger = s._logger.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut entries = logger.entries();
+
+                    // Read from tracing JSONL file for cross-session continuity
+                    if let Some(ref path) = logger._log_file {
+                        if path.exists() {
+                            let file_entries = crate::logging::read_tracing_log_file(path, logger.max_entries);
+                            let existing_ids: std::collections::HashSet<String> =
+                                entries.iter().map(|e| e.id.clone()).collect();
+                            for e in file_entries {
+                                if !existing_ids.contains(&e.id) {
+                                    entries.push(e);
+                                }
+                            }
+                        }
+                    }
+                    drop(logger);
+
+                    entries.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
                     let recent: Vec<_> = entries
                         .iter()
                         .rev()

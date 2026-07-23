@@ -1,7 +1,7 @@
 use crate::db::DbPool;
 use crate::proxy::{ErrorCode, ProxyError, ServerProfile};
 use crate::subscription::SubscriptionProfile;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -39,7 +39,7 @@ pub(crate) fn proxy_port_from_app(app: &AppHandle) -> Option<u16> {
 
 pub struct ProfileManager {
     profiles: Vec<SubscriptionProfile>,
-    /// The async DbPool — used for SQLite persistence.
+    /// The async DbPool — reserved for future streaming pipeline.
     /// Currently unused; all load/save go through `sync_conn`.
     #[allow(dead_code)]
     db: DbPool,
@@ -231,6 +231,14 @@ impl ProfileManager {
             )
         })?;
 
+        // Delete ALL existing profiles — we rewrite the full list
+        tx.execute("DELETE FROM profiles", []).map_err(|e| {
+            ProxyError::subscription(
+                ErrorCode::SubscriptionSaveFailed,
+                format!("Failed to delete profiles: {e}"),
+            )
+        })?;
+
         // Delete ALL existing servers — we rewrite the full list
         tx.execute("DELETE FROM servers", []).map_err(|e| {
             ProxyError::subscription(
@@ -265,7 +273,12 @@ impl ProfileManager {
             })?;
 
             for server in &profile.servers {
-                tx.execute(
+                // If a server violates the CHECK constraint (e.g. behind_cdn=0
+                // but exit_server=NULL because outlet IP fetch failed),
+                // skip it instead of aborting the entire transaction.
+                // 🚫 ANTI-REGRESSION: do NOT remove — prevents data loss
+                // when one problematic server blocks all other servers.
+                if let Err(e) = tx.execute(
                     "INSERT OR REPLACE INTO servers
                      (profile_id, server_hash, protocol, server, port,
                       uuid, password, method, sni, flow,
@@ -318,13 +331,13 @@ impl ProfileManager {
                         server.exit_city_name,
                         server.original_name,
                     ],
-                )
-                .map_err(|e| {
-                    ProxyError::subscription(
-                        ErrorCode::SubscriptionSaveFailed,
-                        format!("Failed to upsert server: {e}"),
-                    )
-                })?;
+                ) {
+                    tracing::warn!(
+                        target: "subscription",
+                        "Skipping server {} ({}:{}, original_name={:?}): DB constraint: {e}",
+                        server.id, server.server, server.port, server.original_name,
+                    );
+                }
             }
         }
 
@@ -1007,7 +1020,6 @@ pub(crate) async fn clash_api_test(
     cache: Option<&crate::proxy::cache::ServerCache>,
     app_handle: Option<&tauri::AppHandle>,
     profile_id: &str,
-    #[allow(unused_variables)] db: Option<&crate::db::DbPool>,
 ) -> std::collections::HashMap<String, u64> {
     use std::time::Duration;
 
@@ -1184,7 +1196,6 @@ pub async fn process_servers_incremental(
     event_tx: mpsc::UnboundedSender<crate::events::ServerTestedEvent>,
     db: &DbPool,
     cache: &crate::proxy::cache::ServerCache,
-    #[allow(unused_variables)] app_handle: Option<&tauri::AppHandle>,
 ) -> Vec<ServerProfile> {
     let initial_count = servers.len();
 
@@ -1258,6 +1269,75 @@ pub async fn process_servers_incremental(
         "Phase 0: {}/{} servers unique after dedup+filter",
         unique.len(), initial_count);
 
+    // INSERT to SQLite
+    let pid = profile_id.to_string();
+    let servers_for_insert = unique.clone();
+    let _ = db
+        .call(
+            move |conn| -> Result<(), tokio_rusqlite::Error<rusqlite::Error>> {
+                let tx = conn.transaction()?;
+                // Delete old servers for this profile
+                tx.execute(
+                    "DELETE FROM servers WHERE profile_id = ?1",
+                    rusqlite::params![pid],
+                )?;
+                for s in &servers_for_insert {
+                    tx.execute(
+                        "INSERT INTO servers
+                 (profile_id, server_hash, protocol, server, port,
+                  uuid, password, method, sni, flow,
+                  public_key, private_key,
+                  transport_type, transport_path, transport_host,
+                  reality_pbk, reality_sid,
+                  wg_local_address, wg_allowed_ips, wg_dns, wg_mtu, wg_keepalive,
+                  username, ping_ms, behind_cdn, flag, country_name, city_name,
+                  exit_server, exit_flag, exit_country_name, exit_city_name, original_name)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,
+                         ?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,
+                         ?29,?30,?31,?32,?33)",
+                        rusqlite::params![
+                            pid,
+                            s.id,
+                            s.protocol,
+                            s.server,
+                            s.port,
+                            s.uuid,
+                            s.password,
+                            s.method,
+                            s.sni,
+                            s.flow,
+                            s.public_key,
+                            s.private_key,
+                            s.transport_type,
+                            s.transport_path,
+                            s.transport_host,
+                            s.reality_pbk,
+                            s.reality_sid,
+                            s.wg_local_address,
+                            s.wg_allowed_ips,
+                            s.wg_dns,
+                            s.wg_mtu,
+                            s.wg_keepalive,
+                            s.username,
+                            s.ping_ms,
+                            s.behind_cdn as i32,
+                            s.flag,
+                            s.country_name,
+                            s.city_name,
+                            s.exit_server,
+                            s.exit_flag,
+                            s.exit_country_name,
+                            s.exit_city_name,
+                            s.original_name,
+                        ],
+                    )?;
+                }
+                tx.commit()?;
+                Ok(())
+            },
+        )
+        .await;
+
     // Emit init events
     let pid = profile_id.to_string();
     for s in &unique {
@@ -1319,10 +1399,9 @@ pub async fn process_servers_incremental(
     };
 
     // Emit cached servers — they get the cached ping + exit data
-    let mut ready_servers: Vec<ServerProfile> = Vec::new();
     let mut needs_batch: Vec<ServerProfile> = Vec::new();
     let mut cache_hit_count = 0usize;
-    for mut s in unique {
+    for s in unique {
         if cached_server_ids.contains(&s.id) {
             // Emit cached event
             let _ = event_tx.send(crate::events::ServerTestedEvent {
@@ -1339,17 +1418,7 @@ pub async fn process_servers_incremental(
                 error: None,
             });
             cache_hit_count += 1;
-            // Populate exit_server from positive cache for cached servers
-            if s.exit_server.is_none() {
-                if let Some(pos) = cache.get_positive_if_fresh(&s.id).await {
-                    s.exit_server = pos.exit_ip;
-                    s.exit_flag = pos.exit_flag;
-                    s.exit_country_name = pos.exit_country;
-                    s.exit_city_name = pos.exit_city;
-                    s.behind_cdn = pos.behind_cdn;
-                }
-            }
-            ready_servers.push(s);
+            needs_batch.push(s);
         } else {
             needs_batch.push(s);
         }
@@ -1366,25 +1435,7 @@ pub async fn process_servers_incremental(
     // ═══ PHASE 2: Preflight (Clash API) ══════════════════════════════
     if needs_batch.is_empty() {
         tracing::info!(target: "subscription", "All servers cached — skipping preflight and batch");
-        return ready_servers;
-    }
-
-    // Emit progress: moving to Phase 2 (preflight)
-    if let Some(app) = app_handle {
-        crate::events::emit_refresh_progress(
-            app,
-            crate::events::RefreshProgress {
-                profile_id: profile_id.to_string(),
-                total: needs_batch.len(),
-                tested: 0,
-                cache_hits: 0,
-                successful: 0,
-                failed: 0,
-                phase: "testing".into(),
-                updated_at: String::new(),
-                last_tested: None,
-            },
-        );
+        return needs_batch;
     }
 
     let preflight_pings = clash_api_test(
@@ -1394,30 +1445,10 @@ pub async fn process_servers_incremental(
         None::<&crate::proxy::cache::ServerCache>,
         None::<&AppHandle>,
         profile_id,
-        None::<&crate::db::DbPool>,
     )
     .await;
 
     let ping_count = preflight_pings.len();
-
-    // Emit progress: Phase 2 complete (preflight)
-    if let Some(app) = app_handle {
-        crate::events::emit_refresh_progress(
-            app,
-            crate::events::RefreshProgress {
-                profile_id: profile_id.to_string(),
-                total: needs_batch.len(),
-                tested: ping_count,
-                cache_hits: ready_servers.len(),
-                successful: ping_count,
-                failed: needs_batch.len() - ping_count,
-                phase: "preflight".into(),
-                updated_at: String::new(),
-                last_tested: None,
-            },
-        );
-    }
-
     if ping_count > 0 && ping_count < needs_batch.len() {
         // Pre-filter: dead servers go to negative cache
         let dead_count = needs_batch.len() - ping_count;
@@ -1482,7 +1513,7 @@ pub async fn process_servers_incremental(
 
     // ═══ PHASE 1.5: DNS resolve + GeoIP + CDN entry detection ════════
     if needs_batch.is_empty() {
-        return ready_servers;
+        return needs_batch;
     }
 
     // Lazy init GeoIP
@@ -1552,19 +1583,56 @@ pub async fn process_servers_incremental(
         }
     }
 
-    // Write preflight pings to SQLite
+    // Write preflight pings to test_history — NOT to `servers`.
+    //
+    // ── INVARIANT: `servers` is the FINAL table ──────────────────
+    // The `servers` table is protected by CHECK constraint v3
+    // (schema v3, db/mod.rs):
+    //
+    //   CHECK(
+    //     (behind_cdn = 1 AND exit_server IS NULL AND exit_flag IS NULL
+    //      AND exit_country_name IS NULL AND exit_city_name IS NULL)
+    //     OR
+    //     (behind_cdn = 0 AND exit_server IS NOT NULL)
+    //   )
+    //
+    // This is the SECOND line of defence for invariant I-CDN-1
+    // (CDN servers must never have exit data). The first line is
+    // assert_no_cdn_exit_data() in code. The CHECK constraint
+    // guarantees that even if a code bug writes exit data for a
+    // CDN server, the INSERT will fail and the transaction will
+    // roll back — CDN servers with exit data can NEVER persist
+    // in `servers`.
+    //
+    // CDN servers skip batch exit-IP testing entirely (optimisation:
+    // cdn_skip_count in batch_test, fetch_outlet_ip_through_port
+    // skipped in test_single_server). Their exit IP is dynamic
+    // (anycast / Workers / WARP) and testing it is pointless.
+    //
+    // Preflight is an INTERMEDIATE phase. Its results belong in
+    // test_history (per-server test log), never in `servers`.
+    // Writing preflight pings to `servers` would:
+    //   1. Bypass the "all phases complete" gate — servers would
+    //      appear in `servers` before batch test determines their
+    //      exit IP (or confirms CDN status).
+    //   2. Risk CHECK v3 violation on crash between Phase 2 and
+    //      Phase 3 — a CDN server with a stale exit_server from a
+    //      previous cycle could be UPDATEd with a new ping but
+    //      retain stale exit data.
+    // ─────────────────────────────────────────────────────────────
     if !preflight_pings.is_empty() {
-        let pid = profile_id.to_string();
         let pings = preflight_pings.clone();
+        let now = chrono::Utc::now().timestamp();
         let _ = db
             .call(
                 move |conn| -> Result<(), tokio_rusqlite::Error<rusqlite::Error>> {
                     let tx = conn.transaction()?;
                     for (sid, ping) in &pings {
                         tx.execute(
-                    "UPDATE servers SET ping_ms = ?1 WHERE server_hash = ?2 AND profile_id = ?3",
-                    rusqlite::params![ping, sid, pid],
-                )?;
+                            "INSERT INTO test_history (server_id, tested_at, ping_ms, success, phase)
+                                     VALUES (?1, ?2, ?3, 1, 'preflight')",
+                            rusqlite::params![sid, now, *ping as i64],
+                        )?;
                     }
                     tx.commit()?;
                     Ok(())
@@ -1591,33 +1659,51 @@ pub async fn process_servers_incremental(
     tracing::info!(target: "subscription",
         "Phase 3 (batch): {} servers sent to BatchingEngine", needs_batch.len());
 
-    // Read exit data from cache (batch_test wrote it) and update servers.
-    for s in &mut ready_servers {
-        if s.exit_server.is_none() {
-            if let Some(pos) = cache.get_positive_if_fresh(&s.id).await {
-                s.exit_server = pos.exit_ip;
-                s.exit_flag = pos.exit_flag;
-                s.exit_country_name = pos.exit_country;
-                s.exit_city_name = pos.exit_city;
-                s.behind_cdn = pos.behind_cdn;
-            }
-        }
-    }
+    // Read exit data from cache (batch test wrote it) and update servers.
+    // If batch test failed (cache miss), fall back to any existing cache entry
+    // (even stale) so servers aren't silently dropped from profile.
     for s in &mut needs_batch {
-        if s.exit_server.is_none() {
-            if let Some(pos) = cache.get_positive_if_fresh(&s.id).await {
+        let mut pos = cache.get_positive_if_fresh(&s.id).await;
+        if pos.is_none() {
+            // Fallback: stale positive entry — better than no data (batch worker may have crashed).
+            pos = cache.get_positive(&s.id).await;
+        }
+        if let Some(pos) = pos {
+            s.behind_cdn = pos.behind_cdn;
+            if !s.behind_cdn {
                 s.exit_server = pos.exit_ip;
                 s.exit_flag = pos.exit_flag;
                 s.exit_country_name = pos.exit_country;
                 s.exit_city_name = pos.exit_city;
-                s.behind_cdn = pos.behind_cdn;
             }
         }
     }
 
-    // Return ALL servers (cached + tested) for the caller to commit
-    ready_servers.append(&mut needs_batch);
-    ready_servers
+    // Non-CDN servers without exit data — alive (passed ping) but no route
+    // (outlet IP fetch failed). Batcher already called update_negative.
+    // Remove from needs_batch so save() doesn't hit CHECK constraint.
+    let reason = "No exit IP after batch test (transient route failure)".to_string();
+    let mut no_exit: Vec<(String, String)> = Vec::new();
+    needs_batch.retain(|s| {
+        if !s.behind_cdn && s.exit_server.is_none() && s.ping_ms.is_some() {
+            no_exit.push((s.id.clone(), reason.clone()));
+            false
+        } else {
+            true
+        }
+    });
+    if !no_exit.is_empty() {
+        // Persist to SQLite (batcher's update_negative already set the in-memory store)
+        crate::proxy::cache::flush_cache_batch(db, &[], &no_exit).await;
+        tracing::info!(
+            target: "subscription",
+            "Filtered {} non-CDN server(s) with no exit data → negative cache (previously_worked=1, TTL=1min)",
+            no_exit.len(),
+        );
+    }
+
+    // Return the servers — caller (lib.rs) does the final commit
+    needs_batch
 }
 
 /// Deduplicate servers, apply user filters, run ping, enrich GeoIP flag.
@@ -1629,6 +1715,9 @@ pub async fn process_servers(
     servers: Vec<ServerProfile>,
     profile_id: &str,
 ) -> Vec<ServerProfile> {
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
     let data_dir = match app.path().app_data_dir() {
         Ok(d) => d,
         Err(_) => return servers,
@@ -1637,685 +1726,61 @@ pub async fn process_servers(
         .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
         .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
         .unwrap_or_default();
-    let cache = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>();
-    let cache_ref = cache.as_ref().map(|c| c as _);
-    // Get old servers from the profile manager for ID preservation.
-    let old_servers = app
-        .try_state::<crate::ProfileState>()
-        .and_then(|ps| {
-            ps.manager.try_lock().ok().map(|mgr| {
-                mgr.list()
-                    .iter()
-                    .find(|p| p.id == profile_id)
-                    .map(|p| p.servers.clone())
-                    .unwrap_or_default()
-            })
-        })
-        .unwrap_or_default();
-    process_servers_inner(
+    let cache = app
+        .try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
+        .map(|c| c.as_ref().clone());
+    let db = app
+        .try_state::<crate::db::DbPool>()
+        .map(|s| -> crate::db::DbPool { (*s).clone() });
+
+    let (cache, db) = match (cache, db) {
+        (Some(c), Some(d)) => (c, d),
+        _ => return servers,
+    };
+
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    process_servers_incremental(
         &data_dir,
         &settings,
         servers,
         profile_id,
-        cache_ref,
-        Some(app),
-        &old_servers,
+        CancellationToken::new(),
+        event_tx,
+        &db,
+        &cache,
     )
     .await
 }
 
 /// Headless version — takes data_dir, settings, cache directly (no Tauri dependency).
-/// Used by MCP server and any non-Tauri contexts.
-pub async fn process_servers_inner(
+/// Used by MCP server and any non-Tauri contexts. Creates a temporary DB connection
+/// internally and discards incremental events (no frontend to receive them).
+pub async fn process_servers_headless(
     data_dir: &Path,
     settings: &crate::settings::AppSettings,
-    mut servers: Vec<ServerProfile>,
-    profile_id: &str,
-    cache: Option<&std::sync::Arc<crate::proxy::cache::ServerCache>>,
-    app_handle: Option<&tauri::AppHandle>,
-    old_servers: &[crate::proxy::ServerProfile],
-) -> Vec<ServerProfile> {
-    let initial_count = servers.len();
-
-    // Preserve server IDs from the old profile so cache keys match.
-    let old_index: std::collections::HashMap<String, String> = old_servers
-        .iter()
-        .map(|s| {
-            (
-                format!(
-                    "{}://{}:{}@{}:{}:{}/{}",
-                    s.protocol,
-                    s.server,
-                    s.port,
-                    s.uuid.as_deref().unwrap_or(""),
-                    s.password.as_deref().unwrap_or(""),
-                    s.method.as_deref().unwrap_or(""),
-                    s.transport_type.as_deref().unwrap_or(""),
-                ),
-                s.id.clone(),
-            )
-        })
-        .collect();
-    for server in &mut servers {
-        let key = format!(
-            "{}://{}:{}@{}:{}:{}/{}",
-            server.protocol,
-            server.server,
-            server.port,
-            server.uuid.as_deref().unwrap_or(""),
-            server.password.as_deref().unwrap_or(""),
-            server.method.as_deref().unwrap_or(""),
-            server.transport_type.as_deref().unwrap_or(""),
-        );
-        if let Some(old_id) = old_index.get(&key) {
-            server.id = old_id.clone();
-        }
-    }
-
-    // Lazy-init GeoIP: load from disk or download synchronously (one-time cost)
-    let geo_dir = data_dir.join("geoip");
-    let city_path = geo_dir.join("GeoLite2-City.mmdb");
-    let asn_path = geo_dir.join("GeoLite2-ASN.mmdb");
-
-    if !crate::proxy::geoip::is_ready() {
-        if city_path.exists() {
-            let _ = crate::proxy::geoip::init_city(&city_path);
-        } else {
-            tracing::info!(
-                target: "system",
-                "Downloading GeoIP databases (one-time)...",
-            );
-            match crate::proxy::geoip::ensure_downloaded(&geo_dir, &settings.ipinfo_token).await {
-                Ok(_) => tracing::info!(
-                    target: "system",
-                    "GeoIP databases ready",
-                ),
-                Err(e) => tracing::error!(
-                    target: "system",
-                    "GeoIP download failed (will retry): {e}",
-                ),
-            }
-        }
-    }
-
-    // Always try to init ASN if the file exists — may have been downloaded
-    // on a previous run while is_ready() already returned true for City only.
-    if asn_path.exists() && !crate::proxy::geoip::is_asn_ready() {
-        let _ = crate::proxy::geoip::init_asn(&asn_path);
-    }
-
-    // Always try to init ipinfo Lite if the file exists
-    let ipinfo_path = geo_dir.join("ipinfo_lite.mmdb");
-    if ipinfo_path.exists() && !crate::proxy::geoip::is_ipinfo_ready() {
-        let _ = crate::proxy::geoip::init_ipinfo(&ipinfo_path);
-    }
-
-    // Always try to init CDN ranges from downloaded .srs files
-    if !crate::proxy::geoip::is_cdn_ready() {
-        let mut merged: Vec<(std::net::IpAddr, u8)> = Vec::new();
-        for name in &["cdn-only_singbox.srs", "merged.srs"] {
-            let path = geo_dir.join(name);
-            if !path.exists() {
-                tracing::warn!(
-                    target: "system",
-                    "CDN .srs {name} not found at {:?}",
-                    path,
-                );
-                continue;
-            }
-            match crate::proxy::geoip::parse_srs_file(&path) {
-                Ok(r) => {
-                    tracing::info!(
-                        target: "system",
-                        "CDN .srs {name}: {} CIDR entries (lazy)",
-                        r.len(),
-                    );
-                    merged.extend(r);
-                }
-                Err(e) => {
-                    tracing::error!(
-                        target: "system",
-                        "CDN .srs {name} parse failed: {e}",
-                    );
-                }
-            }
-        }
-        if !merged.is_empty() {
-            tracing::info!(
-                target: "system",
-                "CDN ranges merged: {} total entries (lazy)",
-                merged.len(),
-            );
-            crate::proxy::geoip::set_cdn_ranges(merged);
-        } else {
-            tracing::warn!(
-                target: "system",
-                "CDN ranges empty — no .srs files loaded",
-            );
-        }
-    }
-
-    // 1. Deduplication by protocol + server + port + uuid + password
-    let mut unique = Vec::new();
-    let mut seen = HashSet::new();
-    for s in servers {
-        let key = format!(
-            "{}://{}:{}@{}:{}:{}/{}",
-            s.protocol,
-            s.server,
-            s.port,
-            s.uuid.as_deref().unwrap_or(""),
-            s.password.as_deref().unwrap_or(""),
-            s.method.as_deref().unwrap_or(""),
-            s.transport_type.as_deref().unwrap_or(""),
-        );
-        if seen.insert(key) {
-            unique.push(s);
-        }
-    }
-    let duplicates = initial_count - unique.len();
-    tracing::info!(
-        target: "subscription",
-        "Parsed {initial_count} servers from subscription, {duplicates} duplicates removed, {} unique",
-        unique.len(),
-    );
-    if duplicates > 0 {
-        tracing::info!(
-            target: "subscription",
-            "Removed {duplicates} duplicate(s)",
-        );
-    }
-
-    // 1b. Fast keyword pre-check for serverless domains (workers.dev, pages.dev).
-    //     Full CDN detection via ASN happens during batch latency test.
-    for s in &mut unique {
-        s.behind_cdn = s.behind_cdn || crate::proxy::is_cdn_server(s);
-        if s.behind_cdn {
-            // Clear stale exit IP data from previous batch tests — CDN servers
-            // must never retain exit data (their exit node is dynamic/unstable).
-            // 🚫 ANTI-REGRESSION: обязательно логируем нарушение через
-            // assert_no_cdn_exit_data ПЕРЕД занулением. Не удалять вызов,
-            // даже если кажется, что "всё и так чисто". См. doc-comment метода.
-            s.assert_no_cdn_exit_data("process_servers::keyword_match");
-            s.exit_server = None;
-            s.exit_flag = None;
-            s.exit_country_name = None;
-            s.exit_city_name = None;
-            tracing::info!(
-                target: "subscription",
-                "[CDN] keyword match: {} ({})",
-                s.display_name(),
-                s.server,
-            );
-            // CDN servers keep exit-IP data cleared by assert_no_cdn_exit_data
-            // (logged at error! level, target &quot;cdn-invariant&quot;).
-        }
-    }
-
-    // 2. Apply user filters (country, protocol) from settings
-    let total_before = unique.len();
-    unique.retain(|s| {
-        // Filter by protocol
-        if !settings.allowed_protocols.is_empty()
-            && !settings.allowed_protocols.contains(&s.protocol)
-        {
-            return false;
-        }
-        if !settings.blocked_protocols.is_empty()
-            && settings.blocked_protocols.contains(&s.protocol)
-        {
-            return false;
-        }
-        // Filter by country (flag must be resolved first)
-        if !settings.allowed_countries.is_empty() {
-            if let Some(ref flag) = s.flag {
-                if !settings.allowed_countries.contains(flag) {
-                    return false;
-                }
-            }
-        }
-        if !settings.blocked_countries.is_empty() {
-            if let Some(ref flag) = s.flag {
-                if settings.blocked_countries.contains(flag) {
-                    return false;
-                }
-            }
-        }
-        true
-    });
-    let filtered = total_before - unique.len();
-    if filtered > 0 {
-        tracing::info!(
-            target: "subscription",
-            "Filtered {filtered} server(s) by country/protocol settings",
-        );
-    }
-
-    // 3. Clash API delay probe via temp engine — replaces TCP ping entirely.
-    //
-    // Spawns a temporary sing-box with ALL servers as outbounds + Clash API,
-    // tests each via GET /proxies/proxy-{i}/delay, kills the engine.
-    // Protocol-agnostic — tests VLESS, VMess, Trojan, SS, Hysteria2, TUIC,
-    // WireGuard uniformly in ~5s for 24 servers (vs ~30s batch).
-    //
-    // DNS resolve + GeoIP enrichment happen AFTER preflight in their own
-    // spawn loop (step 4). The preflight ping is used for the UI during
-    // loading; batch test fills the definitive value.
-    let preflight_pings = clash_api_test(
-        &unique,
-        data_dir,
-        settings,
-        cache.map(|c| c.as_ref()),
-        app_handle,
-        profile_id,
-        None::<&crate::db::DbPool>,
-    )
-    .await;
-
-    // 3b. Pre-filter: servers without Clash API ping → negative cache.
-    //     BUT: if testing engine returned 0 pings (all failed),
-    //     skip filtering to avoid wiping the profile on transient failure.
-    if !preflight_pings.is_empty() {
-        if let Some(cache) = cache.as_ref() {
-            let mut dead_ids = std::collections::HashSet::new();
-            for server in &unique {
-                if preflight_pings.contains_key(&server.id) {
-                    continue;
-                }
-                dead_ids.insert(server.id.clone());
-            }
-
-            if !dead_ids.is_empty() {
-                for sid in &dead_ids {
-                    cache
-                        .update_negative(sid, "Clash API delay probe: no ping".to_string())
-                        .await;
-                }
-
-                let before = unique.len();
-                unique.retain(|s| !dead_ids.contains(&s.id));
-                let n = before - unique.len();
-                tracing::info!(
-                    target: "subscription",
-                    "Removed {n} server(s) — Clash API preflight failed (negative cache)",
-                );
-            }
-        }
-    } else {
-        tracing::warn!(
-            target: "subscription",
-            "Pre-filter: testing engine returned 0 pings — keeping all servers (transient)",
-        );
-    }
-
-    // 4. DNS resolve + entry GeoIP + CDN detection (data enrichment).
-    //     No TCP connect — servers that failed preflight are still passed
-    //     to batch test (it will determine real reachability).
-    let mut alive = Vec::new();
-    for server in unique {
-        let entry_ip = tokio::net::lookup_host(&format!("{}:{}", server.server, server.port))
-            .await
-            .ok()
-            .and_then(|mut a| a.next())
-            .map(|s| s.ip().to_string());
-
-        let mut server = server;
-        // emoji flag from name (fast, no network)
-        if server.flag.is_none() {
-            if let Some(f) = emoji_flag_from_name(&server.original_name) {
-                server.flag = Some(f);
-            }
-        }
-
-        // GeoIP enrichment + CDN detection
-        if let Some(ip) = &entry_ip {
-            let geoip_info = crate::proxy::geoip::resolve_hostname(ip).await;
-            if let Some(info) = &geoip_info {
-                if server.country_name.is_none() {
-                    server.country_name = Some(info.country_name.clone());
-                }
-                if server.flag.is_none() {
-                    server.flag = Some(info.country_code.clone());
-                }
-                if server.city_name.is_none() && !info.city.is_empty() {
-                    server.city_name = Some(info.city.clone());
-                }
-            }
-            // CDN detection (entry IP) — clear exit data if behind CDN
-            if !server.behind_cdn && crate::proxy::geoip::is_cdn_entry_ip(ip) {
-                server.behind_cdn = true;
-                server.assert_no_cdn_exit_data("process_servers::entry_ip_match");
-                server.exit_server = None;
-                server.exit_flag = None;
-                server.exit_country_name = None;
-                server.exit_city_name = None;
-            }
-            // Replace hostname with resolved IP for config generation
-            if server.server.contains('.')
-                && !server
-                    .server
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || c == '.')
-            {
-                server.server = ip.clone();
-            }
-        }
-
-        // Set ping from preflight, otherwise keep existing (don't overwrite
-        // with None if engine failed to start).
-
-        if let Some(ping) = preflight_pings.get(&server.id) {
-            server.ping_ms = Some(*ping);
-        }
-        // If engine returned 0 pings (transient failure), keep whatever
-        // ping_ms the server already has (may be None for fresh servers
-        // or a stale value for re-tested ones). The batch test or
-        // old_ping restoration in commit will fill it in.
-
-        alive.push(server);
-    }
-
-    let unique_count = alive.len();
-    tracing::info!(
-        target: "subscription",
-        "Preflighted {unique_count} server(s) via Clash API",
-    );
-
-    // IP-based dedup: after DNS resolution, multiple hostnames may resolve
-    //     to the same IP. Keep the one with lowest ping.
-    //
-    //     Ключ дедупа — (IP, port, protocol, uuid, password): на одном IP
-    //     могут быть разные proxy-сервисы (порты, протоколы, аккаунты).
-    let alive_before_ip_dedup = alive.len();
-    if alive_before_ip_dedup > 0 {
-        // Sort by ping ascending — lowest ping first
-        alive.sort_by_key(|s| s.ping_ms.unwrap_or(u64::MAX));
-        let mut seen_keys = std::collections::HashSet::new();
-        alive.retain(|s| {
-            let key = format!(
-                "{}|{}|{}|{}|{}",
-                s.server,
-                s.port,
-                s.protocol,
-                s.uuid.as_deref().unwrap_or(""),
-                s.password.as_deref().unwrap_or(""),
-            );
-            seen_keys.insert(key)
-        });
-        let ip_dupes = alive_before_ip_dedup - alive.len();
-        if ip_dupes > 0 {
-            tracing::info!(
-                target: "subscription",
-                "Removed {ip_dupes} full-duplicate(s) — same IP+port+protocol+creds (kept fastest)",
-            );
-        }
-    }
-
-    // Считаем unreachable ДО IP-дедупа, чтобы IP-дубликаты не учитывались
-    // как недоступные серверы.
-    let ping_failed = unique_count - alive_before_ip_dedup;
-    if ping_failed > 0 {
-        tracing::warn!(
-            target: "subscription",
-            "Removed {ping_failed} unreachable server(s) — ping failed",
-        );
-    }
-
-    // === DIFF-TESTING OPTIMIZATION ===
-    // After ping phase, check cache for each alive server. Servers with a fresh
-    // positive cache entry skip the expensive batch test. Only unknown/stale
-    // servers get batch-tested.
-    let mut ready_servers = Vec::new();
-    let mut needs_batch_test = Vec::new();
-
-    if let Some(cache) = cache.as_ref() {
-        // Запускаем batch test всегда, когда есть серверы для тестирования.
-        for mut server in alive {
-            if let Some(pos) = cache.get_positive_if_fresh(&server.id).await {
-                // Server is alive (ping passed) and cache is fresh.
-                // Skip batch test — use cached data directly.
-                server.behind_cdn = pos.behind_cdn;
-                if !server.behind_cdn {
-                    // Only overwrite exit fields if cache actually has data.
-                    // A cache hit with exit_ip=None (transient outlet IP fetch
-                    // failure during previous batch test) would otherwise erase
-                    // previously valid exit data — critical since profiles.json
-                    // is the sole source of exit data.
-                    if pos.exit_ip.is_some() {
-                        server.exit_server = pos.exit_ip;
-                        server.exit_flag = pos.exit_flag;
-                        server.exit_country_name = pos.exit_country;
-                        server.exit_city_name = pos.exit_city;
-                    } else if !server.behind_cdn {
-                        // Fallback: entry server as exit
-                        server.exit_server = Some(server.server.clone());
-                    }
-                }
-                ready_servers.push(server);
-            } else {
-                // Server is new, stale, or negative — needs batch test
-                needs_batch_test.push(server);
-            }
-        }
-
-        tracing::info!(
-            target: "cache",
-            "{}/{} server(s) had fresh cache — skipping batch test",
-            ready_servers.len(),
-            ready_servers.len() + needs_batch_test.len(),
-        );
-    } else {
-        // No cache available — batch test everything
-        needs_batch_test = alive;
-    }
-
-    // Запускаем batch test всегда, когда есть серверы для тестирования.
-    // Batch test использует порты из PortPool (30000-35000),
-    // основной прокси — свой порт (~1080/5050), конфликта нет.
-    if !needs_batch_test.is_empty() {
-        if let Some(cache) = cache.as_ref() {
-            let main_proxy_running =
-                crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed) > 0;
-
-            tracing::info!(
-                target: "cache",
-                "Starting batch test for {} NEW/UNKNOWN server(s){}...",
-                needs_batch_test.len(),
-                if main_proxy_running { " (main proxy running — separate ports)" } else { "" },
-            );
-
-            let cancel_token = app_handle
-                .and_then(|app| app.try_state::<Arc<Mutex<CancellationToken>>>())
-                .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()).clone());
-
-            let total_alive_servers = ready_servers.len() + needs_batch_test.len();
-            let mut updated = match app_handle {
-                Some(app) => {
-                    cache
-                        .batch_test(
-                            Some(app),
-                            &needs_batch_test,
-                            cancel_token,
-                            profile_id,
-                            total_alive_servers,
-                        )
-                        .await
-                }
-                None => {
-                    tracing::info!(
-                        target: "cache",
-                        "Batch test running headless (no Tauri app handle)",
-                    );
-                    cache
-                        .batch_test(
-                            None,
-                            &needs_batch_test,
-                            cancel_token,
-                            profile_id,
-                            total_alive_servers,
-                        )
-                        .await
-                }
-            };
-            ready_servers.append(&mut updated);
-
-            // Restore preflight Clash API ping — batch test is for exit IP,
-            // not for latency. The Clash API delay probe is the authoritative
-            // ping source (protocol-agnostic, works without external connectivity).
-            if !preflight_pings.is_empty() {
-                for server in &mut ready_servers {
-                    if let Some(ping) = preflight_pings.get(&server.id) {
-                        server.ping_ms = Some(*ping);
-                    }
-                }
-                // Also add back servers that batch test couldn't reach but
-                // preflight succeeded — they have valid ping.
-                let batch_ids: std::collections::HashSet<String> =
-                    ready_servers.iter().map(|s| s.id.clone()).collect();
-                for mut server in needs_batch_test {
-                    if !batch_ids.contains(&server.id) {
-                        if let Some(ping) = preflight_pings.get(&server.id) {
-                            server.ping_ms = Some(*ping);
-                            // Fallback: entry server as exit if batch test skipped
-                            if server.exit_server.is_none() && !server.behind_cdn {
-                                server.exit_server = Some(server.server.clone());
-                            }
-                            ready_servers.push(server);
-                        }
-                    }
-                }
-            }
-        } else {
-            tracing::warn!(
-                target: "cache",
-                "ServerCache state unavailable — {} server(s) added without batch test",
-                needs_batch_test.len(),
-            );
-            ready_servers.append(&mut needs_batch_test);
-        }
-    }
-
-    // Apply CDN node filter if user enabled it
-    if settings.block_cdn_nodes {
-        let before_cdn = ready_servers.len();
-        ready_servers.retain(|s| !s.behind_cdn);
-        let cdn_filtered = before_cdn - ready_servers.len();
-        if cdn_filtered > 0 {
-            tracing::info!(
-                target: "subscription",
-                "Removed {cdn_filtered} CDN/Worker/WARP server(s) (blockCdnNodes enabled)",
-            );
-        }
-    }
-
-    // Sort by ping (fastest first)
-    ready_servers.sort_by(|a, b| {
-        a.ping_ms
-            .unwrap_or(u64::MAX)
-            .cmp(&b.ping_ms.unwrap_or(u64::MAX))
-    });
-
-    // Per-server `server-tested` events from batch_test already
-    // stream results to the frontend — no batch emit needed here.
-    tracing::info!(
-        target: "subscription",
-        "{} server(s) passed and saved",
-        ready_servers.len(),
-    );
-
-    if let Some(fastest) = ready_servers.first() {
-        tracing::info!(
-            target: "subscription",
-            "Fastest server: {} ({} ms)",
-            fastest.display_name(),
-            fastest.ping_ms.unwrap_or(0),
-        );
-    }
-
-    ready_servers
-}
-
-/// Convenience wrapper: extracts state from AppHandle and delegates to
-/// [`process_servers_incremental`]. Creates a dummy event channel (discarded).
-pub async fn process_servers_incremental_from_app(
-    app: &tauri::AppHandle,
     servers: Vec<ServerProfile>,
     profile_id: &str,
+    cache: &crate::proxy::cache::ServerCache,
 ) -> Vec<ServerProfile> {
-    use crate::proxy::cache::ServerCache;
-    use crate::db::DbPool;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
-    let data_dir = app.path().app_data_dir().unwrap_or_default();
-    let settings = app.state::<crate::settings::AppSettings>();
-    let db = app.state::<DbPool>();
-    let cache = app.state::<ServerCache>();
-    let (_tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let cancel = tokio_util::sync::CancellationToken::new();
+    let db = match crate::db::init_db(data_dir).await {
+        Ok(d) => d,
+        Err(_) => return servers,
+    };
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
     process_servers_incremental(
-        &data_dir, &settings, servers, profile_id, cancel, _tx, &db, &cache, None,
-    ).await
-}
-
-/// Test servers without Tauri: ping, write negatives/sentinels, return (total, alive, dead).
-/// Used by both auto-test (lib.rs) and test_profile MCP command.
-pub async fn test_servers_standalone(
-    servers: &[ServerProfile],
-    data_dir: &Path,
-    settings: &crate::settings::AppSettings,
-    cache: &std::sync::Arc<crate::proxy::cache::ServerCache>,
-    db: &DbPool,
-    profile_id: &str,
-) -> (usize, usize, usize) {
-    let old_ping: std::collections::HashMap<String, Option<u64>> = servers.iter()
-        .map(|s| (s.id.clone(), s.ping_ms)).collect();
-    let pings = clash_api_test(
-        servers, data_dir, settings, Some(&**cache), None, profile_id, Some(db),
-    ).await;
-    let alive: std::collections::HashSet<String> = pings.keys().cloned().collect();
-    let mut dead: Vec<&ServerProfile> = servers.iter().filter(|s| !alive.contains(&s.id)).collect();
-
-    // Exclude TTL-active servers (clash_api_test skipped them)
-    let now = chrono::Utc::now().timestamp();
-    let ttl_active: std::collections::HashSet<String> = db.call(move |conn|
-    -> Result<Vec<String>, tokio_rusqlite::Error<rusqlite::Error>> {
-        let mut stmt = conn.prepare(
-            "SELECT server_hash, tested_at, previously_worked, consecutive_failures
-             FROM server_cache WHERE status = 'negative'"
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let hash: String = row.get(0)?;
-            let tested_at: i64 = row.get(1)?;
-            let prev_worked: bool = row.get(2)?;
-            let failures: i64 = row.get(3)?;
-            let age = now - tested_at;
-            let base = if prev_worked { 60i64 } else { 86400i64 };
-            let mult = 2u64.saturating_pow(failures.saturating_sub(1) as u32).min(16384) as i64;
-            Ok((hash, age < base.saturating_mul(mult).min(32i64 * 86400)))
-        })?;
-        Ok(rows.filter_map(|r| r.ok().filter(|(_, keep)| *keep).map(|(h, _)| h)).collect())
-    }).await.unwrap_or_default().into_iter().collect();
-    dead.retain(|s| !ttl_active.contains(&s.id));
-
-    // Write dead servers to SQLite (sentinel for previously-worked)
-    let entries: Vec<(String, String, i64)> = dead.iter().map(|s| {
-        let ts = if old_ping.get(&s.id).and_then(|o| *o).is_some() { 0i64 } else { now };
-        (s.id.clone(), "test: no ping".into(), ts)
-    }).collect();
-    let _ = db.call(move |conn| -> Result<(), tokio_rusqlite::Error<rusqlite::Error>> {
-        let mut stmt = conn.prepare(
-            "INSERT OR REPLACE INTO server_cache
-             (server_hash, status, tested_at, reason, consecutive_failures, first_failure_at, last_failure_at)
-             VALUES (?1, 'negative', ?2, ?3, 1, ?2, ?2)"
-        )?;
-        for (sid, reason, ts) in &entries { stmt.execute(rusqlite::params![sid, ts, reason])?; }
-        Ok(())
-    }).await;
-    // Sync in-memory cache so get_cache_stats shows correct counts.
-    for s in &dead {
-        cache.add_negative(&s.id, "test: no ping").await;
-    }
-
-    (servers.len(), alive.len(), dead.len())
+        data_dir,
+        settings,
+        servers,
+        profile_id,
+        CancellationToken::new(),
+        event_tx,
+        &db,
+        cache,
+    )
+    .await
 }
 
 /// Create an in-memory SQLite database for tests.
@@ -2409,26 +1874,6 @@ mod tests {
 /// - "🇨🇭 Switzerland" → Some("CH")
 /// - "🇵🇱 Warsaw" → Some("PL")
 /// - "some-server" → None
-fn emoji_flag_from_name(name: &str) -> Option<String> {
-    // Emoji flags are two Regional Indicator symbols: U+1F1E6..U+1F1FF (🇦..🇿)
-    let chars: Vec<char> = name.chars().collect();
-    if chars.len() < 2 {
-        return None;
-    }
-
-    let c1 = chars[0] as u32;
-    let c2 = chars[1] as u32;
-
-    // Regional Indicator A..Z
-    if (0x1F1E6..=0x1F1FF).contains(&c1) && (0x1F1E6..=0x1F1FF).contains(&c2) {
-        let letter1 = char::from_u32((c1 - 0x1F1E6) + b'A' as u32)?;
-        let letter2 = char::from_u32((c2 - 0x1F1E6) + b'A' as u32)?;
-        Some(format!("{letter1}{letter2}"))
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod extra_tests {
     use super::*;

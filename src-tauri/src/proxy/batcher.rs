@@ -517,6 +517,19 @@ async fn process_batch(
                 };
 
                 if let Some(cache) = cache {
+                    if !result.behind_cdn && result.outlet_ip.is_none() {
+                        // Non-CDN server passed ping but no outlet IP — route issue.
+                        // Report as negative so it goes to negative cache
+                        // with previously_worked=1 (auto-test re-checks fast).
+                        let reason = "No exit IP after batch test (transient route failure)".to_string();
+                        cache.update_negative(&result.server_id, reason.clone()).await;
+                        tracing::warn!(target: "cache",
+                            "[Batcher] server {} passed — ping {}ms, NO outlet IP (non-CDN, negative)",
+                            result.server_id, result.ping_ms);
+                        let _ = req.reply.send(Err(reason));
+                        fail_count += 1;
+                        continue;
+                    }
                     cache
                         .update_positive(&result.server_id, positive.clone())
                         .await;
@@ -527,7 +540,7 @@ async fn process_batch(
                     Some(ref ip) => tracing::info!(target: "cache",
                         "[Batcher] server {} passed — ping {}ms, outlet {}", result.server_id, result.ping_ms, ip),
                     None => tracing::warn!(target: "cache",
-                        "[Batcher] server {} passed — ping {}ms, NO outlet IP", result.server_id, result.ping_ms),
+                        "[Batcher] server {} passed — ping {}ms, NO outlet IP (behind CDN — expected)", result.server_id, result.ping_ms),
                 }
             }
             Ok((req, Err(e))) => {
@@ -573,10 +586,10 @@ async fn process_batch(
         tracing::warn!(target: "cache", "[Batcher] failed to remove test dir: {e}");
     }
 
-    // 8. Save cache
-    if let Some(cache) = cache {
-        cache.save_to_disk().await;
-    }
+    // 8. Cleanup done — flush_cache_batch (called by batch_test_incremental or
+    //    manually by the caller) already wrote results to SQLite.
+    //    save_to_disk is NOT called here because it does DELETE FROM server_cache
+    //    which would erase negative entries written by Phase 2 pre-filter.
 
     tracing::info!(
         target: "cache",

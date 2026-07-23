@@ -16,7 +16,9 @@ fn determinize_id(s: &mut ServerProfile) {
         s.transport_type.as_deref().unwrap_or(""),
     );
     // Stable polynomial hash ensures same server = same ID across sessions (unlike DefaultHasher which uses random keys per process).
-    let hash = key.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
+    let hash = key
+        .bytes()
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
     s.id = format!("{:016x}", hash);
 }
 
@@ -1075,9 +1077,15 @@ mod tests {
         let uri3 = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@127.0.0.3:8443?flow=xtls-rprx-vision&sni=127.0.0.3#Test";
         let mut p3 = parse_uri(uri3).unwrap();
         determinize_id(&mut p3);
-        assert_ne!(p1.id, p3.id, "different servers must produce different hashes");
+        assert_ne!(
+            p1.id, p3.id,
+            "different servers must produce different hashes"
+        );
         assert_eq!(p1.id.len(), 16, "hash must be 16 hex chars");
-        assert!(p1.id.chars().all(|c| c.is_ascii_hexdigit()), "hash must be hex");
+        assert!(
+            p1.id.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash must be hex"
+        );
     }
 
     #[test]

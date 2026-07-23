@@ -531,6 +531,11 @@ pub fn set_singbox_bin_path(path: PathBuf) {
     let _ = SINGBOX_BIN.set(path);
 }
 
+/// Get the path to the sing-box binary, if set.
+pub fn get_singbox_bin_path() -> Option<&'static PathBuf> {
+    SINGBOX_BIN.get()
+}
+
 /// Replace CDN_RANGES with a new set.
 pub fn set_cdn_ranges(ranges: Vec<(IpAddr, u8)>) {
     let _ = CDN_RANGES.set(ranges);

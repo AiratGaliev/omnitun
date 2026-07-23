@@ -45,8 +45,8 @@ pub struct LogEntry {
 
 pub struct Logger {
     buffer: VecDeque<LogEntry>,
-    max_entries: usize,
-    _log_file: Option<PathBuf>,
+    pub max_entries: usize,
+    pub _log_file: Option<PathBuf>,
 }
 
 impl Logger {
@@ -416,7 +416,7 @@ fn parse_tracing_jsonl_line(line: &str) -> Option<LogEntry> {
 }
 
 /// Read the last `max` log entries from tracing-appender's JSONL file.
-fn read_tracing_log_file(path: &Path, max: usize) -> Vec<LogEntry> {
+pub fn read_tracing_log_file(path: &Path, max: usize) -> Vec<LogEntry> {
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
     let file = match std::fs::File::open(path) {
