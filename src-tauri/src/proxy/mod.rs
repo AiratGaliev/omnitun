@@ -104,7 +104,7 @@ pub enum ErrorCode {
     SubscriptionParseFailed,
     /// Subscription content parsed but yielded 0 servers.
     SubscriptionNoServers,
-    /// profiles.json parse/serialize/write/rename failed (persistence).
+    /// SQLite persistence (save/load profiles/servers) failed.
     SubscriptionSaveFailed,
 
     // ── Config ───────────────────────────────────────────────────────────

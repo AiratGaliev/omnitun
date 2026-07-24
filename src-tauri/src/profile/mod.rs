@@ -510,8 +510,8 @@ impl ProfileManager {
             crate::subscription::parser::parse_subscription(&clean_url)?
         };
 
-        // Save profile to disk IMMEDIATELY (with empty servers) so profiles.json
-        // exists even if the app is closed during the long batch test below.
+        // Save profile to SQLite IMMEDIATELY (with empty servers) so the profile
+        // persists even if the app is closed during the long batch test below.
         // After process_servers_incremental completes, the in-memory profile is updated
         // and saved again with the tested servers.
         let initial = SubscriptionProfile {
@@ -530,7 +530,13 @@ impl ProfileManager {
 
         // Run the test — direct call to process_servers_incremental with self.db
         servers = {
-            let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let event_app = app.clone();
+            tokio::spawn(async move {
+                while let Some(event) = event_rx.recv().await {
+                    crate::events::emit_server_tested(&event_app, event);
+                }
+            });
             let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
             let progress_app = app.clone();
             tokio::spawn(async move {
@@ -1687,7 +1693,7 @@ pub async fn process_servers_incremental(
         &needs_batch,
         data_dir,
         settings,
-        None::<&crate::proxy::cache::ServerCache>,
+        Some(cache),
         None::<&AppHandle>,
         profile_id,
     )
@@ -1932,6 +1938,7 @@ pub async fn process_servers_incremental(
         }
         if let Some(pos) = pos {
             s.behind_cdn = pos.behind_cdn;
+            s.ping_ms = Some(pos.ping_ms);
             if !s.behind_cdn {
                 s.exit_server = pos.exit_ip;
                 s.exit_flag = pos.exit_flag;

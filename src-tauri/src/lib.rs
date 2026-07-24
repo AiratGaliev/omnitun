@@ -323,7 +323,7 @@ async fn start_proxy(
                                             );
                                         }
                                         // exit-ip-changed removed — exit IP comes from
-                                        // profiles.json via activeServer.exit*.
+                                        // the stored profile via activeServer.exit*.
                                         // Health check IP fetch stays (verifies proxy works).
                                         break;
                                     }
@@ -1363,7 +1363,13 @@ async fn refresh_subscription(
             let re_enriched = if !old_servers.is_empty() {
                 match app.path().app_data_dir() {
                     Ok(data_dir) => {
-                        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+                        let event_app = app.clone();
+                        tokio::spawn(async move {
+                            while let Some(event) = event_rx.recv().await {
+                                crate::events::emit_server_tested(&event_app, event);
+                            }
+                        });
                         let settings = app
                             .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
                             .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
@@ -1419,7 +1425,13 @@ async fn refresh_subscription(
 
     // Process servers: ping + batch_test + GeoIP + exit data restore (long, no lock)
     {
-        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let event_app = app.clone();
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                crate::events::emit_server_tested(&event_app, event);
+            }
+        });
         let data_dir = match app.path().app_data_dir() {
             Ok(d) => d,
             Err(_) => return Err(ProxyError::subscription(
@@ -2679,7 +2691,13 @@ async fn import_subscription_content(
         ));
     }
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let event_app = app.clone();
+    tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            crate::events::emit_server_tested(&event_app, event);
+        }
+    });
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
     let progress_app = app.clone();
     tokio::spawn(async move {
@@ -2812,7 +2830,13 @@ async fn import_subscription_file(
     // processing carry the REAL profile ID.
     let profile_id = uuid::Uuid::new_v4().to_string();
 
-    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let event_app = app.clone();
+    tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            crate::events::emit_server_tested(&event_app, event);
+        }
+    });
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
     let progress_app = app.clone();
     tokio::spawn(async move {

@@ -131,7 +131,7 @@ interface ProxyStore {
   addProfile: (data: { name: string; url: string }) => Promise<void>;
   /** Import a subscription from raw content (file or pasted data).
    * Uses the same pending-profile pattern as addProfile: the profile appears
-   * in the list immediately, and gets servers after process_servers completes. */
+   * in the list immediately, and gets servers after the pipeline completes. */
   importProfileContent: (data: { name: string; content: string }) => Promise<void>;
   updateProfile: (id: string, data: Partial<Profile>) => void;
   removeProfile: (id: string) => Promise<void>;
@@ -999,7 +999,7 @@ export const useAppStore = create<ProxyStore>((set, get) => {
           //       to start, or consumes excessive memory.
           //
           // We cap to the top 50 by ping (servers are already sorted by ping
-          // ascending from process_servers). 50 alternatives is more than
+          // ascending from the pipeline). 50 alternatives is more than
           // enough for failover.
           const MAX_ALT_SERVERS = 50;
           const altServers: ReturnType<typeof toRustServerProfile>[] =

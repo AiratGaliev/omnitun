@@ -125,7 +125,7 @@ export function AddProfileOptions({
 
       // Используем store.importProfileContent — добавляет pending-профиль
       // немедленно с пустыми серверами. Серверы появятся инкрементально
-      // через server-tested события во время process_servers.
+      // через server-tested события во время process_servers_incremental.
       const promise = useAppStore.getState().importProfileContent({ name, content: text });
       // Call onProfileAdded immediately — the pending profile is already in
       // the store (added synchronously by importProfileContent before its
