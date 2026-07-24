@@ -1213,7 +1213,7 @@ async fn check_latest_release(client: &reqwest::Client, db_dir: &Path) -> Option
 ///
 /// Called from:
 ///   - `initialize_app` (app startup)
-///   - `process_servers` (lazy init before profile processing)
+///   - `process_servers_incremental` (lazy init before profile processing)
 ///
 /// Respects all rate limits:
 ///   - ipinfo.io: max 10/day → 4h between downloads

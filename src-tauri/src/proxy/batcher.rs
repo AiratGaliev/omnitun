@@ -766,7 +766,7 @@ async fn test_single_server(
 
     if !server.behind_cdn {
         // Fetch outlet IP only if server is NOT marked as CDN.
-        // behind_cdn is finalized at the process_servers stage via entry-IP
+        // behind_cdn is finalized at the process_servers_incremental stage via entry-IP
         // + keyword checks; we do NOT override it here.
         // Reuse the existing `client` (warm connection pool) with a
         // per-request timeout.
@@ -780,7 +780,7 @@ async fn test_single_server(
             // Canary: outlet IP in CDN ranges despite non-CDN entry.
             // Possible legitimate reasons: WARP upstream, cloud hosting that
             // overlaps with CDN ranges, ISP that uses CDN-as-backbone.
-            // Possible bug: process_servers entry-IP classification was wrong.
+            // Possible bug: process_servers_incremental entry-IP classification was wrong.
             // We observe but do NOT mutate behind_cdn here.
             if crate::proxy::geoip::is_cdn_entry_ip(ip) {
                 diagnostic_warning = Some(format!(
@@ -788,7 +788,7 @@ async fn test_single_server(
                      although entry IP was NOT marked CDN. Keeping outlet IP and \
                      behind_cdn=false (outlet is egress, not entry). If this fires \
                      repeatedly for the same server, investigate CDN list coverage \
-                     or process_servers entry-IP classification.",
+                     or process_servers_incremental entry-IP classification.",
                     server.id, server.server, server.port, server.original_name, ip,
                 ));
             }

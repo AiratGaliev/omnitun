@@ -40,6 +40,7 @@ struct ServerState {
     cache: Arc<ServerCache>,
     port_pool: Arc<PortPool>,
     cancel_token: Arc<std::sync::Mutex<tokio_util::sync::CancellationToken>>,
+    db: crate::db::DbPool,
 }
 
 struct Handler {
@@ -117,6 +118,7 @@ async fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
         cache,
         port_pool,
         cancel_token,
+        db,
     })
 }
 
@@ -476,14 +478,15 @@ impl Handler {
             }
         }
 
-        // Fetch + parse + process_servers (ping + batch test), same as Tauri path.
+        // Fetch + parse + process_servers_incremental (ping + batch test), same as Tauri path.
         // Servers only appear in the profile AFTER full testing (no raw saves).
-        let (data_dir, settings, cache) = {
+        let (data_dir, settings, cache, db) = {
             let state = self.state.lock().await;
             (
                 state.data_dir.clone(),
                 state.settings_mgr.load().unwrap_or_default(),
                 state.cache.clone(),
+                state.db.clone(),
             )
         };
 
@@ -496,11 +499,16 @@ impl Handler {
                 .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
         };
 
-        let servers = crate::profile::process_servers_headless(
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let servers = crate::profile::process_servers_incremental(
             &data_dir,
             &settings,
             servers,
             &profile_id,
+            tokio_util::sync::CancellationToken::new(),
+            event_tx,
+            None, // progress_tx — MCP has no Tauri events
+            &db,
             &cache,
         )
         .await;
@@ -535,8 +543,8 @@ impl Handler {
             .ok_or_else(|| ErrorData::invalid_params("'id' is required", None))?
             .to_string();
 
-        // Phase 1: read lock — get URL + old servers + settings + data_dir
-        let (url, _old_servers, data_dir, settings, cache) = {
+        // Phase 1: read lock — get URL + old servers + settings + data_dir + db
+        let (url, _old_servers, data_dir, settings, cache, db) = {
             let state = self.state.lock().await;
             let profile = state
                 .profile_mgr
@@ -551,7 +559,8 @@ impl Handler {
             let data_dir = state.data_dir.clone();
             let settings = state.settings_mgr.load().unwrap_or_default();
             let cache = state.cache.clone();
-            (url, old_servers, data_dir, settings, cache)
+            let db = state.db.clone();
+            (url, old_servers, data_dir, settings, cache, db)
         }; // lock released
 
         // Spawn background task for long operations (fetch, ping, batch test)
@@ -560,11 +569,16 @@ impl Handler {
         tokio::spawn(async move {
             match crate::subscription::fetch_subscription(&url, None).await {
                 Ok(servers) => {
-                    let enriched = crate::profile::process_servers_headless(
+                    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let enriched = crate::profile::process_servers_incremental(
                         &data_dir,
                         &settings,
                         servers,
                         &bg_id,
+                        tokio_util::sync::CancellationToken::new(),
+                        event_tx,
+                        None, // progress_tx — MCP has no Tauri events
+                        &db,
                         &cache,
                     )
                     .await;
@@ -1033,21 +1047,27 @@ impl Handler {
         }
         let profile_id = uuid::Uuid::new_v4().to_string();
 
-        // Extract cache + data_dir, run process_servers, then save
-        let (processed, _data_dir, cache) = {
+        // Extract cache + data_dir + db, run process_servers_incremental, then save
+        let (processed, _data_dir, cache, _db) = {
             let state = self.state.lock().await;
             let data_dir = state.data_dir.clone();
             let cache = state.cache.clone();
+            let db = state.db.clone();
             drop(state);
-            let processed = crate::profile::process_servers_headless(
+            let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let processed = crate::profile::process_servers_incremental(
                 &data_dir,
                 &crate::settings::AppSettings::default(),
                 servers,
                 &profile_id,
+                tokio_util::sync::CancellationToken::new(),
+                event_tx,
+                None, // progress_tx — MCP has no Tauri events
+                &db,
                 &cache,
             )
             .await;
-            (processed, data_dir, cache)
+            (processed, data_dir, cache, db)
         };
 
         // Persist cache to disk

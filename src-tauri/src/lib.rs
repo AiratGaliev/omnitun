@@ -1361,18 +1361,45 @@ async fn refresh_subscription(
                 "Refresh failed, bumping updated_at: {e}"
             );
             let re_enriched = if !old_servers.is_empty() {
-                crate::profile::process_servers(
-                    &app,
-                    old_servers
-                        .into_iter()
-                        .map(|mut s| {
-                            s.ping_ms = None;
-                            s
-                        })
-                        .collect(),
-                    &id,
-                )
-                .await
+                match app.path().app_data_dir() {
+                    Ok(data_dir) => {
+                        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                        let settings = app
+                            .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
+                            .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
+                            .unwrap_or_default();
+                        let cache = app
+                            .try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
+                            .map(|c| c.as_ref().clone());
+                        let db = app
+                            .try_state::<crate::db::DbPool>()
+                            .map(|s| -> crate::db::DbPool { (*s).clone() });
+                        match (cache, db) {
+                            (Some(c), Some(d)) => {
+                                crate::profile::process_servers_incremental(
+                                    &data_dir,
+                                    &settings,
+                                    old_servers
+                                        .into_iter()
+                                        .map(|mut s| {
+                                            s.ping_ms = None;
+                                            s
+                                        })
+                                        .collect(),
+                                    &id,
+                                    tokio_util::sync::CancellationToken::new(),
+                                    event_tx,
+                                    None, // progress_tx — error recovery, no progress needed
+                                    &d,
+                                    &c,
+                                )
+                                .await
+                            }
+                            _ => Vec::new(),
+                        }
+                    }
+                    Err(_) => Vec::new(),
+                }
             } else {
                 Vec::new()
             };
@@ -1390,54 +1417,48 @@ async fn refresh_subscription(
         }
     };
 
-    // Preserve exit IP data
-    type ExitData = (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
-    let old_exit: std::collections::HashMap<String, ExitData> = old_servers
-        .iter()
-        .map(|s| {
-            (
-                s.id.clone(),
-                (
-                    s.exit_server.clone(),
-                    s.exit_flag.clone(),
-                    s.exit_country_name.clone(),
-                    s.exit_city_name.clone(),
-                ),
+    // Process servers: ping + batch_test + GeoIP + exit data restore (long, no lock)
+    {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let data_dir = match app.path().app_data_dir() {
+            Ok(d) => d,
+            Err(_) => return Err(ProxyError::subscription(
+                crate::proxy::ErrorCode::SubscriptionSaveFailed,
+                "Failed to get app data directory".to_string(),
+            )),
+        };
+        let settings = app
+            .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
+            .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
+            .unwrap_or_default();
+        let cache = app
+            .try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
+            .map(|c| c.as_ref().clone());
+        let db = app
+            .try_state::<crate::db::DbPool>()
+            .map(|s| -> crate::db::DbPool { (*s).clone() });
+        if let (Some(c), Some(d)) = (cache, db) {
+            // Create progress channel — forward to Tauri UI events
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+            let progress_app = app.clone();
+            tokio::spawn(async move {
+                while let Some(progress) = progress_rx.recv().await {
+                    crate::events::emit_refresh_progress(&progress_app, progress);
+                }
+            });
+
+            servers = crate::profile::process_servers_incremental(
+                &data_dir,
+                &settings,
+                servers,
+                &id,
+                tokio_util::sync::CancellationToken::new(),
+                event_tx,
+                Some(progress_tx),
+                &d,
+                &c,
             )
-        })
-        .collect();
-    // Also preserve ping_ms so the UI doesn't show "—" after refresh.
-    let old_ping: std::collections::HashMap<String, Option<u64>> = old_servers
-        .iter()
-        .map(|s| (s.id.clone(), s.ping_ms))
-        .collect();
-
-    // process_servers: ping + batch_test + GeoIP (long, no lock)
-    servers = crate::profile::process_servers(&app, servers, &id).await;
-
-    // Restore preserved exit data
-    for server in &mut servers {
-        if server.behind_cdn {
-            continue;
-        }
-        if server.exit_server.is_none() {
-            if let Some(saved) = old_exit.get(&server.id) {
-                server.exit_server = saved.0.clone();
-                server.exit_flag = saved.1.clone();
-                server.exit_country_name = saved.2.clone();
-                server.exit_city_name = saved.3.clone();
-            }
-        }
-        // Restore ping_ms — don't overwrite if process_servers already set it.
-        if server.ping_ms.is_none() {
-            if let Some(ping) = old_ping.get(&server.id) {
-                server.ping_ms = *ping;
-            }
+            .await;
         }
     }
 
@@ -1498,9 +1519,9 @@ async fn refresh_subscription(
 ///     Re-tests EXISTING servers to keep latency/exit-IP fresh.
 ///     Cadence: `auto_test_interval`.
 ///
-/// `process_servers_inner` is reused — it already skips batch-test for
-/// servers with fresh positive cache, so testing is cheap when servers
-/// haven't changed.
+/// Uses `clash_api_test` directly (no GeoIP, no batch test, no exit IP fetch)
+/// since the servers already have this data from the last full refresh.
+/// Servers with fresh positive cache are skipped by the preflight check.
 ///
 /// Updates `last_tested` (not `updated_at`) so the test timer doesn't
 /// immediately re-test after a refresh.
@@ -2633,7 +2654,7 @@ async fn import_subscription_content(
         format!("Importing subscription content: {name}"),
     );
 
-    let servers = crate::subscription::parser::parse_subscription(&content).map_err(|e| {
+    let mut servers = crate::subscription::parser::parse_subscription(&content).map_err(|e| {
         log(
             &app,
             &logger,
@@ -2658,10 +2679,39 @@ async fn import_subscription_content(
         ));
     }
 
-    // Use the profile_id passed by the frontend so refresh-progress
-    // events carry the REAL profile ID — the frontend can then attach
-    // progress to the pending profile in its state.
-    let servers = crate::profile::process_servers(&app, servers, &profile_id).await;
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let progress_app = app.clone();
+    tokio::spawn(async move {
+        while let Some(progress) = progress_rx.recv().await {
+            crate::events::emit_refresh_progress(&progress_app, progress);
+        }
+    });
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        let settings = app
+            .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
+            .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
+            .unwrap_or_default();
+        if let (Some(cache), Some(db)) = (
+            app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
+                .map(|s| s.as_ref().clone()),
+            app.try_state::<crate::db::DbPool>()
+                .map(|s| -> crate::db::DbPool { (*s).clone() }),
+        ) {
+            servers = crate::profile::process_servers_incremental(
+                &data_dir,
+                &settings,
+                servers,
+                &profile_id,
+                tokio_util::sync::CancellationToken::new(),
+                event_tx,
+                Some(progress_tx),
+                &db,
+                &cache,
+            )
+            .await;
+        }
+    }
 
     // Persist cache to disk so batch-test results survive app restart.
     if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
@@ -2724,7 +2774,7 @@ async fn import_subscription_file(
     })?;
 
     // Try to parse as subscription data
-    let servers = crate::subscription::parser::parse_subscription(&content).map_err(|e| {
+    let mut servers = crate::subscription::parser::parse_subscription(&content).map_err(|e| {
         log(
             &app,
             &logger,
@@ -2759,9 +2809,42 @@ async fn import_subscription_file(
     let url = format!("file://{}", file_path);
 
     // Pre-generate profile_id so refresh-progress events emitted during
-    // process_servers carry the REAL profile ID.
+    // processing carry the REAL profile ID.
     let profile_id = uuid::Uuid::new_v4().to_string();
-    let servers = crate::profile::process_servers(&app, servers, &profile_id).await;
+
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let progress_app = app.clone();
+    tokio::spawn(async move {
+        while let Some(progress) = progress_rx.recv().await {
+            crate::events::emit_refresh_progress(&progress_app, progress);
+        }
+    });
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        let settings = app
+            .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
+            .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
+            .unwrap_or_default();
+        if let (Some(cache), Some(db)) = (
+            app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
+                .map(|s| s.as_ref().clone()),
+            app.try_state::<crate::db::DbPool>()
+                .map(|s| -> crate::db::DbPool { (*s).clone() }),
+        ) {
+            servers = crate::profile::process_servers_incremental(
+                &data_dir,
+                &settings,
+                servers,
+                &profile_id,
+                tokio_util::sync::CancellationToken::new(),
+                event_tx,
+                Some(progress_tx),
+                &db,
+                &cache,
+            )
+            .await;
+        }
+    }
     let server_count = servers.len();
 
     // Persist cache to disk so batch-test results survive app restart.
@@ -2972,7 +3055,7 @@ async fn initialize_app(
     //
     // ПОЧЕМУ ЭТО НАДО:
     //   - enrich_loaded проверяет только при старте приложения.
-    //   - process_servers проверяет только при refresh.
+    //   - process_servers_incremental проверяет только при refresh.
     //   - Между этими событиями (минуты/часы) CDN-сервер может получить
     //     exit-данные из-за бага в кеше или runtime-операции.
     //   - Без periodic checker баг будет невидим до следующего refresh.

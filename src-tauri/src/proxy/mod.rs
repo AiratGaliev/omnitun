@@ -424,7 +424,7 @@ impl ServerProfile {
     /// below would have been caught immediately by this checker:
     ///
     /// 1. **2026-07-01 — exit restore loop in refresh**:
-    ///    `process_servers` cleared CDN exit data, but `ProfileManager::refresh`
+    ///    `process_servers_incremental` cleared CDN exit data, but `ProfileManager::refresh`
     ///    restored them from `old_exit` without checking `behind_cdn`.
     ///
     /// 2. **2026-07-03 — test_single_server overrode behind_cdn**:

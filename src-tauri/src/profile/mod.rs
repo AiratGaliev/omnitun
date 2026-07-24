@@ -39,9 +39,7 @@ pub(crate) fn proxy_port_from_app(app: &AppHandle) -> Option<u16> {
 
 pub struct ProfileManager {
     profiles: Vec<SubscriptionProfile>,
-    /// The async DbPool — reserved for future streaming pipeline.
-    /// Currently unused; all load/save go through `sync_conn`.
-    #[allow(dead_code)]
+    /// The async DbPool — shared with process_servers_incremental.
     db: DbPool,
     /// Path to the data directory (used to open the sync SQLite connection).
     _data_dir: PathBuf,
@@ -514,7 +512,7 @@ impl ProfileManager {
 
         // Save profile to disk IMMEDIATELY (with empty servers) so profiles.json
         // exists even if the app is closed during the long batch test below.
-        // After process_servers completes, the in-memory profile is updated
+        // After process_servers_incremental completes, the in-memory profile is updated
         // and saved again with the tested servers.
         let initial = SubscriptionProfile {
             id: profile_id.clone(),
@@ -530,8 +528,44 @@ impl ProfileManager {
         self.profiles.push(initial);
         self.save()?;
 
-        // Run the test (original synchronous flow — this IS the auto-refresh)
-        servers = process_servers(app, servers, &profile_id).await;
+        // Run the test — direct call to process_servers_incremental with self.db
+        servers = {
+            let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+            let progress_app = app.clone();
+            tokio::spawn(async move {
+                while let Some(progress) = progress_rx.recv().await {
+                    crate::events::emit_refresh_progress(&progress_app, progress);
+                }
+            });
+            if let Ok(data_dir) = app.path().app_data_dir() {
+                let settings = app
+                    .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
+                    .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
+                    .unwrap_or_default();
+                if let Some(cache) = app
+                    .try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
+                    .map(|c| c.as_ref().clone())
+                {
+                    process_servers_incremental(
+                        &data_dir,
+                        &settings,
+                        servers,
+                        &profile_id,
+                        tokio_util::sync::CancellationToken::new(),
+                        event_tx,
+                        Some(progress_tx),
+                        &self.db,
+                        &cache,
+                    )
+                    .await
+                } else {
+                    servers
+                }
+            } else {
+                servers
+            }
+        };
 
         // Persist cache to disk so negative entries survive app restart.
         if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
@@ -545,7 +579,7 @@ impl ProfileManager {
                 .map(|(used, total, expiry)| (Some(used), Some(total), expiry))
                 .unwrap_or((None, None, None));
 
-        // Update the existing profile in-place (was saved empty before process_servers)
+        // Update the existing profile in-place (was saved empty before process_servers_incremental)
         if let Some(existing) = self.profiles.iter_mut().find(|p| p.id == profile_id) {
             existing.servers = servers;
             existing.updated_at = chrono::Utc::now().to_rfc3339();
@@ -585,7 +619,7 @@ impl ProfileManager {
 
     /// Phase 3 of lock-splitting refresh: commit new servers under write lock.
     ///
-    /// Called AFTER all long operations (HTTP fetch, process_servers, traffic
+    /// Called AFTER all long operations (HTTP fetch, process_servers_incremental, traffic
     /// fetch) are complete. The write lock is held for <50 ms.
     ///
     /// Re-validates that the profile still exists (it might have been removed
@@ -657,7 +691,7 @@ impl ProfileManager {
     ///   - Does NOT fetch traffic info
     ///   - Does NOT call `handle_subscription_refresh` (no new server IDs)
     ///
-    /// Called by the `test_servers` Tauri command after `process_servers_inner`
+    /// Called by the `test_servers` Tauri command after `clash_api_test`
     /// re-tests existing servers.
     pub async fn commit_test(
         &mut self,
@@ -1195,16 +1229,72 @@ async fn get_old_servers_map(
     })
 }
 
-/// Three-phase server processing with incremental event emission and
+/// Read old exit data (exit_server, exit_flag, exit_country_name, exit_city_name)
+/// from the `servers` table for a given profile. Returns HashMap keyed by server_hash.
+///
+/// Used by Phase 0.5 in process_servers_incremental to restore exit data that would
+/// otherwise be lost when the old servers are DELETEd and re-INSERTed.
+type ExitData = (Option<String>, Option<String>, Option<String>, Option<String>);
+
+async fn get_old_servers_exit(
+    profile_id: &str,
+    db: &DbPool,
+) -> HashMap<String, ExitData> {
+    let pid = profile_id.to_string();
+    db.call(move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT server_hash, exit_server, exit_flag, exit_country_name, exit_city_name
+             FROM servers WHERE profile_id = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pid], |row| {
+            let server_hash: String = row.get(0)?;
+            let exit_server: Option<String> = row.get(1)?;
+            let exit_flag: Option<String> = row.get(2)?;
+            let exit_country_name: Option<String> = row.get(3)?;
+            let exit_city_name: Option<String> = row.get(4)?;
+            Ok((server_hash, (exit_server, exit_flag, exit_country_name, exit_city_name)))
+        })?;
+        rows.collect::<rusqlite::Result<HashMap<String, ExitData>>>()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Read old ping_ms from the `servers` table for a given profile.
+/// Returns HashMap keyed by server_hash.
+async fn get_old_servers_ping(
+    profile_id: &str,
+    db: &DbPool,
+) -> HashMap<String, Option<u64>> {
+    let pid = profile_id.to_string();
+    db.call(move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT server_hash, ping_ms FROM servers WHERE profile_id = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![pid], |row| {
+            let server_hash: String = row.get(0)?;
+            let ping_ms: Option<u64> = row.get(1)?;
+            Ok((server_hash, ping_ms))
+        })?;
+        rows.collect::<rusqlite::Result<HashMap<String, Option<u64>>>>()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Multi-phase server processing with incremental event emission and
 /// SQLite persistence.
 ///
-/// Phase 0 (init): prepare + INSERT + emit static data
+/// Phase 0 (prepare + INSERT): dedup, ID preservation, cross-profile dedup, INSERT
+/// Phase 0.5 (restore): restore exit data + ping from old DB rows
 /// Phase 1 (cache): emit fresh cached entries from server_cache table
 /// Phase 2 (preflight): Clash API ping test + pre-filter dead servers
 /// Phase 3 (batch): deep test via BatchingEngine, write results to SQLite
 ///
-/// Each phase emits `ServerTestedEvent` via `event_tx` so the frontend
-/// sees servers appear incrementally.
+/// Each phase emits `ServerTestedEvent` via `event_tx` for streaming UI updates.
+/// When `progress_tx` is `Some`, aggregate `RefreshProgress` is emitted after each
+/// phase for the progress bar (caller must forward to `emit_refresh_progress`).
+/// Pass `None` for headless contexts (MCP server).
 #[allow(clippy::too_many_arguments)]
 pub async fn process_servers_incremental(
     data_dir: &Path,
@@ -1213,6 +1303,7 @@ pub async fn process_servers_incremental(
     profile_id: &str,
     cancel: CancellationToken,
     event_tx: mpsc::UnboundedSender<crate::events::ServerTestedEvent>,
+    progress_tx: Option<mpsc::UnboundedSender<crate::events::RefreshProgress>>,
     db: &DbPool,
     cache: &crate::proxy::cache::ServerCache,
 ) -> Vec<ServerProfile> {
@@ -1318,6 +1409,12 @@ pub async fn process_servers_incremental(
             before - unique.len());
     }
 
+    // ═══ PHASE 0.5: Read old exit/ping BEFORE DELETE ════════════════
+    // Must read before DELETE+INSERT below, because the old rows are gone
+    // after the delete. Keyed by server_hash (= server.id after ID preservation).
+    let old_exit = get_old_servers_exit(profile_id, db).await;
+    let old_ping = get_old_servers_ping(profile_id, db).await;
+
     // INSERT to SQLite
     let pid = profile_id.to_string();
     let servers_for_insert = unique.clone();
@@ -1331,8 +1428,14 @@ pub async fn process_servers_incremental(
                     rusqlite::params![pid],
                 )?;
                 for s in &servers_for_insert {
-                    tx.execute(
-                        "INSERT INTO servers
+                    // Per-row graceful error handling: skip servers that fail
+                    // constraints (NOT NULL ping_ms, CHECK v3, UNIQUE server_hash)
+                    // instead of aborting the entire transaction. This guarantees
+                    // the DELETE of old servers is committed even when some new
+                    // servers are invalid — critical for cross-profile dedup to
+                    // function correctly on subsequent calls.
+                    if let Err(e) = tx.execute(
+                        "INSERT OR REPLACE INTO servers
                  (profile_id, server_hash, protocol, server, port,
                   uuid, password, method, sni, flow,
                   public_key, private_key,
@@ -1379,7 +1482,13 @@ pub async fn process_servers_incremental(
                             s.exit_city_name,
                             s.original_name,
                         ],
-                    )?;
+                    ) {
+                        tracing::warn!(
+                            target: "subscription",
+                            "Skipping server {}: DB constraint: {e}",
+                            s.id,
+                        );
+                    }
                 }
                 tx.commit()?;
                 Ok(())
@@ -1387,7 +1496,34 @@ pub async fn process_servers_incremental(
         )
         .await;
 
-    // Emit init events
+    // ═══ PHASE 0.5: Restore exit data + ping from old rows ═══════════
+    // After the DELETE+INSERT above, row exit data is gone. Restore it
+    // from the HashMap we saved before the delete. Only restore for
+    // non-CDN servers that don't have exit data yet (the pipeline
+    // may set new exit data in Phase 3, but we don't want blank entries
+    // in the meantime).
+    for s in &mut unique {
+        if s.behind_cdn {
+            continue;
+        }
+        if s.exit_server.is_none() {
+            if let Some(saved) = old_exit.get(&s.id) {
+                s.exit_server = saved.0.clone();
+                s.exit_flag = saved.1.clone();
+                s.exit_country_name = saved.2.clone();
+                s.exit_city_name = saved.3.clone();
+            }
+        }
+        // Restore ping_ms — don't overwrite if the fresh servers already have it
+        // (unlikely at this stage, but be safe).
+        if s.ping_ms.is_none() {
+            if let Some(ping) = old_ping.get(&s.id) {
+                s.ping_ms = *ping;
+            }
+        }
+    }
+
+    // Emit init events — now with restored exit data + ping_ms
     let pid = profile_id.to_string();
     for s in &unique {
         if cancel.is_cancelled() {
@@ -1405,11 +1541,11 @@ pub async fn process_servers_incremental(
                 flag: s.flag.clone(),
                 country_name: s.country_name.clone(),
             }),
-            ping_ms: None,
-            exit_server: None,
-            exit_flag: None,
-            exit_country_name: None,
-            exit_city_name: None,
+            ping_ms: s.ping_ms,
+            exit_server: s.exit_server.clone(),
+            exit_flag: s.exit_flag.clone(),
+            exit_country_name: s.exit_country_name.clone(),
+            exit_city_name: s.exit_city_name.clone(),
             behind_cdn: Some(s.behind_cdn),
             error: None,
         });
@@ -1418,6 +1554,22 @@ pub async fn process_servers_incremental(
     if cancel.is_cancelled() {
         tracing::info!(target: "subscription", "Refresh cancelled during Phase 0");
         return Vec::new();
+    }
+
+    // Progress: Phase 0 complete — emit total
+    let total_servers = unique.len();
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(crate::events::RefreshProgress {
+            profile_id: profile_id.to_string(),
+            total: total_servers,
+            tested: 0,
+            cache_hits: 0,
+            successful: 0,
+            failed: 0,
+            phase: "dedup".into(),
+            updated_at: String::new(),
+            last_tested: None,
+        });
     }
 
     // ═══ PHASE 1: Cache hit ══════════════════════════════════════════
@@ -1476,14 +1628,58 @@ pub async fn process_servers_incremental(
         "Phase 1: {cache_hit_count} cache hits, {} servers need batch test",
         needs_batch.len());
 
+    // Progress: Phase 1 — emit cache hits
+    let tested_so_far = cache_hit_count;
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(crate::events::RefreshProgress {
+            profile_id: profile_id.to_string(),
+            total: total_servers,
+            tested: tested_so_far,
+            cache_hits: cache_hit_count,
+            successful: cache_hit_count,
+            failed: 0,
+            phase: "cache".into(),
+            updated_at: String::new(),
+            last_tested: None,
+        });
+    }
+
     if cancel.is_cancelled() {
         tracing::info!(target: "subscription", "Refresh cancelled during Phase 1");
+        // Emit done progress before returning
+        if let Some(ref tx) = progress_tx {
+            let _ = tx.send(crate::events::RefreshProgress {
+                profile_id: profile_id.to_string(),
+                total: total_servers,
+                tested: total_servers,
+                cache_hits: cache_hit_count,
+                successful: cache_hit_count,
+                failed: 0,
+                phase: "done".into(),
+                updated_at: String::new(),
+                last_tested: None,
+            });
+        }
         return Vec::new();
     }
 
     // ═══ PHASE 2: Preflight (Clash API) ══════════════════════════════
     if needs_batch.is_empty() {
         tracing::info!(target: "subscription", "All servers cached — skipping preflight and batch");
+        // Emit done progress early
+        if let Some(ref tx) = progress_tx {
+            let _ = tx.send(crate::events::RefreshProgress {
+                profile_id: profile_id.to_string(),
+                total: total_servers,
+                tested: total_servers,
+                cache_hits: cache_hit_count,
+                successful: cache_hit_count,
+                failed: 0,
+                phase: "done".into(),
+                updated_at: String::new(),
+                last_tested: None,
+            });
+        }
         return needs_batch;
     }
 
@@ -1558,6 +1754,23 @@ pub async fn process_servers_incremental(
                 error: None,
             });
         }
+    }
+
+    // Progress: Phase 2 complete — emit preflight results
+    let alive_after_preflight = needs_batch.len();
+    let preflight_failed = total_servers.saturating_sub(tested_so_far + alive_after_preflight);
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(crate::events::RefreshProgress {
+            profile_id: profile_id.to_string(),
+            total: total_servers,
+            tested: tested_so_far + ping_count,
+            cache_hits: cache_hit_count,
+            successful: cache_hit_count + alive_after_preflight,
+            failed: preflight_failed,
+            phase: "preflight".into(),
+            updated_at: String::new(),
+            last_tested: None,
+        });
     }
 
     // ═══ PHASE 1.5: DNS resolve + GeoIP + CDN entry detection ════════
@@ -1728,6 +1941,22 @@ pub async fn process_servers_incremental(
         }
     }
 
+    // Progress: Phase 3 complete — emit batch results
+    let batch_successful = needs_batch.len();
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(crate::events::RefreshProgress {
+            profile_id: profile_id.to_string(),
+            total: total_servers,
+            tested: total_servers,
+            cache_hits: cache_hit_count,
+            successful: tested_so_far + batch_successful,
+            failed: total_servers.saturating_sub(tested_so_far + batch_successful),
+            phase: "batch".into(),
+            updated_at: String::new(),
+            last_tested: None,
+        });
+    }
+
     // Non-CDN servers without exit data — alive (passed ping) but no route
     // (outlet IP fetch failed). Batcher already called update_negative.
     // Remove from needs_batch so save() doesn't hit CHECK constraint.
@@ -1751,124 +1980,24 @@ pub async fn process_servers_incremental(
         );
     }
 
-    // Return the servers — caller (lib.rs) does the final commit
-    needs_batch
-}
-
-/// Deduplicate servers, apply user filters, run ping, enrich GeoIP flag.
-/// Logs each step (dedup count, testing, unreachable count, final count).
-///
-/// Tauri wrapper — extracts data_dir, settings, cache from AppHandle.
-pub async fn process_servers(
-    app: &AppHandle,
-    servers: Vec<ServerProfile>,
-    profile_id: &str,
-) -> Vec<ServerProfile> {
-    use tokio::sync::mpsc;
-    use tokio_util::sync::CancellationToken;
-
-    let data_dir = match app.path().app_data_dir() {
-        Ok(d) => d,
-        Err(_) => return servers,
-    };
-    let settings = app
-        .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
-        .and_then(|s| s.try_lock().ok().map(|g| g.clone()))
-        .unwrap_or_default();
-    let cache = app
-        .try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
-        .map(|c| c.as_ref().clone());
-    let db = app
-        .try_state::<crate::db::DbPool>()
-        .map(|s| -> crate::db::DbPool { (*s).clone() });
-
-    let (cache, db) = match (cache, db) {
-        (Some(c), Some(d)) => (c, d),
-        _ => return servers,
-    };
-
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
-
-    let total_count = servers.len();
-
-    // Emit initial progress so frontend shows the progress bar
-    crate::events::emit_refresh_progress(
-        app,
-        crate::events::RefreshProgress {
+    // Progress: emit done
+    let final_successful = needs_batch.len();
+    if let Some(ref tx) = progress_tx {
+        let _ = tx.send(crate::events::RefreshProgress {
             profile_id: profile_id.to_string(),
-            total: total_count,
-            tested: 0,
-            cache_hits: 0,
-            successful: 0,
-            failed: 0,
-            phase: "preparing".into(),
-            updated_at: String::new(),
-            last_tested: None,
-        },
-    );
-
-    let result = process_servers_incremental(
-        &data_dir,
-        &settings,
-        servers,
-        profile_id,
-        CancellationToken::new(),
-        event_tx,
-        &db,
-        &cache,
-    )
-    .await;
-
-    // Emit completion progress
-    let success_count = result.len();
-    let fail_count = total_count.saturating_sub(success_count);
-    crate::events::emit_refresh_progress(
-        app,
-        crate::events::RefreshProgress {
-            profile_id: profile_id.to_string(),
-            total: total_count,
-            tested: total_count,
-            cache_hits: 0,
-            successful: success_count,
-            failed: fail_count,
+            total: total_servers,
+            tested: total_servers,
+            cache_hits: cache_hit_count,
+            successful: final_successful,
+            failed: total_servers.saturating_sub(final_successful),
             phase: "done".into(),
             updated_at: String::new(),
             last_tested: None,
-        },
-    );
+        });
+    }
 
-    result
-}
-
-/// Headless version — takes data_dir, settings, cache directly (no Tauri dependency).
-/// Used by MCP server and any non-Tauri contexts. Creates a temporary DB connection
-/// internally and discards incremental events (no frontend to receive them).
-pub async fn process_servers_headless(
-    data_dir: &Path,
-    settings: &crate::settings::AppSettings,
-    servers: Vec<ServerProfile>,
-    profile_id: &str,
-    cache: &crate::proxy::cache::ServerCache,
-) -> Vec<ServerProfile> {
-    use tokio::sync::mpsc;
-    use tokio_util::sync::CancellationToken;
-
-    let db = match crate::db::init_db(data_dir).await {
-        Ok(d) => d,
-        Err(_) => return servers,
-    };
-    let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    process_servers_incremental(
-        data_dir,
-        settings,
-        servers,
-        profile_id,
-        CancellationToken::new(),
-        event_tx,
-        &db,
-        cache,
-    )
-    .await
+    // Return the servers — caller (lib.rs) does the final commit
+    needs_batch
 }
 
 /// Create an in-memory SQLite database for tests.
