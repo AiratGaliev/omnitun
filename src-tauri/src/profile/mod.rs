@@ -247,6 +247,8 @@ impl ProfileManager {
             )
         })?;
 
+        let mut inserted_ok = std::collections::HashSet::new();
+
         for profile in &self.profiles {
             // Upsert profile
             tx.execute(
@@ -334,9 +336,11 @@ impl ProfileManager {
                 ) {
                     tracing::warn!(
                         target: "subscription",
-                        "Skipping server {} ({}:{}, original_name={:?}): DB constraint: {e}",
-                        server.id, server.server, server.port, server.original_name,
+                        "Skipping server {}: DB constraint: {e}",
+                        server.id,
                     );
+                } else {
+                    inserted_ok.insert(server.id.clone());
                 }
             }
         }
@@ -347,6 +351,21 @@ impl ProfileManager {
                 format!("Failed to commit transaction: {e}"),
             )
         })?;
+
+        // Sync in-memory profiles with DB: remove servers that were rejected
+        // by constraints (e.g. duplicate server_hash, missing exit data).
+        for profile in &mut self.profiles {
+            let before = profile.servers.len();
+            profile.servers.retain(|s| inserted_ok.contains(&s.id));
+            if profile.servers.len() < before {
+                tracing::info!(
+                    target: "subscription",
+                    "Removed {} server(s) from in-memory profile '{}' that failed DB constraint",
+                    before - profile.servers.len(),
+                    profile.name,
+                );
+            }
+        }
 
         Ok(())
     }
@@ -1264,10 +1283,40 @@ pub async fn process_servers_incremental(
     })
     .await
     .unwrap_or_default();
+    let mut unique = unique;
 
     tracing::info!(target: "subscription",
         "Phase 0: {}/{} servers unique after dedup+filter",
         unique.len(), initial_count);
+
+    // Cross-profile dedup: skip servers whose server_hash already belongs to
+    // another profile. Query the `servers` table (which stores per-profile
+    // servers), filtering out the current profile to avoid self-dedup.
+    let known_other_hashes: std::collections::HashSet<String> = db
+        .call({
+            let pid = profile_id.to_string();
+            move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT DISTINCT server_hash FROM servers WHERE profile_id != ?1"
+                )?;
+                let rows = stmt.query_map(rusqlite::params![pid], |row| row.get::<_, String>(0))?;
+                let mut hashes = std::collections::HashSet::new();
+                for row in rows.flatten() {
+                    hashes.insert(row);
+                }
+                Ok::<_, rusqlite::Error>(hashes)
+            }
+        })
+        .await
+        .unwrap_or_default();
+
+    let before = unique.len();
+    unique.retain(|s| !known_other_hashes.contains(&s.id));
+    if unique.len() < before {
+        tracing::info!(target: "subscription",
+            "Phase 0: removed {} servers already positive in another subscription",
+            before - unique.len());
+    }
 
     // INSERT to SQLite
     let pid = profile_id.to_string();
@@ -1739,7 +1788,26 @@ pub async fn process_servers(
     };
 
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    process_servers_incremental(
+
+    let total_count = servers.len();
+
+    // Emit initial progress so frontend shows the progress bar
+    crate::events::emit_refresh_progress(
+        app,
+        crate::events::RefreshProgress {
+            profile_id: profile_id.to_string(),
+            total: total_count,
+            tested: 0,
+            cache_hits: 0,
+            successful: 0,
+            failed: 0,
+            phase: "preparing".into(),
+            updated_at: String::new(),
+            last_tested: None,
+        },
+    );
+
+    let result = process_servers_incremental(
         &data_dir,
         &settings,
         servers,
@@ -1749,7 +1817,27 @@ pub async fn process_servers(
         &db,
         &cache,
     )
-    .await
+    .await;
+
+    // Emit completion progress
+    let success_count = result.len();
+    let fail_count = total_count.saturating_sub(success_count);
+    crate::events::emit_refresh_progress(
+        app,
+        crate::events::RefreshProgress {
+            profile_id: profile_id.to_string(),
+            total: total_count,
+            tested: total_count,
+            cache_hits: 0,
+            successful: success_count,
+            failed: fail_count,
+            phase: "done".into(),
+            updated_at: String::new(),
+            last_tested: None,
+        },
+    );
+
+    result
 }
 
 /// Headless version — takes data_dir, settings, cache directly (no Tauri dependency).
