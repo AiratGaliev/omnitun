@@ -1641,7 +1641,7 @@ pub async fn process_servers_incremental(
                 last_tested: None,
             });
         }
-        return needs_batch;
+        return cache_hit_servers;
     }
 
     let preflight_pings = clash_api_test(
@@ -1739,7 +1739,7 @@ pub async fn process_servers_incremental(
 
     // ═══ PHASE 1.5: DNS resolve + GeoIP + CDN entry detection ════════
     if needs_batch.is_empty() {
-        return needs_batch;
+        return cache_hit_servers;
     }
 
     // Lazy init GeoIP
@@ -1871,9 +1871,71 @@ pub async fn process_servers_incremental(
             .await;
     }
 
+    // ═══ PHASE 1.5 POST: Geolocate + restore CDN status for cache_hit_servers ═══
+    // cache_hit_servers from Phase 1 bypass Phase 1.5 DNS resolution, GeoIP
+    // enrichment, and CDN entry-IP CIDR checking. This means:
+    //   1. `flag`, `country_name` are empty → would fail NOT NULL constraint
+    //   2. `behind_cdn` is from Phase 0 (keyword workers.dev/pages.dev ONLY) →
+    //      CIDR-detected CDN servers would have behind_cdn=false + stale exit data
+    //      → I-CDN-1 invariant violation
+    //
+    // Fix: read behind_cdn AND exit-IP status from the positive cache entry that
+    // was set during the previous batch test. The cache entry has the definitive
+    // CDN classification from the last full test cycle.
+    // Fall back to GeoIP enrichment for flag/country_name if the cache is stale.
+    if !cache_hit_servers.is_empty() {
+        // Step 1: Restore behind_cdn + CDN exit clearing from cache
+        for s in &mut cache_hit_servers {
+            let mut pos = cache.get_positive_if_fresh(&s.id).await;
+            if pos.is_none() {
+                pos = cache.get_positive(&s.id).await;
+            }
+            if let Some(pos) = pos {
+                // Restore the CDN classification from the cache (source of truth)
+                if pos.behind_cdn {
+                    s.behind_cdn = true;
+                    s.assert_no_cdn_exit_data("cache_hit_cache_entry");
+                    s.exit_server = None;
+                    s.exit_flag = None;
+                    s.exit_country_name = None;
+                    s.exit_city_name = None;
+                }
+                // If exit flag is missing and cache has it, restore
+                if s.exit_flag.is_none() {
+                    s.exit_flag = pos.exit_flag.clone();
+                }
+            }
+        }
+
+        // Step 2: GeoIP enrichment for flag/country_name (for UI display)
+        if crate::proxy::geoip::is_ready() {
+            for s in &mut cache_hit_servers {
+                if s.flag.is_none() || s.country_name.is_none() {
+                    if let Some(info) = crate::proxy::geoip::resolve_hostname(&s.server).await {
+                        if s.flag.is_none() {
+                            s.flag = Some(info.country_code.clone());
+                        }
+                        if s.country_name.is_none() {
+                            s.country_name = Some(info.country_name.clone());
+                        }
+                        s.city_name = if info.city.is_empty() {
+                            None
+                        } else {
+                            Some(info.city.clone())
+                        };
+                    }
+                }
+            }
+        } else {
+            tracing::warn!(target: "subscription",
+                "GeoIP not ready — cache_hit_servers enriched without GeoIP (flag may be None)"
+            );
+        }
+    }
+
     // ═══ PHASE 3: Deep batch test ════════════════════════════════════
     if needs_batch.is_empty() {
-        return needs_batch;
+        return cache_hit_servers;
     }
 
     crate::proxy::cache::batch_test_incremental(
@@ -1964,8 +2026,14 @@ pub async fn process_servers_incremental(
     // If any server triggers a CHECK v3 or NOT NULL violation, it means a
     // genuine pipeline defect — the constraint fires as designed.
     let survivors_after_filters = needs_batch.len();
+    // ═══ FIX: return_servers must include BOTH cache_hit_servers AND batch survivors ═══
+    // BUG (critical): return_servers = needs_batch.clone() only captured batch-test
+    // survivors. When ALL batch servers failed (e.g. all in negative cache during
+    // preflight followed by batch failure), needs_batch was empty → return_servers empty
+    // → caller saved the profile with 0 servers → ALL previously working servers lost!
+    // Fix: concat cache_hit_servers + needs_batch before moving cache_hit_servers.
+    let return_servers = [&cache_hit_servers[..], &needs_batch[..]].concat();
     let mut all_to_persist = cache_hit_servers;
-    let return_servers = needs_batch.clone();
     all_to_persist.append(&mut needs_batch);
     if !all_to_persist.is_empty() {
         let servers_for_insert = all_to_persist;

@@ -155,7 +155,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
       toast.success(`Latency: ${String(result.delay)} ms`);
     } else {
       addLog('Speed test returned no result', 'warning', 'system');
-      toast.error('Speed test failed');
+      toast.error(t('speedTestFailed'));
     }
     setIsSpeedTesting(false);
   };
@@ -754,7 +754,7 @@ export function Dashboard({ onNavigate }: { readonly onNavigate?: (tab: Tab) => 
                     {isConnected
                       ? activeServer?.protocol
                         ? formatProtocol(activeServer.protocol)
-                        : 'Unknown'
+                        : t('unknown')
                       : t('standby')}
                   </span>
                   <span

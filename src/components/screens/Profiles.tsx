@@ -97,7 +97,7 @@ export function Profiles() {
 
       <div className="mb-8 flex justify-center w-full">
         <AddProfileOptions
-          onAdd={(url, name) => addProfile({ name: name ?? 'New Profile', url })}
+          onAdd={(url, name) => addProfile({ name: name ?? t('newProfile'), url })}
           horizontal={true}
           className="max-w-full"
         />
@@ -182,7 +182,7 @@ const ProfileItem = memo(function ProfileItem({
   const handleSave = () => {
     const result = profileSchema.safeParse({ name: editName, url: editUrl });
     if (!result.success) {
-      toast.error(result.error.issues[0]?.message || 'Invalid form data');
+      toast.error(result.error.issues[0]?.message || t('invalidForm'));
       return;
     }
     updateProfile(p.id, { name: editName, url: editUrl });
