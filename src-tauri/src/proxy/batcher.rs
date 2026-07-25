@@ -521,8 +521,11 @@ async fn process_batch(
                         // Non-CDN server passed ping but no outlet IP — route issue.
                         // Report as negative so it goes to negative cache
                         // with previously_worked=1 (auto-test re-checks fast).
-                        let reason = "No exit IP after batch test (transient route failure)".to_string();
-                        cache.update_negative(&result.server_id, reason.clone()).await;
+                        let reason =
+                            "No exit IP after batch test (transient route failure)".to_string();
+                        cache
+                            .update_negative(&result.server_id, reason.clone())
+                            .await;
                         tracing::warn!(target: "cache",
                             "[Batcher] server {} passed — ping {}ms, NO outlet IP (non-CDN, negative)",
                             result.server_id, result.ping_ms);

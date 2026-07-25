@@ -83,7 +83,8 @@ async fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
     let process_mgr = ProcessManager::new(bin_path.clone());
 
     // Initialize database
-    let db = crate::db::init_db(&data_dir).await
+    let db = crate::db::init_db(&data_dir)
+        .await
         .map_err(|e| format!("Failed to init DB: {e}"))?;
 
     // One-time migration from JSON
@@ -465,6 +466,7 @@ impl Handler {
             .ok_or_else(|| ErrorData::invalid_params("'url' is required", None))?;
         let name = args.get("name").and_then(|v| v.as_str()).unwrap_or(url);
         let url_owned = url.to_string();
+        let name_owned = name.to_string();
         let profile_id = uuid::Uuid::new_v4().to_string();
 
         // Check for duplicate URL before fetching
@@ -478,8 +480,40 @@ impl Handler {
             }
         }
 
-        // Fetch + parse + process_servers_incremental (ping + batch test), same as Tauri path.
-        // Servers only appear in the profile AFTER full testing (no raw saves).
+        // Fetch + parse subscription
+        let raw_servers = if url.starts_with("http://") || url.starts_with("https://") {
+            crate::subscription::fetch_subscription(&url_owned, None)
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+        } else {
+            crate::subscription::parser::parse_subscription(&url_owned)
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+        };
+
+        // Step 0: save empty profile with real name/url BEFORE process_servers_incremental
+        // so Phase 3 POST's FOREIGN KEY constraint has a parent row to reference.
+        // Matches Tauri ProfileManager::add() behavior (lines 528-608).
+        {
+            let mut state = self.state.lock().await;
+            let initial = crate::subscription::SubscriptionProfile {
+                id: profile_id.clone(),
+                name: name_owned.clone(),
+                url: url_owned.clone(),
+                servers: Vec::new(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                last_tested: None,
+                traffic_used: None,
+                traffic_total: None,
+                traffic_expiry: None,
+            };
+            state.profile_mgr.list_mut().push(initial);
+            state
+                .profile_mgr
+                .save()
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        }
+
+        // process_servers_incremental — FK now satisfied because profile row exists
         let (data_dir, settings, cache, db) = {
             let state = self.state.lock().await;
             (
@@ -490,50 +524,42 @@ impl Handler {
             )
         };
 
-        let servers = if url.starts_with("http://") || url.starts_with("https://") {
-            crate::subscription::fetch_subscription(&url_owned, None)
-                .await
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
-        } else {
-            crate::subscription::parser::parse_subscription(&url_owned)
-                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
-        };
-
         let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let servers = crate::profile::process_servers_incremental(
+        let tested = crate::profile::process_servers_incremental(
             &data_dir,
             &settings,
-            servers,
+            raw_servers,
             &profile_id,
             tokio_util::sync::CancellationToken::new(),
             event_tx,
-            None, // progress_tx — MCP has no Tauri events
+            None,
             &db,
             &cache,
         )
         .await;
+        cache.save_to_disk().await;
 
-        let profile = crate::subscription::SubscriptionProfile {
-            id: profile_id,
-            url: url_owned,
-            name: name.into(),
-            servers,
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            last_tested: Some(chrono::Utc::now().to_rfc3339()),
-            traffic_used: None,
-            traffic_total: None,
-            traffic_expiry: None,
-        };
-
+        // Update profile with tested servers
         let mut state = self.state.lock().await;
-        state.profile_mgr.list_mut().push(profile.clone());
-        state
+        if let Some(existing) = state
             .profile_mgr
-            .save()
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-
-        let j = serde_json::to_string_pretty(&profile).unwrap_or_default();
-        Ok(CallToolResult::success(vec![ContentBlock::text(j)]))
+            .list_mut()
+            .iter_mut()
+            .find(|p| p.id == profile_id)
+        {
+            existing.servers = tested;
+            existing.updated_at = chrono::Utc::now().to_rfc3339();
+            existing.last_tested = Some(chrono::Utc::now().to_rfc3339());
+        }
+        let _ = state.profile_mgr.save();
+        let result = state
+            .profile_mgr
+            .list()
+            .iter()
+            .find(|p| p.id == profile_id)
+            .map(|p| serde_json::to_string_pretty(p).unwrap_or_default())
+            .unwrap_or_else(|| "null".to_string());
+        Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
     }
 
     async fn cmd_refresh_sub(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
@@ -582,6 +608,10 @@ impl Handler {
                         &cache,
                     )
                     .await;
+
+                    // Persist cache to disk so batch-test results survive app restart.
+                    cache.save_to_disk().await;
+
                     {
                         let mut state = bg_state.lock().await;
                         if let Some(profile) = state
@@ -1046,40 +1076,40 @@ impl Handler {
             ));
         }
         let profile_id = uuid::Uuid::new_v4().to_string();
+        let content_url = format!("content://{}", uuid::Uuid::new_v4());
 
         // Extract cache + data_dir + db, run process_servers_incremental, then save
-        let (processed, _data_dir, cache, _db) = {
+        let (processed, cache) = {
             let state = self.state.lock().await;
             let data_dir = state.data_dir.clone();
             let cache = state.cache.clone();
             let db = state.db.clone();
+            let settings = state.settings_mgr.load().unwrap_or_default();
             drop(state);
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
             let processed = crate::profile::process_servers_incremental(
                 &data_dir,
-                &crate::settings::AppSettings::default(),
+                &settings,
                 servers,
                 &profile_id,
                 tokio_util::sync::CancellationToken::new(),
                 event_tx,
-                None, // progress_tx — MCP has no Tauri events
+                None,
                 &db,
                 &cache,
             )
             .await;
-            (processed, data_dir, cache, db)
+            (processed, cache)
         };
-
-        // Persist cache to disk
         cache.save_to_disk().await;
 
         let profile = crate::subscription::SubscriptionProfile {
             id: profile_id,
             name: name.into(),
-            url: format!("content://{}", uuid::Uuid::new_v4()),
+            url: content_url,
             servers: processed,
             updated_at: chrono::Utc::now().to_rfc3339(),
-            last_tested: None,
+            last_tested: Some(chrono::Utc::now().to_rfc3339()),
             traffic_used: None,
             traffic_total: None,
             traffic_expiry: None,
@@ -1090,8 +1120,8 @@ impl Handler {
             .profile_mgr
             .save()
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        let json = serde_json::to_string_pretty(&profile).unwrap_or_default();
-        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+        let j = serde_json::to_string_pretty(&profile).unwrap_or_default();
+        Ok(CallToolResult::success(vec![ContentBlock::text(j)]))
     }
 
     /// Get GeoIP database status (version, last updated).
@@ -1902,7 +1932,8 @@ impl ServerHandler for Handler {
                     // Read from tracing JSONL file for cross-session continuity
                     if let Some(ref path) = logger._log_file {
                         if path.exists() {
-                            let file_entries = crate::logging::read_tracing_log_file(path, logger.max_entries);
+                            let file_entries =
+                                crate::logging::read_tracing_log_file(path, logger.max_entries);
                             let existing_ids: std::collections::HashSet<String> =
                                 entries.iter().map(|e| e.id.clone()).collect();
                             for e in file_entries {

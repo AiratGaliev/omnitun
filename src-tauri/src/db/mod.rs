@@ -73,6 +73,11 @@ pub async fn init_db(data_dir: &Path) -> Result<DbPool, String> {
         // and surface the bug immediately. Every server in this table MUST have
         // been through batch_test_incremental (for ping_ms) and GeoIP resolution
         // (for flag, country_name).
+        //
+        // ARCHITECTURAL RULE: only Phase 3 (batch test post-processing) ever
+        // writes to the `servers` table. Phase 0 only DELETEs stale rows.
+        // Phase 1 uses server_cache (no JOIN with servers). Any new INSERT
+        // path that bypasses Phase 3 is a BUG — add it here, not in Phase 0.
         // ────────────────────────────────────────────────────────────────────
         //
         if current_version < 2 {
@@ -315,6 +320,13 @@ pub async fn init_db(data_dir: &Path) -> Result<DbPool, String> {
         // Schema v5: ensure NOT NULL constraints are really enforced.
         // Previous migrations used IF NOT EXISTS on intermediate tables which
         // silently skipped schema changes when a stale table existed.
+        //
+        // 🚫 ANTI-REGRESSION: same invariant as v2 — no placeholder defaults.
+        //    Any row with NULL ping_ms means a pipeline bug (server reached
+        //    servers before batch test). The row is deleted because it can
+        //    never be valid — the correct pipeline would have waited for
+        //    Phase 3 to produce real data.
+        //    Only Phase 3 writes to servers. No exceptions.
         if current_version < 5 {
             tracing::info!(target: "db", "Migrating to schema v5: force NOT NULL constraints");
 

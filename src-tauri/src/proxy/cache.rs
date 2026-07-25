@@ -502,6 +502,16 @@ impl ServerCache {
     }
 
     /// Update the store with a negative result.
+    ///
+    /// ═══ update_negative — in-memory only, no SQLite ═══════════════════
+    /// OWNERSHIP: this mutates the in-memory ServerCache store.
+    /// Caller is responsible for persisting to SQLite via save_to_disk()
+    /// or flush_cache_batch(). Called by:
+    ///
+    ///   - Batcher (process_batch in batcher.rs) for failed batch tests
+    ///   - test_servers (lib.rs) for servers without Clash API ping
+    ///
+    /// This does NOT write to the `servers`, `profiles`, or `server_cache` tables.
     pub(crate) async fn update_negative(&self, server_id: &str, reason: String) {
         let now = chrono::Utc::now().timestamp();
 
@@ -682,6 +692,17 @@ impl ServerCache {
     }
 
     /// Persist the current store to the `server_cache` SQLite table.
+    ///
+    /// ═══ save_to_disk — writes ONLY to `server_cache` (secondary async path) ═══
+    /// OWNERSHIP: this is the SECONDARY async persistence path for server_cache.
+    /// The PRIMARY path is flush_cache_batch() which writes via the async DbPool.
+    /// save_to_disk uses the sync connection and is called:
+    ///
+    ///   - After process_servers_incremental completes (add_subscription, refresh)
+    ///   - After test_servers completes
+    ///   - After cache.handle_subscription_refresh
+    ///
+    /// It does NOT write to servers, profiles, or test_history.
     pub async fn save_to_disk(&self) {
         let store = self.store.read().await;
         let conn = self.sync_conn.lock().unwrap();
@@ -891,8 +912,25 @@ impl ServerCache {
 /// Uses a single transaction for the batch. `consecutive_successes` is
 /// incremented on positive hit; `consecutive_failures` on negative hit.
 /// This is the direct-to-SQLite version that replaces the old moka+store path.
+///
+/// When `cache` is provided, in-memory store is also updated so subsequent
+/// `is_cached_negative` lookups reflect the new state immediately.
+///
+/// ═══ OWNERSHIP: only writes to `server_cache` ════════════════════════
+/// This function is SHARED by multiple callers:
+///
+///   - Phase 2 (preflight filter via process_servers_incremental)
+///   - Phase 3 (batch_test_incremental after BatchingEngine)
+///   - No-exit filter (process_servers_incremental)
+///   - test_servers (via cache.update_negative)
+///
+/// All of them write ONLY to `server_cache`. None write to `servers`,
+/// `profiles`, or `test_history`. Those tables have their own dedicated
+/// writers (Phase 3 POST for servers, save() for profiles,
+/// batch_test_incremental for test_history).
 pub async fn flush_cache_batch(
     db: &crate::db::DbPool,
+    cache: Option<&ServerCache>,
     positives: &[PositiveResult],
     negatives: &[(String, String)], // (server_id, reason)
 ) {
@@ -979,6 +1017,34 @@ pub async fn flush_cache_batch(
     if let Err(e) = result {
         tracing::error!(target: "cache", "flush_cache_batch failed: {e}");
     }
+
+    // Sync in-memory ServerCache store so subsequent is_cached_negative lookups
+    // see the new negative entries immediately. Without this, the in-memory store
+    // only gets updated through cache.update_negative() in the batcher — but
+    // flush_cache_batch is also called from process_servers_incremental Phase 2
+    // pre-filter and Phase 3 cleanup, where the batcher doesn't run.
+    if let Some(cache) = cache {
+        let now = chrono::Utc::now().timestamp();
+        let mut store = cache.store.write().await;
+        for (sid, reason) in negatives {
+            if !store.contains_key(sid) {
+                store.insert(
+                    sid.clone(),
+                    CacheEntry {
+                        server_id: sid.clone(),
+                        last_updated: now,
+                        status: CacheStatus::Negative {
+                            first_failure_at: now,
+                            last_failure_at: now,
+                            consecutive_failures: 1,
+                            previously_worked: false,
+                            reason: reason.clone(),
+                        },
+                    },
+                );
+            }
+        }
+    }
 }
 
 /// Incremental batch test: sends servers to the BatchingEngine via cache,
@@ -988,6 +1054,15 @@ pub async fn flush_cache_batch(
 /// - Uses `cache.queue_test()` to send requests to the background worker
 /// - Writes results to SQLite via `flush_cache_batch`
 /// - Emits `ServerTestedEvent` via `event_tx` for streaming UI updates
+///
+/// ═══ batch_test_incremental — writes to server_cache + test_history ═══
+/// OWNERSHIP:
+///
+///   - `server_cache`: INSERTS via flush_cache_batch (positives + negatives)
+///   - `test_history`: INSERTS per-server test result (phase='batch')
+///
+/// Does NOT write to `servers` or `profiles` — those are owned by
+/// Phase 3 POST (servers) and save() (profiles).
 pub async fn batch_test_incremental(
     cache: &ServerCache,
     servers: &[ServerProfile],
@@ -1103,14 +1178,14 @@ pub async fn batch_test_incremental(
 
         // Flush every 50 results
         if positives.len() >= 50 || negatives.len() >= 50 {
-            flush_cache_batch(db, &positives, &negatives).await;
+            flush_cache_batch(db, Some(cache), &positives, &negatives).await;
             positives.clear();
             negatives.clear();
         }
     }
 
     // Final flush
-    flush_cache_batch(db, &positives, &negatives).await;
+    flush_cache_batch(db, Some(cache), &positives, &negatives).await;
 
     // Cleanup: keep as long as negative cache (NEGATIVE_MAX_TTL_SECS = 32 days)
     let cutoff = now - (NEGATIVE_MAX_TTL_SECS as i64); // keep as long as negative cache

@@ -220,6 +220,17 @@ impl ProfileManager {
 
     /// Save in-memory profiles to SQLite.
     /// Uses the synchronous connection — safe to call from sync contexts.
+    ///
+    /// ═══ save() — SECONDARY writer for servers, PRIMARY for profiles ═══
+    /// OWNERSHIP:
+    ///
+    ///   - `profiles` table: ONLY save() writes here. No other path touches profiles.
+    ///   - `servers` table: SECONDARY writer. Phase 3 POST is the PRIMARY.
+    ///     save() rewrites ALL servers across ALL profiles, so it duplicates
+    ///     Phase 3 POST's work. This is acceptable because:
+    ///       1. save() runs after Phase 3 POST (never before)
+    ///       2. save() gracefully skips rows that hit CHECK/NOT NULL constraints
+    ///   - `server_cache`: save() does NOT touch this table.
     pub fn save(&mut self) -> Result<(), ProxyError> {
         let mut conn = self.sync_conn.lock().unwrap();
         let tx = conn.transaction().map_err(|e| {
@@ -1240,12 +1251,14 @@ async fn get_old_servers_map(
 ///
 /// Used by Phase 0.5 in process_servers_incremental to restore exit data that would
 /// otherwise be lost when the old servers are DELETEd and re-INSERTed.
-type ExitData = (Option<String>, Option<String>, Option<String>, Option<String>);
+type ExitData = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
-async fn get_old_servers_exit(
-    profile_id: &str,
-    db: &DbPool,
-) -> HashMap<String, ExitData> {
+async fn get_old_servers_exit(profile_id: &str, db: &DbPool) -> HashMap<String, ExitData> {
     let pid = profile_id.to_string();
     db.call(move |conn| {
         let mut stmt = conn.prepare(
@@ -1258,7 +1271,10 @@ async fn get_old_servers_exit(
             let exit_flag: Option<String> = row.get(2)?;
             let exit_country_name: Option<String> = row.get(3)?;
             let exit_city_name: Option<String> = row.get(4)?;
-            Ok((server_hash, (exit_server, exit_flag, exit_country_name, exit_city_name)))
+            Ok((
+                server_hash,
+                (exit_server, exit_flag, exit_country_name, exit_city_name),
+            ))
         })?;
         rows.collect::<rusqlite::Result<HashMap<String, ExitData>>>()
     })
@@ -1268,15 +1284,11 @@ async fn get_old_servers_exit(
 
 /// Read old ping_ms from the `servers` table for a given profile.
 /// Returns HashMap keyed by server_hash.
-async fn get_old_servers_ping(
-    profile_id: &str,
-    db: &DbPool,
-) -> HashMap<String, Option<u64>> {
+async fn get_old_servers_ping(profile_id: &str, db: &DbPool) -> HashMap<String, Option<u64>> {
     let pid = profile_id.to_string();
     db.call(move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT server_hash, ping_ms FROM servers WHERE profile_id = ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT server_hash, ping_ms FROM servers WHERE profile_id = ?1")?;
         let rows = stmt.query_map(rusqlite::params![pid], |row| {
             let server_hash: String = row.get(0)?;
             let ping_ms: Option<u64> = row.get(1)?;
@@ -1393,9 +1405,8 @@ pub async fn process_servers_incremental(
         .call({
             let pid = profile_id.to_string();
             move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT DISTINCT server_hash FROM servers WHERE profile_id != ?1"
-                )?;
+                let mut stmt = conn
+                    .prepare("SELECT DISTINCT server_hash FROM servers WHERE profile_id != ?1")?;
                 let rows = stmt.query_map(rusqlite::params![pid], |row| row.get::<_, String>(0))?;
                 let mut hashes = std::collections::HashSet::new();
                 for row in rows.flatten() {
@@ -1421,93 +1432,29 @@ pub async fn process_servers_incremental(
     let old_exit = get_old_servers_exit(profile_id, db).await;
     let old_ping = get_old_servers_ping(profile_id, db).await;
 
-    // INSERT to SQLite
+    // ═══ PHASE 0: DELETE old servers — no INSERT ═════════════════════
+    // DESIGN (schema v2-v5): `servers` table has NOT NULL constraints on
+    // `ping_ms`, `flag`, `country_name`. Every row must have REAL data.
+    // 🚫 NO phase except Phase 3 (batch test) writes to `servers`.
+    //
+    // Phase 0 only clears stale rows. The fresh servers will be INSERTed
+    // in Phase 3 post-processing, AFTER batch test provides real data.
     let pid = profile_id.to_string();
-    let servers_for_insert = unique.clone();
     let _ = db
         .call(
             move |conn| -> Result<(), tokio_rusqlite::Error<rusqlite::Error>> {
-                let tx = conn.transaction()?;
-                // Delete old servers for this profile
-                tx.execute(
+                conn.execute(
                     "DELETE FROM servers WHERE profile_id = ?1",
                     rusqlite::params![pid],
                 )?;
-                for s in &servers_for_insert {
-                    // Per-row graceful error handling: skip servers that fail
-                    // constraints (NOT NULL ping_ms, CHECK v3, UNIQUE server_hash)
-                    // instead of aborting the entire transaction. This guarantees
-                    // the DELETE of old servers is committed even when some new
-                    // servers are invalid — critical for cross-profile dedup to
-                    // function correctly on subsequent calls.
-                    if let Err(e) = tx.execute(
-                        "INSERT OR REPLACE INTO servers
-                 (profile_id, server_hash, protocol, server, port,
-                  uuid, password, method, sni, flow,
-                  public_key, private_key,
-                  transport_type, transport_path, transport_host,
-                  reality_pbk, reality_sid,
-                  wg_local_address, wg_allowed_ips, wg_dns, wg_mtu, wg_keepalive,
-                  username, ping_ms, behind_cdn, flag, country_name, city_name,
-                  exit_server, exit_flag, exit_country_name, exit_city_name, original_name)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,
-                         ?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,
-                         ?29,?30,?31,?32,?33)",
-                        rusqlite::params![
-                            pid,
-                            s.id,
-                            s.protocol,
-                            s.server,
-                            s.port,
-                            s.uuid,
-                            s.password,
-                            s.method,
-                            s.sni,
-                            s.flow,
-                            s.public_key,
-                            s.private_key,
-                            s.transport_type,
-                            s.transport_path,
-                            s.transport_host,
-                            s.reality_pbk,
-                            s.reality_sid,
-                            s.wg_local_address,
-                            s.wg_allowed_ips,
-                            s.wg_dns,
-                            s.wg_mtu,
-                            s.wg_keepalive,
-                            s.username,
-                            s.ping_ms,
-                            s.behind_cdn as i32,
-                            s.flag,
-                            s.country_name,
-                            s.city_name,
-                            s.exit_server,
-                            s.exit_flag,
-                            s.exit_country_name,
-                            s.exit_city_name,
-                            s.original_name,
-                        ],
-                    ) {
-                        tracing::warn!(
-                            target: "subscription",
-                            "Skipping server {}: DB constraint: {e}",
-                            s.id,
-                        );
-                    }
-                }
-                tx.commit()?;
                 Ok(())
             },
         )
         .await;
 
     // ═══ PHASE 0.5: Restore exit data + ping from old rows ═══════════
-    // After the DELETE+INSERT above, row exit data is gone. Restore it
-    // from the HashMap we saved before the delete. Only restore for
-    // non-CDN servers that don't have exit data yet (the pipeline
-    // may set new exit data in Phase 3, but we don't want blank entries
-    // in the meantime).
+    // Keyed by server_hash (= server.id after ID preservation).
+    // Used for init events and cache-hit enrichment below.
     for s in &mut unique {
         if s.behind_cdn {
             continue;
@@ -1520,8 +1467,6 @@ pub async fn process_servers_incremental(
                 s.exit_city_name = saved.3.clone();
             }
         }
-        // Restore ping_ms — don't overwrite if the fresh servers already have it
-        // (unlikely at this stage, but be safe).
         if s.ping_ms.is_none() {
             if let Some(ping) = old_ping.get(&s.id) {
                 s.ping_ms = *ping;
@@ -1578,23 +1523,26 @@ pub async fn process_servers_incremental(
         });
     }
 
-    // ═══ PHASE 1: Cache hit ══════════════════════════════════════════
+    // ═══ PHASE 1: Cache hit — via server_cache (no JOIN with servers) ═
+    // `servers` was DELETEd in Phase 0. JOIN with servers is impossible.
+    // Instead, query server_cache directly for fresh positive entries,
+    // then filter in-memory to only those in our `unique` set.
+    //
+    // Cache-hit servers skip Phases 2-3 (no re-test) and are INSERTed
+    // directly in Phase 3 POST-processing with their cached data.
+    // Non-cache servers go through preflight → batch test → INSERT.
     let fresh_cutoff = chrono::Utc::now().timestamp() - 600; // 10 min POSITIVE_STALE_SECS
-    let cached_server_ids: std::collections::HashSet<String> = {
-        let pid = profile_id.to_string();
+    let all_fresh_positive: std::collections::HashSet<String> = {
         let cutoff = fresh_cutoff;
         match db
             .call(
                 move |conn| -> Result<Vec<String>, tokio_rusqlite::Error<rusqlite::Error>> {
                     let mut stmt = conn.prepare(
-                        "SELECT s.server_hash
-                 FROM servers s
-                 JOIN server_cache c ON s.server_hash = c.server_hash
-                 WHERE s.profile_id = ?1 AND c.status = 'positive' AND c.tested_at >= ?2",
+                        "SELECT server_hash FROM server_cache
+                         WHERE status = 'positive' AND tested_at >= ?1",
                     )?;
-                    let rows = stmt.query_map(rusqlite::params![pid, cutoff], |row| {
-                        row.get::<_, String>(0)
-                    })?;
+                    let rows =
+                        stmt.query_map(rusqlite::params![cutoff], |row| row.get::<_, String>(0))?;
                     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
                 },
             )
@@ -1604,8 +1552,15 @@ pub async fn process_servers_incremental(
             Err(_) => std::collections::HashSet::new(),
         }
     };
+    let unique_ids: std::collections::HashSet<String> =
+        unique.iter().map(|s| s.id.clone()).collect();
+    let cached_server_ids: std::collections::HashSet<String> = all_fresh_positive
+        .intersection(&unique_ids)
+        .cloned()
+        .collect();
 
-    // Emit cached servers — they get the cached ping + exit data
+    // Split: cache_hit_servers (not tested) vs needs_batch (full test cycle)
+    let mut cache_hit_servers: Vec<ServerProfile> = Vec::new();
     let mut needs_batch: Vec<ServerProfile> = Vec::new();
     let mut cache_hit_count = 0usize;
     for s in unique {
@@ -1625,13 +1580,13 @@ pub async fn process_servers_incremental(
                 error: None,
             });
             cache_hit_count += 1;
-            needs_batch.push(s);
+            cache_hit_servers.push(s);
         } else {
             needs_batch.push(s);
         }
     }
     tracing::info!(target: "subscription",
-        "Phase 1: {cache_hit_count} cache hits, {} servers need batch test",
+        "Phase 1: {cache_hit_count} cache hits (skip test), {} servers need batch test",
         needs_batch.len());
 
     // Progress: Phase 1 — emit cache hits
@@ -1709,12 +1664,15 @@ pub async fn process_servers_incremental(
             .map(|s| s.id.clone())
             .collect();
 
-        // Write dead servers to negative cache
+        // ═══ PHASE 2 writes to server_cache (negative — dead servers) ═══
+        // OWNERSHIP: Phase 2 may write negative entries to `server_cache`.
+        // It must NOT write to `servers`, `profiles`, or `test_history`
+        // (test_history writes happen later in Phase 1.5 for preflight pings).
         let dead: Vec<(String, String)> = dead_ids
             .iter()
             .map(|id| (id.clone(), "Clash API preflight: no ping".into()))
             .collect();
-        crate::proxy::cache::flush_cache_batch(db, &[], &dead).await;
+        crate::proxy::cache::flush_cache_batch(db, Some(cache), &[], &dead).await;
 
         // Emit error events for the dead servers
         for sid in &dead_ids {
@@ -1891,6 +1849,10 @@ pub async fn process_servers_incremental(
     if !preflight_pings.is_empty() {
         let pings = preflight_pings.clone();
         let now = chrono::Utc::now().timestamp();
+        // ═══ PHASE 1.5 writes only to test_history ══════════════════
+        // OWNERSHIP: preflight pings belong in test_history (per-server log).
+        // Phase 1.5 must NOT write to servers, server_cache, or profiles.
+        // Real ping_ms + exit data are written in Phase 3 POST after batch.
         let _ = db
             .call(
                 move |conn| -> Result<(), tokio_rusqlite::Error<rusqlite::Error>> {
@@ -1948,8 +1910,159 @@ pub async fn process_servers_incremental(
         }
     }
 
+    // ═══ FILTER: non-CDN servers without exit data ════════════════════
+    // Alive (passed ping) but outlet IP fetch failed — route issue.
+    // Batcher already called update_negative. Remove from needs_batch
+    // so they don't reach Phase 3 POST INSERT (avoids CHECK v3 violation).
+    //
+    // ═══ FILTER writes to server_cache (negative) ═════════════════════
+    // OWNERSHIP: this filter may write negative entries to server_cache
+    // via flush_cache_batch. It must NOT write to servers, profiles,
+    // or test_history — those are owned by later phases.
+    let reason = "No exit IP after batch test (transient route failure)".to_string();
+    let mut no_exit: Vec<(String, String)> = Vec::new();
+    needs_batch.retain(|s| {
+        if !s.behind_cdn && s.exit_server.is_none() && s.ping_ms.is_some() {
+            no_exit.push((s.id.clone(), reason.clone()));
+            false
+        } else {
+            true
+        }
+    });
+    if !no_exit.is_empty() {
+        crate::proxy::cache::flush_cache_batch(db, Some(cache), &[], &no_exit).await;
+        tracing::info!(
+            target: "subscription",
+            "Filtered {} non-CDN server(s) with no exit data → negative cache (previously_worked=1, TTL=1min)",
+            no_exit.len(),
+        );
+    }
+
+    // ═══ FILTER: servers that completely failed batch test (no ping_ms) ═
+    // These servers got negative entries in server_cache via batch_test_incremental.
+    // They have no ping_ms → cannot satisfy NOT NULL constraint. Remove from
+    // needs_batch so Phase 3 POST doesn't attempt INSERT.
+    // The negative cache entry will be re-tested when its TTL expires.
+    let no_ping_before = needs_batch.len();
+    needs_batch.retain(|s| s.ping_ms.is_some());
+    let no_ping_count = no_ping_before - needs_batch.len();
+    if no_ping_count > 0 {
+        tracing::info!(
+            target: "subscription",
+            "Phase 3: {} server(s) with no ping_ms removed (failed batch test, negative cache only)",
+            no_ping_count,
+        );
+    }
+
+    // ═══ PHASE 3 POST-PROCESS: SINGLE WRITER for servers table ══════
+    // 🚫 NO other phase writes to `servers`. This is the ONLY INSERT point.
+    //
+    // All servers entering this block have REAL data:
+    //   - cache_hit_servers — fresh data from server_cache (Phase 1 filtered)
+    //   - needs_batch — survived batch test AND exit-data filter (real ping/exit)
+    //
+    // If any server triggers a CHECK v3 or NOT NULL violation, it means a
+    // genuine pipeline defect — the constraint fires as designed.
+    let survivors_after_filters = needs_batch.len();
+    let mut all_to_persist = cache_hit_servers;
+    let return_servers = needs_batch.clone();
+    all_to_persist.append(&mut needs_batch);
+    if !all_to_persist.is_empty() {
+        let servers_for_insert = all_to_persist;
+        let pid = profile_id.to_string();
+        let _ = db
+            .call(move |conn| -> Result<(), tokio_rusqlite::Error<rusqlite::Error>> {
+                let tx = conn.transaction()?;
+                tx.execute(
+                    "DELETE FROM servers WHERE profile_id = ?1",
+                    rusqlite::params![pid],
+                )?;
+                for s in &servers_for_insert {
+                    if let Err(e) = tx.execute(
+                        "INSERT INTO servers
+                         (profile_id, server_hash, protocol, server, port,
+                          uuid, password, method, sni, flow,
+                          public_key, private_key,
+                          transport_type, transport_path, transport_host,
+                          reality_pbk, reality_sid,
+                          wg_local_address, wg_allowed_ips, wg_dns, wg_mtu, wg_keepalive,
+                          username, ping_ms, behind_cdn, flag, country_name, city_name,
+                          exit_server, exit_flag, exit_country_name, exit_city_name, original_name)
+                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,
+                                 ?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,
+                                 ?29,?30,?31,?32,?33)",
+                        rusqlite::params![
+                            pid,
+                            s.id,
+                            s.protocol,
+                            s.server,
+                            s.port,
+                            s.uuid,
+                            s.password,
+                            s.method,
+                            s.sni,
+                            s.flow,
+                            s.public_key,
+                            s.private_key,
+                            s.transport_type,
+                            s.transport_path,
+                            s.transport_host,
+                            s.reality_pbk,
+                            s.reality_sid,
+                            s.wg_local_address,
+                            s.wg_allowed_ips,
+                            s.wg_dns,
+                            s.wg_mtu,
+                            s.wg_keepalive,
+                            s.username,
+                            s.ping_ms,
+                            s.behind_cdn as i32,
+                            s.flag,
+                            s.country_name,
+                            s.city_name,
+                            s.exit_server,
+                            s.exit_flag,
+                            s.exit_country_name,
+                            s.exit_city_name,
+                            s.original_name,
+                        ],
+                    ) {
+                        // FOREIGN KEY: caller will persist via save() after this
+                        // function returns — expected, not a defect.
+                        // NOT NULL: genuine pipeline defect (server missing ping/exit).
+                        let is_fk = match &e {
+                            rusqlite::Error::SqliteFailure(
+                                rusqlite::ffi::Error { code, extended_code },
+                                ..
+                            ) => *code == rusqlite::ffi::ErrorCode::ConstraintViolation
+                                && *extended_code == 787, // SQLITE_CONSTRAINT_FOREIGNKEY
+                            _ => false,
+                        };
+                        if is_fk {
+                            tracing::warn!(
+                                target: "subscription",
+                                "Phase 3 POST: server {} FK — profile was deleted between test and persist, batch results saved to cache only",
+                                s.id,
+                            );
+                        } else {
+                            tracing::error!(
+                                target: "subscription",
+                                "[BUG] Phase 3 POST: server {} FAILED constraint: {e} — \
+                                 this indicates a pipeline defect (missing ping/exit data \
+                                 after batch test)",
+                                s.id,
+                            );
+                        }
+                    }
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .await;
+    }
+
     // Progress: Phase 3 complete — emit batch results
-    let batch_successful = needs_batch.len();
+    let batch_successful = cache_hit_count + needs_batch.len();
     if let Some(ref tx) = progress_tx {
         let _ = tx.send(crate::events::RefreshProgress {
             profile_id: profile_id.to_string(),
@@ -1964,31 +2077,8 @@ pub async fn process_servers_incremental(
         });
     }
 
-    // Non-CDN servers without exit data — alive (passed ping) but no route
-    // (outlet IP fetch failed). Batcher already called update_negative.
-    // Remove from needs_batch so save() doesn't hit CHECK constraint.
-    let reason = "No exit IP after batch test (transient route failure)".to_string();
-    let mut no_exit: Vec<(String, String)> = Vec::new();
-    needs_batch.retain(|s| {
-        if !s.behind_cdn && s.exit_server.is_none() && s.ping_ms.is_some() {
-            no_exit.push((s.id.clone(), reason.clone()));
-            false
-        } else {
-            true
-        }
-    });
-    if !no_exit.is_empty() {
-        // Persist to SQLite (batcher's update_negative already set the in-memory store)
-        crate::proxy::cache::flush_cache_batch(db, &[], &no_exit).await;
-        tracing::info!(
-            target: "subscription",
-            "Filtered {} non-CDN server(s) with no exit data → negative cache (previously_worked=1, TTL=1min)",
-            no_exit.len(),
-        );
-    }
-
     // Progress: emit done
-    let final_successful = needs_batch.len();
+    let final_successful = survivors_after_filters + cache_hit_count;
     if let Some(ref tx) = progress_tx {
         let _ = tx.send(crate::events::RefreshProgress {
             profile_id: profile_id.to_string(),
@@ -2004,7 +2094,7 @@ pub async fn process_servers_incremental(
     }
 
     // Return the servers — caller (lib.rs) does the final commit
-    needs_batch
+    return_servers
 }
 
 /// Create an in-memory SQLite database for tests.

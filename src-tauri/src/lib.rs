@@ -1434,10 +1434,12 @@ async fn refresh_subscription(
         });
         let data_dir = match app.path().app_data_dir() {
             Ok(d) => d,
-            Err(_) => return Err(ProxyError::subscription(
-                crate::proxy::ErrorCode::SubscriptionSaveFailed,
-                "Failed to get app data directory".to_string(),
-            )),
+            Err(_) => {
+                return Err(ProxyError::subscription(
+                    crate::proxy::ErrorCode::SubscriptionSaveFailed,
+                    "Failed to get app data directory".to_string(),
+                ))
+            }
         };
         let settings = app
             .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
@@ -1636,6 +1638,11 @@ async fn test_servers(
                 }
                 dead_ids.insert(server.id.clone());
             }
+            // ═══ test_servers writes to server_cache (in-memory + save_to_disk) ═══
+            // OWNERSHIP: test_servers writes negative entries to server_cache via
+            // cache.update_negative() + save_to_disk(). It does NOT write to servers
+            // directly — the caller (commit_test) calls save() which rewrites servers.
+            // This is a different path from Phase 3 POST (batch test writer).
             if !dead_ids.is_empty() {
                 for sid in &dead_ids {
                     cache
