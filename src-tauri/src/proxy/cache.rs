@@ -706,7 +706,6 @@ impl ServerCache {
     pub async fn save_to_disk(&self) {
         let store = self.store.read().await;
         let conn = self.sync_conn.lock().unwrap();
-        let now = chrono::Utc::now().timestamp();
         for (_key, entry) in store.iter() {
             let (
                 status,
@@ -792,7 +791,7 @@ impl ServerCache {
                     first_failure_at,
                     last_failure_at,
                     reason,
-                    now,
+                    entry.last_updated,
                 ],
             ) {
                 tracing::error!(target: "cache", "Failed to save cache entry: {e}");
@@ -826,7 +825,11 @@ impl ServerCache {
             Ok(g) => g,
             Err(_) => return HashMap::new(),
         };
-        let mut stmt = match guard.prepare(
+        Self::load_from_connection(&guard)
+    }
+
+    fn load_from_connection(conn: &rusqlite::Connection) -> HashMap<String, CacheEntry> {
+        let mut stmt = match conn.prepare(
             "SELECT server_hash, status, ping_ms, exit_ip, exit_flag,
                     exit_country_name, exit_city_name, behind_cdn,
                     consecutive_successes, consecutive_failures,
@@ -941,8 +944,12 @@ pub async fn flush_cache_batch(
 
     let positives_owned: Vec<PositiveResult> = positives.to_vec();
     let negatives_owned: Vec<(String, String)> = negatives.to_vec();
+    let sync_store = cache.is_some();
 
-    let result: Result<(), tokio_rusqlite::Error<rusqlite::Error>> = db
+    let result: Result<
+        Option<HashMap<String, CacheEntry>>,
+        tokio_rusqlite::Error<rusqlite::Error>,
+    > = db
         .call(move |conn| {
             let tx = conn.transaction()?;
             for p in &positives_owned {
@@ -1011,39 +1018,22 @@ pub async fn flush_cache_batch(
                 )?;
             }
             tx.commit()?;
-            Ok(())
+            Ok(sync_store.then(|| ServerCache::load_from_connection(conn)))
         })
         .await;
-    if let Err(e) = result {
-        tracing::error!(target: "cache", "flush_cache_batch failed: {e}");
-    }
-
-    // Sync in-memory ServerCache store so subsequent is_cached_negative lookups
-    // see the new negative entries immediately. Without this, the in-memory store
-    // only gets updated through cache.update_negative() in the batcher — but
-    // flush_cache_batch is also called from process_servers_incremental Phase 2
-    // pre-filter and Phase 3 cleanup, where the batcher doesn't run.
-    if let Some(cache) = cache {
-        let now = chrono::Utc::now().timestamp();
-        let mut store = cache.store.write().await;
-        for (sid, reason) in negatives {
-            if !store.contains_key(sid) {
-                store.insert(
-                    sid.clone(),
-                    CacheEntry {
-                        server_id: sid.clone(),
-                        last_updated: now,
-                        status: CacheStatus::Negative {
-                            first_failure_at: now,
-                            last_failure_at: now,
-                            consecutive_failures: 1,
-                            previously_worked: false,
-                            reason: reason.clone(),
-                        },
-                    },
-                );
-            }
+    let committed_store = match result {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::error!(target: "cache", "flush_cache_batch failed: {e}");
+            return;
         }
+    };
+
+    // Keep memory identical to the rows committed on the async connection.
+    // This avoids a second SQLite round trip and preserves exact counters when
+    // the batch worker already updated memory before this transaction.
+    if let (Some(cache), Some(store)) = (cache, committed_store) {
+        *cache.store.write().await = store;
     }
 }
 
@@ -1570,5 +1560,126 @@ mod tests {
         assert_eq!(cache.negative_count().await, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_save_to_disk_preserves_entry_timestamp() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = ServerCache::new(dir.path());
+        {
+            let mut store = cache.store.write().await;
+            store.insert("negative".into(), make_neg("negative", 1, false, "timeout"));
+        }
+
+        cache.save_to_disk().await;
+
+        let conn = cache.get_sync_conn().unwrap();
+        let tested_at: i64 = conn
+            .query_row(
+                "SELECT tested_at FROM server_cache WHERE server_hash = 'negative'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tested_at, 1_000_000);
+    }
+
+    #[tokio::test]
+    async fn test_flush_cache_batch_syncs_positive_to_negative_in_memory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = crate::db::init_db(dir.path()).await.unwrap();
+        let cache = ServerCache::new(dir.path());
+        cache
+            .update_positive(
+                "server",
+                PositiveResult {
+                    server_id: "server".into(),
+                    ping_ms: 42,
+                    exit_ip: Some("203.0.113.1".into()),
+                    exit_flag: Some("US".into()),
+                    exit_country: Some("United States".into()),
+                    exit_city: None,
+                    behind_cdn: false,
+                    tested_at: chrono::Utc::now().timestamp(),
+                },
+            )
+            .await;
+        cache.save_to_disk().await;
+
+        flush_cache_batch(
+            &db,
+            Some(&cache),
+            &[],
+            &[("server".into(), "preflight failed".into())],
+        )
+        .await;
+
+        let store = cache.store.read().await;
+        match &store.get("server").unwrap().status {
+            CacheStatus::Negative {
+                consecutive_failures,
+                previously_worked,
+                ..
+            } => {
+                assert_eq!(*consecutive_failures, 1);
+                assert!(*previously_worked);
+            }
+            CacheStatus::Positive { .. } => panic!("positive entry was not replaced"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flush_cache_batch_syncs_incremented_negative_in_memory() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = crate::db::init_db(dir.path()).await.unwrap();
+        let cache = ServerCache::new(dir.path());
+        cache.update_negative("server", "first".into()).await;
+        cache.save_to_disk().await;
+
+        flush_cache_batch(
+            &db,
+            Some(&cache),
+            &[],
+            &[("server".into(), "second".into())],
+        )
+        .await;
+
+        let store = cache.store.read().await;
+        match &store.get("server").unwrap().status {
+            CacheStatus::Negative {
+                consecutive_failures,
+                reason,
+                ..
+            } => {
+                assert_eq!(*consecutive_failures, 2);
+                assert_eq!(reason, "second");
+            }
+            CacheStatus::Positive { .. } => panic!("negative entry became positive"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flush_cache_batch_does_not_double_count_worker_update() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = crate::db::init_db(dir.path()).await.unwrap();
+        let cache = ServerCache::new(dir.path());
+
+        cache.update_negative("server", "failure".into()).await;
+        flush_cache_batch(
+            &db,
+            Some(&cache),
+            &[],
+            &[("server".into(), "failure".into())],
+        )
+        .await;
+
+        let store = cache.store.read().await;
+        match &store.get("server").unwrap().status {
+            CacheStatus::Negative {
+                consecutive_failures,
+                ..
+            } => assert_eq!(*consecutive_failures, 1),
+            CacheStatus::Positive { .. } => panic!("negative entry became positive"),
+        }
     }
 }

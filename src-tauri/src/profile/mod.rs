@@ -648,6 +648,29 @@ impl ProfileManager {
         servers: Vec<ServerProfile>,
         traffic: Option<(u64, u64, Option<String>)>,
     ) -> Result<SubscriptionProfile, ProxyError> {
+        let cache = app
+            .try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>()
+            .map(|s| std::sync::Arc::clone(&*s));
+        self.commit_refresh_core(id, servers, traffic, cache).await
+    }
+
+    pub async fn commit_refresh_headless(
+        &mut self,
+        id: &str,
+        servers: Vec<ServerProfile>,
+        cache: Option<std::sync::Arc<crate::proxy::cache::ServerCache>>,
+        traffic: Option<(u64, u64, Option<String>)>,
+    ) -> Result<SubscriptionProfile, ProxyError> {
+        self.commit_refresh_core(id, servers, traffic, cache).await
+    }
+
+    async fn commit_refresh_core(
+        &mut self,
+        id: &str,
+        servers: Vec<ServerProfile>,
+        traffic: Option<(u64, u64, Option<String>)>,
+        cache: Option<std::sync::Arc<crate::proxy::cache::ServerCache>>,
+    ) -> Result<SubscriptionProfile, ProxyError> {
         let idx = self
             .profiles
             .iter()
@@ -678,7 +701,7 @@ impl ProfileManager {
         self.profiles[idx].last_tested = Some(chrono::Utc::now().to_rfc3339());
 
         // Notify cache: pass ALL current server IDs so stale entries are removed.
-        if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
+        if let Some(cache) = cache {
             let all_active_ids: std::collections::HashSet<String> = self
                 .profiles
                 .iter()
@@ -1655,14 +1678,30 @@ pub async fn process_servers_incremental(
     .await;
 
     let ping_count = preflight_pings.len();
-    if ping_count > 0 && ping_count < needs_batch.len() {
+    // Exclude negative-cache servers from dead-filter and remove them from
+    // needs_batch entirely. clash_api_test already skipped them via
+    // is_cached_negative, so they are not in preflight_pings. Without removal
+    // they would still go to Phase 3 batch testing, wasting resources and
+    // incrementing consecutive_failures on each cycle.
+    let mut negative_cache_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in &needs_batch {
+        if cache.is_cached_negative(&s.id).await {
+            negative_cache_ids.insert(s.id.clone());
+        }
+    }
+    let neg_count = negative_cache_ids.len();
+    needs_batch.retain(|s| !negative_cache_ids.contains(&s.id));
+    let non_cached: Vec<&crate::proxy::ServerProfile> = needs_batch.iter().collect();
+
+    if ping_count > 0 && ping_count < non_cached.len() {
         // Pre-filter: dead servers go to negative cache
-        let dead_count = needs_batch.len() - ping_count;
-        let dead_ids: std::collections::HashSet<String> = needs_batch
+        let dead_ids: std::collections::HashSet<String> = non_cached
             .iter()
             .filter(|s| !preflight_pings.contains_key(&s.id))
             .map(|s| s.id.clone())
             .collect();
+        let dead_count = dead_ids.len();
+        let skipped_neg = neg_count;
 
         // ═══ PHASE 2 writes to server_cache (negative — dead servers) ═══
         // OWNERSHIP: Phase 2 may write negative entries to `server_cache`.
@@ -1693,7 +1732,7 @@ pub async fn process_servers_incremental(
 
         needs_batch.retain(|s| !dead_ids.contains(&s.id));
         tracing::info!(target: "subscription",
-            "Phase 2 pre-filter: {dead_count} dead servers moved to negative cache");
+            "Phase 2 pre-filter: {dead_count} dead servers moved to negative cache (skipped {skipped_neg} already negative)");
     }
 
     if ping_count == 0 && !needs_batch.is_empty() {
@@ -1904,6 +1943,10 @@ pub async fn process_servers_incremental(
                 if s.exit_flag.is_none() {
                     s.exit_flag = pos.exit_flag.clone();
                 }
+                // Restore ping_ms from cache — without this, servers that had
+                // NULL ping_ms in the DB (from previous cycle constraint failure)
+                // stay None and fail NOT NULL on INSERT, creating a death spiral.
+                s.ping_ms = Some(pos.ping_ms);
             }
         }
 

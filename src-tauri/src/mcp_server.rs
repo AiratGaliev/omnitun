@@ -612,35 +612,39 @@ impl Handler {
                     // Persist cache to disk so batch-test results survive app restart.
                     cache.save_to_disk().await;
 
+                    // Use commit_refresh_headless to properly set last_tested and
+                    // notify cache about stale entries.
                     {
                         let mut state = bg_state.lock().await;
-                        if let Some(profile) = state
+                        match state
                             .profile_mgr
-                            .list_mut()
-                            .iter_mut()
-                            .find(|p| p.id == bg_id)
+                            .commit_refresh_headless(
+                                &bg_id,
+                                enriched,
+                                Some(cache.clone()),
+                                None,
+                            )
+                            .await
                         {
-                            profile.servers = enriched;
-                            profile.updated_at = chrono::Utc::now().to_rfc3339();
+                            Ok(_profile) => {}
+                            Err(e) => {
+                                tracing::warn!(target: "subscription",
+                                    "commit_refresh_headless failed for {bg_id}: {e}");
+                            }
                         }
-                        // Borrow of profile_mgr ended — safe to call save()
-                        let profile_exists = state.profile_mgr.list().iter().any(|p| p.id == bg_id);
-                        if !profile_exists {
-                            tracing::warn!(target: "subscription",
-                                "Background refresh: profile {bg_id} not found in manager");
-                        } else if let Err(e) = state.profile_mgr.save() {
-                            tracing::warn!(target: "subscription",
-                                "Failed to save profile {bg_id} after refresh: {e}");
-                        } else {
-                            let server_count = state
-                                .profile_mgr
-                                .list()
-                                .iter()
-                                .find(|p| p.id == bg_id)
-                                .map_or(0, |p| p.servers.len());
-                            tracing::info!(target: "subscription",
-                                "Background refresh completed: {server_count} server(s) for profile {bg_id}");
-                        }
+                    };
+
+                    // Re-read to log the server count
+                    {
+                        let state = bg_state.lock().await;
+                        let server_count = state
+                            .profile_mgr
+                            .list()
+                            .iter()
+                            .find(|p| p.id == bg_id)
+                            .map_or(0, |p| p.servers.len());
+                        tracing::info!(target: "subscription",
+                            "Background refresh completed: {server_count} server(s) for profile {bg_id}");
                     }
                 }
                 Err(e) => {

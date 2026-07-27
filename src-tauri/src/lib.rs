@@ -1636,6 +1636,12 @@ async fn test_servers(
                 if pings.contains_key(&server.id) {
                     continue;
                 }
+                // Skip negative-cache servers — clash_api_test doesn't test them
+                // and their pings are not in the result. Without this skip,
+                // they'd get treated as dead and have consecutive_failures incremented.
+                if cache.is_cached_negative(&server.id).await {
+                    continue;
+                }
                 dead_ids.insert(server.id.clone());
             }
             // ═══ test_servers writes to server_cache (in-memory + save_to_disk) ═══
