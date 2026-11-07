@@ -299,5 +299,6 @@ async fn outlet_vs_entry_country() {
         ok + fail
     );
 
+    drop(_child_guard);
     let _ = std::fs::remove_dir_all(&dir);
 }
