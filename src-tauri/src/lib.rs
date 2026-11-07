@@ -81,6 +81,7 @@ async fn start_proxy(
     alternative_servers: Vec<ServerProfile>,
 ) -> Result<u16, ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
+    let watchdog_data_dir = app.path().app_data_dir().ok();
     // Read the PROXY cancel token (not the refresh token).
     let cancel = app
         .state::<ProxyCancelState>()
@@ -458,6 +459,7 @@ async fn start_proxy(
                 let app_clone = app.clone();
                 let mgr_arc = manager_arc.clone();
                 let cancel_watch = cancel.clone();
+                let stop_request_data_dir = watchdog_data_dir.clone();
                 tokio::spawn(async move {
                     loop {
                         if cancel_watch.is_cancelled() {
@@ -475,6 +477,17 @@ async fn start_proxy(
                         }
 
                         if !is_process_alive(pid) {
+                            if stop_request_data_dir.as_deref().is_some_and(|data_dir| {
+                                crate::proxy::process::consume_manual_stop_request(data_dir, pid)
+                            }) {
+                                let mut last = crate::proxy::LAST_PROFILE
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                *last = None;
+                                emit_status(&app_clone, ConnectionStatus::Disconnected);
+                                break;
+                            }
+
                             // Stop if the user disconnected (LAST_PROFILE cleared)
                             {
                                 let lock = crate::proxy::LAST_PROFILE
@@ -1305,6 +1318,10 @@ async fn refresh_subscription(
     id: String,
 ) -> Result<SubscriptionProfile, ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
+    let cancel_token = app
+        .try_state::<Arc<StdMutex<tokio_util::sync::CancellationToken>>>()
+        .map(|token| token.lock().unwrap_or_else(|e| e.into_inner()).clone())
+        .unwrap_or_else(tokio_util::sync::CancellationToken::new);
     log(
         &app,
         &logger,
@@ -1328,30 +1345,47 @@ async fn refresh_subscription(
     // ═══ Phase 2: Long operations — NO LOCK ════════════════════════
     crate::proxy::geoip::reset_ipguide_rate_limit();
 
-    let fetch_result = match &url {
-        u if u.starts_with("http://") || u.starts_with("https://") => {
-            match crate::subscription::fetch_subscription(
-                u,
-                crate::profile::proxy_port_from_app(&app),
-            )
-            .await
-            {
-                Ok(s) => Ok(s),
-                Err(e) => {
-                    if crate::profile::proxy_port_from_app(&app).is_some() {
-                        tracing::error!(
-                            target: "subscription",
-                            "Proxy fetch failed, retrying direct: {e}"
-                        );
-                        crate::subscription::fetch_subscription(u, None).await
-                    } else {
-                        Err(e)
+    let fetch_result = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            return Err(ProxyError::subscription(
+                crate::proxy::ErrorCode::SubscriptionCancelled,
+                "Subscription operation was cancelled",
+            ));
+        }
+        result = async {
+    match &url {
+            u if u.starts_with("http://") || u.starts_with("https://") => {
+                match crate::subscription::fetch_subscription(
+                    u,
+                    crate::profile::proxy_port_from_app(&app),
+                )
+                .await
+                {
+                    Ok(s) => Ok(s),
+                    Err(e) => {
+                        if crate::profile::proxy_port_from_app(&app).is_some() {
+                            tracing::error!(
+                                target: "subscription",
+                                "Proxy fetch failed, retrying direct: {e}"
+                            );
+                            crate::subscription::fetch_subscription(u, None).await
+                        } else {
+                            Err(e)
+                        }
                     }
                 }
             }
+            _ => crate::subscription::parser::parse_subscription(&url),
         }
-        _ => crate::subscription::parser::parse_subscription(&url),
+        } => result,
     };
+
+    if cancel_token.is_cancelled() {
+        return Err(ProxyError::subscription(
+            crate::proxy::ErrorCode::SubscriptionCancelled,
+            "Subscription operation was cancelled",
+        ));
+    }
 
     let mut servers = match fetch_result {
         Ok(s) => s,
@@ -1393,7 +1427,8 @@ async fn refresh_subscription(
                                         })
                                         .collect(),
                                     &id,
-                                    tokio_util::sync::CancellationToken::new(),
+                                    // Global cancel token so cancel_refresh aborts recovery too.
+                                    cancel_token.clone(),
                                     event_tx,
                                     None, // progress_tx — error recovery, no progress needed
                                     &d,
@@ -1409,6 +1444,12 @@ async fn refresh_subscription(
             } else {
                 Vec::new()
             };
+            if cancel_token.is_cancelled() && re_enriched.is_empty() {
+                return Err(ProxyError::subscription(
+                    crate::proxy::ErrorCode::SubscriptionCancelled,
+                    "Subscription operation was cancelled",
+                ));
+            }
             {
                 let mut mgr = state.manager.lock().await;
                 if let Some(idx) = mgr.list().iter().position(|p| p.id == id) {
@@ -1466,7 +1507,10 @@ async fn refresh_subscription(
                 &settings,
                 servers,
                 &id,
-                tokio_util::sync::CancellationToken::new(),
+                // Use the GLOBAL cancel token (managed in state) so that
+                // `cancel_refresh` actually aborts this pipeline. Passing a
+                // fresh token here made the Cancel button a no-op.
+                cancel_token.clone(),
                 event_tx,
                 Some(progress_tx),
                 &d,
@@ -1477,16 +1521,24 @@ async fn refresh_subscription(
     }
 
     // Fetch traffic info (no lock, URL from Phase 1)
-    let traffic = crate::subscription::fetch_subscription_traffic(
-        &url,
-        crate::profile::proxy_port_from_app(&app),
-    )
-    .await;
+    let traffic = tokio::select! {
+        _ = cancel_token.cancelled() => None,
+        result = crate::subscription::fetch_subscription_traffic(
+            &url,
+            crate::profile::proxy_port_from_app(&app),
+        ) => result,
+    };
 
     if servers.is_empty() {
+        if cancel_token.is_cancelled() {
+            return Err(ProxyError::subscription(
+                crate::proxy::ErrorCode::SubscriptionCancelled,
+                "Subscription operation was cancelled",
+            ));
+        }
         return Err(ProxyError::subscription(
             crate::proxy::ErrorCode::SubscriptionNoServers,
-            "Refresh returned 0 servers — keeping existing servers",
+            "Refresh returned 0 usable servers; the previous server snapshot was retained",
         ));
     }
 
@@ -2671,6 +2723,10 @@ async fn import_subscription_content(
     profile_id: String,
 ) -> Result<SubscriptionProfile, ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
+    let cancel_token = app
+        .try_state::<Arc<StdMutex<tokio_util::sync::CancellationToken>>>()
+        .map(|token| token.lock().unwrap_or_else(|e| e.into_inner()).clone())
+        .unwrap_or_else(tokio_util::sync::CancellationToken::new);
     log(
         &app,
         &logger,
@@ -2704,6 +2760,13 @@ async fn import_subscription_content(
         ));
     }
 
+    if cancel_token.is_cancelled() {
+        return Err(ProxyError::subscription(
+            ErrorCode::SubscriptionCancelled,
+            "Subscription operation was cancelled",
+        ));
+    }
+
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_app = app.clone();
     tokio::spawn(async move {
@@ -2718,6 +2781,29 @@ async fn import_subscription_content(
             crate::events::emit_refresh_progress(&progress_app, progress);
         }
     });
+
+    // Save the profile row to SQLite IMMEDIATELY (with empty servers) so that
+    // `process_servers_incremental` Phase 3 POST can satisfy the FK constraint
+    // `servers.profile_id REFERENCES profiles(id)`. Without this, every
+    // Phase 3 INSERT fails with SQLITE_CONSTRAINT_FOREIGNKEY. Pattern matches
+    // `ProfileManager::add` (profile/mod.rs).
+    let clean_url = format!("content://{}", uuid::Uuid::new_v4());
+    {
+        let mut mgr = state.manager.lock().await;
+        mgr.list_mut().push(SubscriptionProfile {
+            id: profile_id.clone(),
+            name: name.clone(),
+            url: clean_url.clone(),
+            servers: Vec::new(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_tested: None,
+            traffic_used: None,
+            traffic_total: None,
+            traffic_expiry: None,
+        });
+        mgr.save()?;
+    }
+
     if let Ok(data_dir) = app.path().app_data_dir() {
         let settings = app
             .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
@@ -2734,7 +2820,8 @@ async fn import_subscription_content(
                 &settings,
                 servers,
                 &profile_id,
-                tokio_util::sync::CancellationToken::new(),
+                // Global cancel token so cancel_refresh aborts import testing.
+                cancel_token.clone(),
                 event_tx,
                 Some(progress_tx),
                 &db,
@@ -2744,15 +2831,31 @@ async fn import_subscription_content(
         }
     }
 
+    if servers.is_empty() {
+        let mut mgr = state.manager.lock().await;
+        mgr.list_mut().retain(|profile| profile.id != profile_id);
+        mgr.save()?;
+        let error = if cancel_token.is_cancelled() {
+            ErrorCode::SubscriptionCancelled
+        } else {
+            ErrorCode::SubscriptionNoServers
+        };
+        return Err(ProxyError::subscription(
+            error,
+            "Import produced no usable servers; empty placeholder profile was removed",
+        ));
+    }
+
     // Persist cache to disk so batch-test results survive app restart.
     if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
         cache.save_to_disk().await;
     }
 
+    // Replace the placeholder empty profile with the tested one.
     let profile = SubscriptionProfile {
         id: profile_id,
         name,
-        url: format!("content://{}", uuid::Uuid::new_v4()),
+        url: clean_url,
         servers,
         updated_at: chrono::Utc::now().to_rfc3339(),
         last_tested: Some(chrono::Utc::now().to_rfc3339()),
@@ -2762,6 +2865,10 @@ async fn import_subscription_content(
     };
 
     let mut mgr = state.manager.lock().await;
+    // Remove the empty placeholder we saved before testing and push the real one.
+    if let Some(pos) = mgr.list_mut().iter().position(|p| p.id == profile.id) {
+        mgr.list_mut().remove(pos);
+    }
     mgr.list_mut().push(profile.clone());
     mgr.save()?;
 
@@ -2784,6 +2891,10 @@ async fn import_subscription_file(
     file_path: String,
 ) -> Result<SubscriptionProfile, ProxyError> {
     let logger = app.state::<StdMutex<Logger>>();
+    let cancel_token = app
+        .try_state::<Arc<StdMutex<tokio_util::sync::CancellationToken>>>()
+        .map(|token| token.lock().unwrap_or_else(|e| e.into_inner()).clone())
+        .unwrap_or_else(tokio_util::sync::CancellationToken::new);
     log(
         &app,
         &logger,
@@ -2843,6 +2954,13 @@ async fn import_subscription_file(
     // processing carry the REAL profile ID.
     let profile_id = uuid::Uuid::new_v4().to_string();
 
+    if cancel_token.is_cancelled() {
+        return Err(ProxyError::subscription(
+            ErrorCode::SubscriptionCancelled,
+            "Subscription operation was cancelled",
+        ));
+    }
+
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let event_app = app.clone();
     tokio::spawn(async move {
@@ -2857,6 +2975,28 @@ async fn import_subscription_file(
             crate::events::emit_refresh_progress(&progress_app, progress);
         }
     });
+
+    // Save the profile row to SQLite IMMEDIATELY (with empty servers) so that
+    // `process_servers_incremental` Phase 3 POST can satisfy the FK constraint
+    // `servers.profile_id REFERENCES profiles(id)`. Without this, every
+    // Phase 3 INSERT fails with SQLITE_CONSTRAINT_FOREIGNKEY. Pattern matches
+    // `ProfileManager::add` (profile/mod.rs).
+    {
+        let mut mgr = state.manager.lock().await;
+        mgr.list_mut().push(SubscriptionProfile {
+            id: profile_id.clone(),
+            name: file_name.clone(),
+            url: url.clone(),
+            servers: Vec::new(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_tested: None,
+            traffic_used: None,
+            traffic_total: None,
+            traffic_expiry: None,
+        });
+        mgr.save()?;
+    }
+
     if let Ok(data_dir) = app.path().app_data_dir() {
         let settings = app
             .try_state::<tokio::sync::Mutex<crate::settings::AppSettings>>()
@@ -2873,7 +3013,8 @@ async fn import_subscription_file(
                 &settings,
                 servers,
                 &profile_id,
-                tokio_util::sync::CancellationToken::new(),
+                // Global cancel token so cancel_refresh aborts import-file testing.
+                cancel_token.clone(),
                 event_tx,
                 Some(progress_tx),
                 &db,
@@ -2882,6 +3023,21 @@ async fn import_subscription_file(
             .await;
         }
     }
+    if servers.is_empty() {
+        let mut mgr = state.manager.lock().await;
+        mgr.list_mut().retain(|profile| profile.id != profile_id);
+        mgr.save()?;
+        let error = if cancel_token.is_cancelled() {
+            ErrorCode::SubscriptionCancelled
+        } else {
+            ErrorCode::SubscriptionNoServers
+        };
+        return Err(ProxyError::subscription(
+            error,
+            "Import produced no usable servers; empty placeholder profile was removed",
+        ));
+    }
+
     let server_count = servers.len();
 
     // Persist cache to disk so batch-test results survive app restart.
@@ -2902,6 +3058,10 @@ async fn import_subscription_file(
     };
 
     let mut mgr = state.manager.lock().await;
+    // Remove the empty placeholder we saved before testing and push the real one.
+    if let Some(pos) = mgr.list_mut().iter().position(|p| p.id == profile.id) {
+        mgr.list_mut().remove(pos);
+    }
     mgr.list_mut().push(profile.clone());
     mgr.save()?;
 

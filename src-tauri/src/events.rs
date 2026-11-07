@@ -2,6 +2,18 @@ use crate::proxy::ConnectionStatus;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
+/// Short id for log lines — returns the first `len` chars without panicking
+/// on short/empty/non-char-boundary strings. Direct byte-slicing (`&s[..8]`)
+/// panics if the string is shorter than 8 bytes, which can happen for
+/// `profile_id`/`server_id` values coming from MCP/UI and would kill the
+/// event-forwarding task, halting all subsequent `server-tested` delivery.
+fn short_id(s: &str, len: usize) -> &str {
+    match s.char_indices().nth(len).map(|(i, _)| i) {
+        Some(i) => &s[..i],
+        None => s,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionStatusPayload {
     pub status: ConnectionStatus,
@@ -131,7 +143,7 @@ pub fn emit_server_tested(app: &AppHandle, event: ServerTestedEvent) {
                 tracing::info!(
                     target: "events",
                     "server-tested [{}/{}] phase=init — {} {}:{}",
-                    &event.profile_id[..8], &event.server_id[..8],
+                    short_id(&event.profile_id, 8), short_id(&event.server_id, 8),
                     sd.protocol, sd.server, sd.port,
                 );
             }
@@ -141,7 +153,7 @@ pub fn emit_server_tested(app: &AppHandle, event: ServerTestedEvent) {
                 tracing::info!(
                     target: "events",
                     "server-tested [{}/{}] phase=cache — ping={}ms",
-                    &event.profile_id[..8], &event.server_id[..8], ping,
+                    short_id(&event.profile_id, 8), short_id(&event.server_id, 8), ping,
                 );
             }
         }
@@ -155,7 +167,7 @@ pub fn emit_server_tested(app: &AppHandle, event: ServerTestedEvent) {
                 tracing::info!(
                     target: "events",
                     "server-tested [{}/{}] phase=batch — ping={}ms {}",
-                    &event.profile_id[..8], &event.server_id[..8], ping, exit,
+                    short_id(&event.profile_id, 8), short_id(&event.server_id, 8), ping, exit,
                 );
             }
         }
@@ -165,14 +177,14 @@ pub fn emit_server_tested(app: &AppHandle, event: ServerTestedEvent) {
                 tracing::info!(
                     target: "events",
                     "server-tested [{}/{}] phase={} — error: {}",
-                    &event.profile_id[..8], &event.server_id[..8],
+                    short_id(&event.profile_id, 8), short_id(&event.server_id, 8),
                     event.phase, err,
                 );
             } else if let Some(ping) = event.ping_ms {
                 tracing::info!(
                     target: "events",
                     "server-tested [{}/{}] phase={} — ping={}ms",
-                    &event.profile_id[..8], &event.server_id[..8],
+                    short_id(&event.profile_id, 8), short_id(&event.server_id, 8),
                     event.phase, ping,
                 );
             }

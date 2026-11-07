@@ -102,8 +102,10 @@ pub enum ErrorCode {
     SubscriptionFetchFailed,
     /// Parser failed to decode base64 / parse URI scheme.
     SubscriptionParseFailed,
-    /// Subscription content parsed but yielded 0 servers.
+    /// Subscription content parsed but yielded 0 usable servers.
     SubscriptionNoServers,
+    /// The current refresh/import operation was explicitly cancelled.
+    SubscriptionCancelled,
     /// SQLite persistence (save/load profiles/servers) failed.
     SubscriptionSaveFailed,
 

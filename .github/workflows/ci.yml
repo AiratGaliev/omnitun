@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [master, main, develop]
+    branches: [main, dev, test]
   pull_request:
-    branches: [master, main]
+    branches: [main, dev, test]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -39,6 +39,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      - name: Rust format check
+        working-directory: src-tauri
+        run: cargo fmt -- --check
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -77,7 +81,7 @@ jobs:
         run: npm run build
 
       - name: Build (Tauri)
-        run: npm run tauri build
+        run: npm run tauri:build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

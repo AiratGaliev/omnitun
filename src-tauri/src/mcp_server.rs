@@ -30,6 +30,64 @@ fn schema(json: serde_json::Value) -> Arc<JsonMap> {
     }
 }
 
+fn settings_json(settings: &AppSettings) -> serde_json::Value {
+    let mut value = serde_json::to_value(settings).unwrap_or_else(|_| serde_json::json!({}));
+    if let Some(object) = value.as_object_mut() {
+        object.remove("ipinfoToken");
+        object.insert(
+            "ipinfoTokenConfigured".into(),
+            serde_json::Value::Bool(!settings.ipinfo_token.is_empty()),
+        );
+    }
+    value
+}
+
+fn required_u16_arg(args: &serde_json::Value, key: &str, minimum: u16) -> Result<u16, ErrorData> {
+    let value = args
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| ErrorData::invalid_params(format!("'{key}' must be an integer"), None))?;
+    if value < u64::from(minimum) || value > u64::from(u16::MAX) {
+        return Err(ErrorData::invalid_params(
+            format!("'{key}' must be between {minimum} and {}", u16::MAX),
+            None,
+        ));
+    }
+    Ok(value as u16)
+}
+
+fn optional_u16_arg(
+    args: &serde_json::Value,
+    key: &str,
+    default: u16,
+    minimum: u16,
+) -> Result<u16, ErrorData> {
+    match args.get(key) {
+        Some(_) => required_u16_arg(args, key, minimum),
+        None if default >= minimum => Ok(default),
+        None => Err(ErrorData::invalid_params(
+            format!("Configured default for '{key}' must be at least {minimum}"),
+            None,
+        )),
+    }
+}
+
+fn routing_mode_arg(args: &serde_json::Value, default: &str) -> Result<String, ErrorData> {
+    let mode = match args.get("routing_mode") {
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| ErrorData::invalid_params("'routing_mode' must be a string", None))?,
+        None => default,
+    };
+    match mode {
+        "system-proxy" | "local-proxy" => Ok(mode.to_string()),
+        _ => Err(ErrorData::invalid_params(
+            "'routing_mode' must be 'system-proxy' or 'local-proxy'",
+            None,
+        )),
+    }
+}
+
 struct ServerState {
     process_mgr: ProcessManager,
     profile_mgr: super::profile::ProfileManager,
@@ -45,6 +103,78 @@ struct ServerState {
 
 struct Handler {
     state: Arc<tokio::sync::Mutex<ServerState>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeSnapshot {
+    pid: u32,
+    proxy_port: u16,
+    clash_api_port: u16,
+    system_proxy: bool,
+}
+
+fn runtime_snapshot(state: &ServerState) -> Option<RuntimeSnapshot> {
+    let local_pid = state
+        .process_mgr
+        .pid()
+        .filter(|pid| crate::is_process_alive(*pid));
+    let pid = local_pid.or_else(crate::proxy::process::read_pid_file)?;
+
+    let config_path = state.data_dir.join("config").join("config.json");
+    let config = std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .unwrap_or_default();
+    let proxy_port = crate::proxy::PROXY_PORT.load(std::sync::atomic::Ordering::Acquire);
+    let configured_port = config
+        .get("inbounds")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|inbounds| {
+            inbounds.iter().find(|inbound| {
+                inbound.get("type").and_then(serde_json::Value::as_str) == Some("mixed")
+            })
+        })
+        .and_then(|inbound| inbound.get("listen_port"))
+        .and_then(serde_json::Value::as_u64)
+        .filter(|port| *port > 0 && *port <= u64::from(u16::MAX))
+        .map(|port| port as u16)
+        .unwrap_or(0);
+    let proxy_port = if proxy_port > 0 {
+        proxy_port
+    } else {
+        configured_port
+    };
+
+    let clash_api_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Acquire);
+    let configured_clash_port = config
+        .pointer("/experimental/clash_api/external_controller")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|address| address.rsplit_once(':').map(|(_, port)| port))
+        .and_then(|port| port.parse::<u16>().ok())
+        .unwrap_or(0);
+    let clash_api_port = if clash_api_port > 0 {
+        clash_api_port
+    } else {
+        configured_clash_port
+    };
+    let system_proxy = config
+        .get("inbounds")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|inbounds| {
+            inbounds.iter().any(|inbound| {
+                inbound
+                    .get("set_system_proxy")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            })
+        });
+
+    Some(RuntimeSnapshot {
+        pid,
+        proxy_port,
+        clash_api_port,
+        system_proxy,
+    })
 }
 
 fn binary_name() -> &'static str {
@@ -76,6 +206,12 @@ async fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
     });
 
     let logger = Arc::new(Mutex::new(Logger::new(1000, Some(log_file_path))));
+    // Share the same PID file as the GUI so MCP can inspect/control the
+    // process even when the proxy was started by the desktop application.
+    // Do not call cleanup_stale_pid here: a second live client must not kill
+    // the first client's active proxy during MCP startup.
+    crate::proxy::set_pid_file_path(&data_dir);
+
     let settings_mgr = SettingsManager::new(data_dir.clone());
     let settings = settings_mgr.load().unwrap_or_default();
     crate::proxy::batcher::set_configured_test_url(&settings.test_url, settings.test_use_tls);
@@ -103,7 +239,7 @@ async fn mk_state(data_dir: PathBuf) -> Result<ServerState, String> {
     ));
 
     log_to_logger(
-        &*logger,
+        &logger,
         LogLevel::Info,
         LogSource::System,
         format!("MCP server starting (data_dir: {:?})", data_dir),
@@ -274,7 +410,7 @@ async fn launch_sing_box(
         match found {
             Some(p) => {
                 log_to_logger(
-                    &*state._logger,
+                    &state._logger,
                     LogLevel::Warning,
                     LogSource::Proxy,
                     format!("Port {proxy_port} is in use, using {p} instead"),
@@ -320,67 +456,70 @@ async fn launch_sing_box(
 
 impl Handler {
     async fn cmd_start(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
+        {
+            let state = self.state.lock().await;
+            if let Some(runtime) = runtime_snapshot(&state) {
+                return Err(ErrorData::invalid_request(
+                    format!("OmniTun proxy is already running (PID {}, port {}). Stop it before starting another proxy.", runtime.pid, runtime.proxy_port),
+                    None,
+                ));
+            }
+        }
         let server = args
             .get("server")
             .and_then(|v| v.as_str())
+            .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| ErrorData::invalid_params("'server' is required", None))?;
-        let port = args
-            .get("port")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| ErrorData::invalid_params("'port' is required", None))?
-            as u16;
-        let proxy_port = args
-            .get("proxy_port")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5055) as u16;
-        let routing_mode = args
-            .get("routing_mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("system-proxy");
-        // auto_reconnect defaults to false for QA — the agent
-        // should observe crashes, not have them silently fixed.
+        let port = required_u16_arg(&args, "port", 1)?;
         let auto_reconnect = args
             .get("auto_reconnect")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        let state = self.state.lock().await;
+        let settings = state.settings_mgr.load().map_err(|e| {
+            ErrorData::internal_error(format!("Failed to load settings: {e}"), None)
+        })?;
+        let proxy_port = optional_u16_arg(&args, "proxy_port", settings.proxy_port, 1024)?;
+        let routing_mode = routing_mode_arg(&args, &settings.routing_mode)?;
+
         let mut profile = profile_from_args(&args);
         profile.server = server.into();
         profile.port = port;
-        // Track the active server ID
+
+        let (pid, actual_port) = launch_sing_box(
+            &state,
+            proxy_port,
+            &routing_mode,
+            &[profile.clone()],
+            Some(&settings),
+        )
+        .await?;
+        state.process_mgr.set_pid(pid);
+        crate::proxy::PROXY_PORT.store(actual_port, std::sync::atomic::Ordering::Release);
         {
             let mut active = crate::proxy::ACTIVE_SERVER_ID
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *active = Some(profile.id.clone());
         }
-
-        let state = self.state.lock().await;
-        let (pid, actual_port) =
-            launch_sing_box(&state, proxy_port, routing_mode, &[profile.clone()], None).await?;
-        state.process_mgr.set_pid(pid);
-        // Store LAST_PROFILE for auto-reconnect on sing-box crash.
         {
             let mut last = crate::proxy::LAST_PROFILE
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             *last = Some(crate::proxy::LastConnection {
-                all_servers: vec![profile.clone()],
-                routing_mode: routing_mode.to_string(),
+                all_servers: vec![profile],
+                routing_mode: routing_mode.clone(),
                 proxy_port: actual_port,
             });
         }
-        // Clone cancel_token BEFORE releasing the state lock to avoid
-        // self-deadlock. spawn_proxy_watchdog must not acquire the
-        // same tokio::sync::Mutex that cmd_start already holds —
-        // tokio::Mutex is non-reentrant.
         let cancel_token = {
             let guard = state.cancel_token.lock().unwrap_or_else(|e| e.into_inner());
             guard.clone()
         };
         let state_clone = self.state.clone();
-        drop(state); // release tokio::Mutex BEFORE spawning watchdog
+        drop(state);
         spawn_proxy_watchdog(cancel_token, state_clone, pid, actual_port, auto_reconnect);
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Proxy started (PID {pid}) on port {actual_port}"
@@ -389,64 +528,98 @@ impl Handler {
 
     async fn cmd_stop(&self) -> Result<CallToolResult, ErrorData> {
         let state = self.state.lock().await;
-        // Clear ACTIVE_SERVER_ID on stop.
-        {
-            let mut active = crate::proxy::ACTIVE_SERVER_ID
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *active = None;
+        let runtime = runtime_snapshot(&state);
+        if let Some(runtime) = runtime {
+            if state.process_mgr.pid() != Some(runtime.pid) {
+                state.process_mgr.set_pid(runtime.pid);
+            }
         }
-        // Clear LAST_PROFILE so the watchdog stops.
-        {
-            let mut last = crate::proxy::LAST_PROFILE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *last = None;
+        if let Some(runtime) = runtime {
+            crate::proxy::process::request_manual_stop(&state.data_dir, runtime.pid)
+                .map_err(|e| ErrorData::internal_error(e, None))?;
         }
-        state
-            .process_mgr
-            .stop()
-            .await
-            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let should_reset_system_proxy = runtime.is_some_and(|runtime| runtime.system_proxy)
+            || crate::proxy::LAST_PROFILE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|last| last.routing_mode == "system-proxy");
+
+        let stop_result = state.process_mgr.stop().await;
+        if let (Err(error), Some(runtime)) = (&stop_result, runtime) {
+            crate::proxy::process::clear_manual_stop_request(&state.data_dir, runtime.pid);
+            return Err(ErrorData::internal_error(error.to_string(), None));
+        }
+        stop_result.map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let reset_result = if should_reset_system_proxy {
+            crate::proxy::process::reset_system_proxy()
+        } else {
+            Ok(())
+        };
+        crate::proxy::PROXY_PID.store(0, std::sync::atomic::Ordering::Release);
+        crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
+        crate::proxy::PROXY_PORT.store(0, std::sync::atomic::Ordering::Release);
+        *crate::proxy::ACTIVE_SERVER_ID
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *crate::proxy::LAST_PROFILE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        reset_result.map_err(|e| ErrorData::internal_error(e, None))?;
+
         Ok(CallToolResult::success(vec![ContentBlock::text(
             "Proxy stopped",
         )]))
     }
 
-    async fn cmd_status(&self) -> Result<CallToolResult, ErrorData> {
+    async fn status_snapshot(&self) -> Result<serde_json::Value, ErrorData> {
         let state = self.state.lock().await;
-        let (status, pid) = match state.process_mgr.pid() {
-            Some(p) if crate::is_process_alive(p) => ("connected", p),
-            Some(_dead_pid) => {
-                // Clear stale PID so subsequent calls report 0,
-                // not a dead PID.
-                state.process_mgr.clear_pid();
-                crate::proxy::PROXY_PID.store(0, std::sync::atomic::Ordering::Release);
-                crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
-                crate::proxy::PROXY_PORT.store(0, std::sync::atomic::Ordering::Release);
-                ("disconnected", 0)
+        let runtime = runtime_snapshot(&state);
+        if let Some(runtime) = runtime {
+            if state.process_mgr.pid() != Some(runtime.pid) {
+                state.process_mgr.set_pid(runtime.pid);
             }
-            None => ("disconnected", 0),
-        };
+        } else if state.process_mgr.pid().is_some() {
+            state.process_mgr.clear_pid();
+            crate::proxy::PROXY_PID.store(0, std::sync::atomic::Ordering::Release);
+        }
 
-        // Read supplementary state from the same globals the Tauri version uses.
-        let clash_api_port =
-            crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+        let settings = state.settings_mgr.load().map_err(|e| {
+            ErrorData::internal_error(format!("Failed to load settings: {e}"), None)
+        })?;
+        let clash_api_port = runtime.map(|snapshot| snapshot.clash_api_port).unwrap_or(0);
+        let proxy_port = runtime.map(|snapshot| snapshot.proxy_port).unwrap_or(0);
         let active_server_id = crate::proxy::ACTIVE_SERVER_ID
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let proxy_port = state.settings_mgr.load().unwrap_or_default().proxy_port;
-        let binary_installed = state.bin_path.exists();
-        let info = serde_json::json!({
-            "status": status,
+            .clone()
+            .unwrap_or_default();
+        let routing_mode = runtime
+            .map(|snapshot| {
+                if snapshot.system_proxy {
+                    "system-proxy"
+                } else {
+                    "local-proxy"
+                }
+            })
+            .unwrap_or(settings.routing_mode.as_str());
+        let pid = runtime.map(|snapshot| snapshot.pid).unwrap_or(0);
+        Ok(serde_json::json!({
+            "status": if pid > 0 { "connected" } else { "disconnected" },
+            "connected": pid > 0,
             "pid": pid,
             "proxy_port": proxy_port,
+            "configured_proxy_port": settings.proxy_port,
+            "routing_mode": routing_mode,
             "clash_api_port": clash_api_port,
-            "active_server_id": active_server_id.unwrap_or_default(),
-            "binary_installed": binary_installed,
+            "active_server_id": if pid > 0 { active_server_id } else { String::new() },
+            "binary_installed": state.bin_path.exists(),
             "uptime_secs": null,
-        });
+        }))
+    }
+
+    async fn cmd_status(&self) -> Result<CallToolResult, ErrorData> {
+        let info = self.status_snapshot().await?;
         Ok(CallToolResult::success(vec![ContentBlock::text(
             info.to_string(),
         )]))
@@ -618,12 +791,7 @@ impl Handler {
                         let mut state = bg_state.lock().await;
                         match state
                             .profile_mgr
-                            .commit_refresh_headless(
-                                &bg_id,
-                                enriched,
-                                Some(cache.clone()),
-                                None,
-                            )
+                            .commit_refresh_headless(&bg_id, enriched, Some(cache.clone()), None)
                             .await
                         {
                             Ok(_profile) => {}
@@ -738,28 +906,36 @@ impl Handler {
     }
 
     async fn cmd_start_server(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
+        {
+            let state = self.state.lock().await;
+            if let Some(runtime) = runtime_snapshot(&state) {
+                return Err(ErrorData::invalid_request(
+                    format!("OmniTun proxy is already running (PID {}, port {}). Stop it before starting another proxy.", runtime.pid, runtime.proxy_port),
+                    None,
+                ));
+            }
+        }
         let sub_id = args
             .get("subscription_id")
             .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
             .ok_or_else(|| ErrorData::invalid_params("'subscription_id' is required", None))?;
         let server_id = args
             .get("server_id")
             .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
             .ok_or_else(|| ErrorData::invalid_params("'server_id' is required", None))?;
-        let proxy_port = args
-            .get("proxy_port")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5055) as u16;
-        let routing_mode = args
-            .get("routing_mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("system-proxy");
         let auto_reconnect = args
             .get("auto_reconnect")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
         let state = self.state.lock().await;
+        let settings = state.settings_mgr.load().map_err(|e| {
+            ErrorData::internal_error(format!("Failed to load settings: {e}"), None)
+        })?;
+        let proxy_port = optional_u16_arg(&args, "proxy_port", settings.proxy_port, 1024)?;
+        let routing_mode = routing_mode_arg(&args, &settings.routing_mode)?;
         let profile = state
             .profile_mgr
             .list()
@@ -776,30 +952,26 @@ impl Handler {
                 ErrorData::invalid_params(format!("Server '{server_id}' not found"), None)
             })?;
 
-        // Track the active server ID for this subscription server too.
-        {
-            let mut active = crate::proxy::ACTIVE_SERVER_ID
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *active = Some(server.id.clone());
-        }
-
-        let (pid, actual_port) =
-            launch_sing_box(&state, proxy_port, routing_mode, &[server.clone()], None).await?;
+        let (pid, actual_port) = launch_sing_box(
+            &state,
+            proxy_port,
+            &routing_mode,
+            std::slice::from_ref(server),
+            Some(&settings),
+        )
+        .await?;
         state.process_mgr.set_pid(pid);
-        // Store LAST_PROFILE for auto-reconnect.
-        {
-            let mut last = crate::proxy::LAST_PROFILE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *last = Some(crate::proxy::LastConnection {
-                all_servers: vec![server.clone()],
-                routing_mode: routing_mode.to_string(),
-                proxy_port: actual_port,
-            });
-        }
-        // Clone cancel_token BEFORE releasing the state lock to avoid
-        // self-deadlock (same pattern as cmd_start).
+        crate::proxy::PROXY_PORT.store(actual_port, std::sync::atomic::Ordering::Release);
+        *crate::proxy::ACTIVE_SERVER_ID
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(server.id.clone());
+        *crate::proxy::LAST_PROFILE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(crate::proxy::LastConnection {
+            all_servers: vec![server.clone()],
+            routing_mode: routing_mode.clone(),
+            proxy_port: actual_port,
+        });
         let cancel_token = {
             let guard = state.cancel_token.lock().unwrap_or_else(|e| e.into_inner());
             guard.clone()
@@ -816,14 +988,14 @@ impl Handler {
 
     async fn cmd_settings(&self) -> Result<CallToolResult, ErrorData> {
         let state = self.state.lock().await;
-        let s = state.settings_mgr.load().unwrap_or_default();
-        let j = serde_json::to_string_pretty(&s).unwrap_or_else(|_| "{}".into());
-        Ok(CallToolResult::success(vec![ContentBlock::text(j)]))
+        let settings = state.settings_mgr.load().map_err(|e| {
+            ErrorData::internal_error(format!("Failed to load settings: {e}"), None)
+        })?;
+        let json =
+            serde_json::to_string_pretty(&settings_json(&settings)).unwrap_or_else(|_| "{}".into());
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
-    // ── QA tools ───────────────────────────────────────────────────────────
-
-    /// Return recent log entries from the Logger ring buffer.
     async fn cmd_get_logs(&self, args: serde_json::Value) -> Result<CallToolResult, ErrorData> {
         let level = args
             .get("level")
@@ -966,13 +1138,13 @@ impl Handler {
     /// Clear all cache entries (for testing).
     async fn cmd_clear_cache(&self) -> Result<CallToolResult, ErrorData> {
         let state = self.state.lock().await;
-        // Clear SQLite server_cache table (cache.json is no longer used)
-        if let Some(conn) = state.cache.get_sync_conn() {
-            let _ = conn.execute("DELETE FROM server_cache", []);
-        }
-        state.cache.load_from_disk().await;
+        state
+            .cache
+            .clear_all()
+            .await
+            .map_err(|e| ErrorData::internal_error(e, None))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(
-            "Cache cleared",
+            "All persistent and in-memory cache entries cleared",
         )]))
     }
 
@@ -1003,62 +1175,123 @@ impl Handler {
     }
 
     /// Update application settings (partial update). Accepts routing_mode, proxy_port, bypass_ru, etc.
+    /// Update a partial set of application preferences. ipinfo_token is write-only.
     async fn cmd_update_settings(
         &self,
         args: serde_json::Value,
     ) -> Result<CallToolResult, ErrorData> {
-        let mut settings = {
-            let state = self.state.lock().await;
-            state.settings_mgr.load().unwrap_or_default()
-        };
-        if let Some(v) = args.get("routing_mode").and_then(|v| v.as_str()) {
-            settings.routing_mode = v.into();
+        const FIELDS: &[(&str, &str)] = &[
+            ("routing_mode", "routingMode"),
+            ("proxy_port", "proxyPort"),
+            ("bypass_ru", "bypassRu"),
+            ("start_with_windows", "startWithWindows"),
+            ("auto_connect_fastest", "autoConnectFastest"),
+            ("kill_switch", "killSwitch"),
+            ("allow_lan", "allowLan"),
+            ("custom_dns", "customDns"),
+            ("dns_address", "dnsAddress"),
+            ("allowed_countries", "allowedCountries"),
+            ("blocked_countries", "blockedCountries"),
+            ("custom_countries", "customCountries"),
+            ("allowed_protocols", "allowedProtocols"),
+            ("blocked_protocols", "blockedProtocols"),
+            ("language", "language"),
+            ("auto_update_interval", "autoUpdateInterval"),
+            ("auto_test_interval", "autoTestInterval"),
+            ("anti_dpi", "antiDpi"),
+            ("enable_mux", "enableMux"),
+            ("minimize_to_tray", "minimizeToTray"),
+            ("block_cdn_nodes", "blockCdnNodes"),
+            ("ipinfo_token", "ipinfoToken"),
+            ("tls_insecure", "tlsInsecure"),
+            ("test_url", "testUrl"),
+            ("test_use_tls", "testUseTls"),
+        ];
+
+        let input = args
+            .as_object()
+            .ok_or_else(|| ErrorData::invalid_params("Settings input must be an object", None))?;
+        for key in input.keys() {
+            if !FIELDS.iter().any(|(field, _)| field == key) {
+                return Err(ErrorData::invalid_params(
+                    format!("Unsupported setting '{key}'"),
+                    None,
+                ));
+            }
         }
-        if let Some(v) = args.get("proxy_port").and_then(|v| v.as_u64()) {
-            settings.proxy_port = v as u16;
-        }
-        if let Some(v) = args.get("bypass_ru").and_then(|v| v.as_bool()) {
-            settings.bypass_ru = v;
-        }
-        if let Some(v) = args.get("allow_lan").and_then(|v| v.as_bool()) {
-            settings.allow_lan = v;
-        }
-        if let Some(v) = args.get("kill_switch").and_then(|v| v.as_bool()) {
-            settings.kill_switch = v;
-        }
-        if let Some(v) = args.get("anti_dpi").and_then(|v| v.as_bool()) {
-            settings.anti_dpi = v;
-        }
-        if let Some(v) = args.get("enable_mux").and_then(|v| v.as_bool()) {
-            settings.enable_mux = v;
-        }
-        if let Some(v) = args.get("block_cdn_nodes").and_then(|v| v.as_bool()) {
-            settings.block_cdn_nodes = v;
-        }
-        if let Some(v) = args.get("auto_update_interval").and_then(|v| v.as_u64()) {
-            settings.auto_update_interval = v as u32;
-        }
-        if let Some(v) = args.get("auto_test_interval").and_then(|v| v.as_u64()) {
-            settings.auto_test_interval = v as u32;
-        }
-        if let Some(v) = args.get("test_url").and_then(|v| v.as_str()) {
-            settings.test_url = v.into();
-        }
-        if let Some(v) = args.get("test_use_tls").and_then(|v| v.as_bool()) {
-            settings.test_use_tls = v;
-        }
-        settings.normalize();
-        crate::proxy::batcher::set_configured_test_url(&settings.test_url, settings.test_use_tls);
+
+        // Keep the state lock for the complete read-modify-validate-save cycle.
+        // Concurrent partial updates must not overwrite one another, and readers
+        // must never observe an update halfway through its persistence step.
         let state = self.state.lock().await;
+        let mut settings = state.settings_mgr.load().map_err(|e| {
+            ErrorData::internal_error(format!("Failed to load settings: {e}"), None)
+        })?;
+        let mut value = serde_json::to_value(&settings).map_err(|e| {
+            ErrorData::internal_error(format!("Failed to serialize settings: {e}"), None)
+        })?;
+        let object = value.as_object_mut().ok_or_else(|| {
+            ErrorData::internal_error("Settings serialization was not an object", None)
+        })?;
+        for (input_key, settings_key) in FIELDS {
+            if let Some(value) = input.get(*input_key) {
+                object.insert((*settings_key).into(), value.clone());
+            }
+        }
+        settings = serde_json::from_value(value)
+            .map_err(|e| ErrorData::invalid_params(format!("Invalid setting value: {e}"), None))?;
+        settings.normalize();
+
+        if settings.proxy_port < 1024 {
+            return Err(ErrorData::invalid_params(
+                "'proxy_port' must be between 1024 and 65535",
+                None,
+            ));
+        }
+        if !matches!(
+            settings.routing_mode.as_str(),
+            "system-proxy" | "local-proxy"
+        ) {
+            return Err(ErrorData::invalid_params(
+                "'routing_mode' must be 'system-proxy' or 'local-proxy'",
+                None,
+            ));
+        }
+        if !matches!(settings.language.as_str(), "en" | "ru") {
+            return Err(ErrorData::invalid_params(
+                "'language' must be 'en' or 'ru'",
+                None,
+            ));
+        }
+        if settings.auto_update_interval > 10080 || settings.auto_test_interval > 10080 {
+            return Err(ErrorData::invalid_params(
+                "Automatic intervals must be between 0 and 10080 minutes",
+                None,
+            ));
+        }
+        if settings.test_url.trim().is_empty() || settings.test_url.len() > 255 {
+            return Err(ErrorData::invalid_params(
+                "'test_url' must contain 1 to 255 characters",
+                None,
+            ));
+        }
+        if settings.custom_dns && settings.dns_address.trim().is_empty() {
+            return Err(ErrorData::invalid_params(
+                "'dns_address' is required when custom DNS is enabled",
+                None,
+            ));
+        }
+
         state
             .settings_mgr
             .save(&settings)
             .map_err(|e| ErrorData::internal_error(e, None))?;
-        let json = serde_json::to_string_pretty(&settings).unwrap_or_default();
+        crate::proxy::batcher::set_configured_test_url(&settings.test_url, settings.test_use_tls);
+        let json =
+            serde_json::to_string_pretty(&settings_json(&settings)).unwrap_or_else(|_| "{}".into());
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
-    /// Import subscription from raw content (base64 or URI list).
     async fn cmd_import_subscription_content(
         &self,
         args: serde_json::Value,
@@ -1160,9 +1393,9 @@ impl Handler {
     /// through the local proxy port and returns the exit IP + GeoIP.
     async fn cmd_verify_proxy_routes(&self) -> Result<CallToolResult, ErrorData> {
         let state = self.state.lock().await;
-        let settings = state.settings_mgr.load().unwrap_or_default();
-        let proxy_port = settings.proxy_port;
-        if proxy_port == 0 {
+        let runtime = runtime_snapshot(&state);
+        let proxy_port = runtime.map(|snapshot| snapshot.proxy_port).unwrap_or(0);
+        if proxy_port == 0 || runtime.is_none() {
             return Err(ErrorData::internal_error("Proxy is not running — start it first with start_proxy or start_server_from_subscription", None));
         }
         // Build a reqwest client that routes through the proxy (mixed inbound accepts SOCKS5).
@@ -1186,9 +1419,16 @@ impl Handler {
         }
     }
 
+    async fn current_clash_api_port(&self) -> u16 {
+        let state = self.state.lock().await;
+        runtime_snapshot(&state)
+            .map(|runtime| runtime.clash_api_port)
+            .unwrap_or(0)
+    }
+
     /// Check the health of the active proxy outbound via Clash API.
     async fn cmd_check_proxy_health(&self) -> Result<CallToolResult, ErrorData> {
-        let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+        let stats_port = self.current_clash_api_port().await;
         if stats_port == 0 {
             return Ok(CallToolResult::success(vec![ContentBlock::text(
                 serde_json::json!({"healthy": false, "delay_ms": null, "reason": "proxy not connected"}).to_string()
@@ -1221,7 +1461,7 @@ impl Handler {
 
     /// Test latency of all outbounds via Clash API.
     async fn cmd_speed_test(&self) -> Result<CallToolResult, ErrorData> {
-        let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+        let stats_port = self.current_clash_api_port().await;
         if stats_port == 0 {
             return Err(ErrorData::internal_error(
                 "Proxy not connected".to_string(),
@@ -1273,7 +1513,7 @@ impl Handler {
             .get("proxy_tag")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ErrorData::invalid_params("'proxy_tag' is required", None))?;
-        let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+        let stats_port = self.current_clash_api_port().await;
         if stats_port == 0 {
             return Err(ErrorData::internal_error(
                 "Proxy not connected".to_string(),
@@ -1303,7 +1543,7 @@ impl Handler {
 
     /// Return active connections from the Clash API.
     async fn cmd_get_connections(&self) -> Result<CallToolResult, ErrorData> {
-        let stats_port = crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
+        let stats_port = self.current_clash_api_port().await;
         if stats_port == 0 {
             return Err(ErrorData::internal_error(
                 "Proxy not connected".to_string(),
@@ -1333,8 +1573,51 @@ impl Handler {
     async fn cmd_cancel_connect(&self) -> Result<CallToolResult, ErrorData> {
         crate::proxy::CONNECTION_CANCELLING.store(true, std::sync::atomic::Ordering::SeqCst);
         let state = self.state.lock().await;
-        let _ = state.process_mgr.stop().await;
+        let runtime = runtime_snapshot(&state);
+        if let Some(runtime) = runtime {
+            if state.process_mgr.pid() != Some(runtime.pid) {
+                state.process_mgr.set_pid(runtime.pid);
+            }
+        }
+        if let Some(runtime) = runtime {
+            crate::proxy::process::request_manual_stop(&state.data_dir, runtime.pid)
+                .map_err(|e| ErrorData::internal_error(e, None))?;
+        }
+        let should_reset_system_proxy = runtime.is_some_and(|runtime| runtime.system_proxy)
+            || crate::proxy::LAST_PROFILE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|last| last.routing_mode == "system-proxy");
+        let stop_result = state.process_mgr.stop().await;
+        if let (Err(error), Some(runtime)) = (&stop_result, runtime) {
+            crate::proxy::process::clear_manual_stop_request(&state.data_dir, runtime.pid);
+            crate::proxy::PROXY_PID.store(0, std::sync::atomic::Ordering::Release);
+            crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
+            crate::proxy::PROXY_PORT.store(0, std::sync::atomic::Ordering::Release);
+            *crate::proxy::LAST_PROFILE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            crate::proxy::CONNECTION_CANCELLING.store(false, std::sync::atomic::Ordering::SeqCst);
+            return Err(ErrorData::internal_error(error.to_string(), None));
+        }
+        let reset_result = if should_reset_system_proxy {
+            crate::proxy::process::reset_system_proxy()
+        } else {
+            Ok(())
+        };
+        crate::proxy::PROXY_PID.store(0, std::sync::atomic::Ordering::Release);
+        crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
+        crate::proxy::PROXY_PORT.store(0, std::sync::atomic::Ordering::Release);
+        *crate::proxy::ACTIVE_SERVER_ID
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *crate::proxy::LAST_PROFILE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         crate::proxy::CONNECTION_CANCELLING.store(false, std::sync::atomic::Ordering::SeqCst);
+        stop_result.map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        reset_result.map_err(|e| ErrorData::internal_error(e, None))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(
             "Cancelled",
         )]))
@@ -1345,32 +1628,53 @@ impl Handler {
         &self,
         args: serde_json::Value,
     ) -> Result<CallToolResult, ErrorData> {
-        let proxy_port = args
-            .get("proxy_port")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(5055) as u16;
-        let routing_mode = args
-            .get("routing_mode")
-            .and_then(|v| v.as_str())
-            .unwrap_or("system-proxy");
         let state = self.state.lock().await;
-        let _ = state.process_mgr.stop().await;
-        let ks_cfg = crate::proxy::config::generate_kill_switch_config(proxy_port, routing_mode)
+        let settings = state.settings_mgr.load().map_err(|e| {
+            ErrorData::internal_error(format!("Failed to load settings: {e}"), None)
+        })?;
+        let proxy_port = optional_u16_arg(&args, "proxy_port", settings.proxy_port, 1024)?;
+        let routing_mode = routing_mode_arg(&args, &settings.routing_mode)?;
+
+        let runtime = runtime_snapshot(&state);
+        if let Some(runtime) = runtime {
+            if state.process_mgr.pid() != Some(runtime.pid) {
+                state.process_mgr.set_pid(runtime.pid);
+            }
+            crate::proxy::process::request_manual_stop(&state.data_dir, runtime.pid)
+                .map_err(|e| ErrorData::internal_error(e, None))?;
+            *crate::proxy::LAST_PROFILE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            state
+                .process_mgr
+                .stop()
+                .await
+                .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+            if runtime.system_proxy && routing_mode != "system-proxy" {
+                crate::proxy::process::reset_system_proxy()
+                    .map_err(|e| ErrorData::internal_error(e, None))?;
+            }
+        }
+
+        let ks_cfg = crate::proxy::config::generate_kill_switch_config(proxy_port, &routing_mode)
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
         let cpath = crate::proxy::config::write_config(&ks_cfg, &state.data_dir.join("config"))
             .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        let b = state.bin_path.to_str().unwrap_or("");
-        let c = cpath.to_str().unwrap_or("");
-        let child = std::process::Command::new(b)
-            .args(["run", "-c", c])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|e| ErrorData::internal_error(format!("kill switch spawn: {e}"), None))?;
-        state.process_mgr.set_pid(child.id());
+        let pid = state
+            .process_mgr
+            .start_headless(&cpath)
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        crate::proxy::PROXY_PORT.store(proxy_port, std::sync::atomic::Ordering::Release);
+        crate::proxy::CLASH_API_PORT.store(0, std::sync::atomic::Ordering::Release);
+        *crate::proxy::ACTIVE_SERVER_ID
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *crate::proxy::LAST_PROFILE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Kill switch active on port {proxy_port} (PID {})",
-            child.id()
+            "Kill switch active on port {proxy_port} (PID {pid})"
         ))]))
     }
 
@@ -1556,6 +1860,8 @@ GeoIP enrichment, batch latency testing, and a dual-layer cache.
 - Verify the proxy actually routes traffic (verify_proxy_routes).
 - Inspect state (get_status, list_profiles, get_settings, get_logs).
 - Manage settings, GeoIP databases, and cache.
+- The ipinfo_token can be set with update_settings, but secrets are never returned by get_settings or the settings resource.
+- start_proxy and start_server_from_subscription use saved proxy_port and routing_mode unless explicitly overridden.
 
 ## Key concepts
 - Settings come from settings.json, NOT from per-call parameters.
@@ -1617,8 +1923,8 @@ fn define_tools() -> Vec<Tool> {
                     "wg_dns":           { "type": "string", "description": "WireGuard DNS" },
                     "wg_mtu":           { "type": "integer", "description": "WireGuard MTU" },
                     "wg_keepalive":     { "type": "integer", "description": "WireGuard persistent keepalive (seconds)" },
-                    "proxy_port": { "type": "integer", "description": "Local SOCKS5 port", "default": 5055, "minimum": 1024, "maximum": 65535 },
-                    "routing_mode": { "type": "string", "description": "Routing mode", "enum": ["system-proxy","local-proxy"], "default": "system-proxy" },
+                    "proxy_port": { "type": "integer", "description": "Optional local SOCKS5 port override; defaults to saved proxy_port", "minimum": 1024, "maximum": 65535 },
+                    "routing_mode": { "type": "string", "description": "Optional routing mode override; defaults to saved routing_mode", "enum": ["system-proxy","local-proxy"] },
                     "auto_reconnect": { "type": "boolean", "description": "Enable auto-reconnect watchdog (default: false for QA)", "default": false }
                 },
                 "required": ["server", "port"]
@@ -1678,8 +1984,9 @@ fn define_tools() -> Vec<Tool> {
                 "properties": {
                     "subscription_id": { "type": "string", "description": "Subscription profile ID" },
                     "server_id":       { "type": "string", "description": "Server ID within the subscription" },
-                    "proxy_port":      { "type": "integer", "description": "Local SOCKS5 port", "default": 5055, "minimum": 1024 },
-                    "routing_mode":    { "type": "string", "description": "Routing mode", "enum": ["system-proxy","local-proxy"], "default": "system-proxy" }
+                    "proxy_port":      { "type": "integer", "description": "Optional local SOCKS5 port override; defaults to saved proxy_port", "minimum": 1024, "maximum": 65535 },
+                    "routing_mode":    { "type": "string", "description": "Optional routing mode override; defaults to saved routing_mode", "enum": ["system-proxy","local-proxy"] },
+                    "auto_reconnect":  { "type": "boolean", "description": "Restart the proxy after an unexpected process exit", "default": false }
                 },
                 "required": ["subscription_id", "server_id"]
             }))
@@ -1705,14 +2012,14 @@ fn define_tools() -> Vec<Tool> {
             "Run a batch test on a single server: measures latency and detects exit IP. Does NOT start the main proxy.",
             schema(serde_json::json!({"type":"object","properties":{"server":{"type":"string"},"port":{"type":"integer"},"protocol":{"type":"string","default":"vless"},"uuid":{"type":"string"},"password":{"type":"string"},"method":{"type":"string"},"sni":{"type":"string"}},"required":["server","port"]}))
         )
-        .with_annotations(tool_ann(true, false, false, false)),
+        .with_annotations(tool_ann(false, false, false, true)),
         Tool::new("get_cache_stats",
             "Get cache statistics: positive and negative counts.",
             schema(serde_json::json!({"type":"object","properties":{}}))
         )
         .with_annotations(tool_ann(true, false, true, false)),
         Tool::new("clear_cache",
-            "Clear the server cache. Removes all cached test results. (Currently informational — full clear requires server restart.)",
+            "Clear persistent cache records and all in-memory positive/negative cache layers immediately.",
             schema(serde_json::json!({"type":"object","properties":{}}))
         )
         .with_annotations(tool_ann(false, true, false, false)),
@@ -1725,7 +2032,7 @@ fn define_tools() -> Vec<Tool> {
             "Get the real public IP address (before proxy) by making a request to ipify / ifconfig / ip.sb.",
             schema(serde_json::json!({"type":"object","properties":{}}))
         )
-        .with_annotations(tool_ann(true, false, false, false)),
+        .with_annotations(tool_ann(true, false, false, true)),
         Tool::new("verify_proxy_routes",
             "Verify the running proxy actually routes traffic. Makes a request through the proxy and returns the exit IP. Requires the proxy to be started first.",
             schema(serde_json::json!({"type":"object","properties":{}}))
@@ -1737,20 +2044,36 @@ fn define_tools() -> Vec<Tool> {
         )
         .with_annotations(tool_ann(false, false, true, false)),
         Tool::new("update_settings",
-            "Update application settings. Accepts partial updates: routing_mode, proxy_port, bypass_ru, allow_lan, kill_switch, anti_dpi, enable_mux, block_cdn_nodes, auto_update_interval, auto_test_interval.",
+            "Partially update supported application preferences. Supports language, filtering, network, startup and testing preferences. ipinfo_token is write-only and is never returned.",
             schema(serde_json::json!({
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
-                    "routing_mode":   { "type": "string", "enum": ["system-proxy","local-proxy"] },
-                    "proxy_port":     { "type": "integer", "minimum": 1024, "maximum": 65535 },
-                    "bypass_ru":      { "type": "boolean" },
-                    "allow_lan":      { "type": "boolean" },
-                    "kill_switch":    { "type": "boolean" },
-                    "anti_dpi":       { "type": "boolean" },
-                    "enable_mux":     { "type": "boolean" },
-                    "block_cdn_nodes": { "type": "boolean" },
+                    "routing_mode": { "type": "string", "enum": ["system-proxy","local-proxy"] },
+                    "proxy_port": { "type": "integer", "minimum": 1024, "maximum": 65535 },
+                    "bypass_ru": { "type": "boolean" },
+                    "start_with_windows": { "type": "boolean" },
+                    "auto_connect_fastest": { "type": "boolean" },
+                    "kill_switch": { "type": "boolean" },
+                    "allow_lan": { "type": "boolean" },
+                    "custom_dns": { "type": "boolean" },
+                    "dns_address": { "type": "string", "maxLength": 255 },
+                    "allowed_countries": { "type": "array", "items": { "type": "string" } },
+                    "blocked_countries": { "type": "array", "items": { "type": "string" } },
+                    "custom_countries": { "type": "array", "items": { "type": "object", "properties": { "code": { "type": "string" }, "name": { "type": "string" }, "flag": { "type": "string" } }, "required": ["code", "name", "flag"], "additionalProperties": false } },
+                    "allowed_protocols": { "type": "array", "items": { "type": "string" } },
+                    "blocked_protocols": { "type": "array", "items": { "type": "string" } },
+                    "language": { "type": "string", "enum": ["en", "ru"] },
                     "auto_update_interval": { "type": "integer", "minimum": 0, "maximum": 10080 },
-                    "auto_test_interval":   { "type": "integer", "minimum": 0, "maximum": 10080 }
+                    "auto_test_interval": { "type": "integer", "minimum": 0, "maximum": 10080 },
+                    "anti_dpi": { "type": "boolean" },
+                    "enable_mux": { "type": "boolean" },
+                    "minimize_to_tray": { "type": "boolean" },
+                    "block_cdn_nodes": { "type": "boolean" },
+                    "ipinfo_token": { "type": "string", "description": "Sensitive write-only API token. The server never returns this value." },
+                    "tls_insecure": { "type": "boolean" },
+                    "test_url": { "type": "string", "minLength": 1, "maxLength": 255 },
+                    "test_use_tls": { "type": "boolean" }
                 }
             }))
         )
@@ -1840,6 +2163,7 @@ impl ServerHandler for Handler {
         si
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn list_tools(
         &self,
         _: Option<PaginatedRequestParams>,
@@ -1847,12 +2171,14 @@ impl ServerHandler for Handler {
     ) -> impl std::future::Future<Output = Result<ListToolsResult, ErrorData>> + MaybeSendFuture + '_
     {
         async {
-            let mut r = ListToolsResult::default();
-            r.tools = define_tools();
-            Ok(r)
+            Ok(ListToolsResult {
+                tools: define_tools(),
+                ..Default::default()
+            })
         }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn list_resources(
         &self,
         _: Option<PaginatedRequestParams>,
@@ -1860,8 +2186,8 @@ impl ServerHandler for Handler {
     ) -> impl std::future::Future<Output = Result<ListResourcesResult, ErrorData>> + MaybeSendFuture + '_
     {
         async {
-            let mut r = ListResourcesResult::default();
-            r.resources = vec![
+            Ok(ListResourcesResult {
+                resources: vec![
                 Resource::new("omnitun://status", "Proxy Status")
                     .with_description("Current proxy connection status: connected/disconnected/error with PID, port, and exit IP.")
                     .with_mime_type("application/json"),
@@ -1886,11 +2212,13 @@ impl ServerHandler for Handler {
                 Resource::new("omnitun://singbox/config", "Current sing-box configuration JSON")
                     .with_description("The generated config.json that sing-box is currently running with.")
                     .with_mime_type("application/json"),
-            ];
-            Ok(r)
+                ],
+                ..Default::default()
+            })
         }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn read_resource(
         &self,
         request: model::ReadResourceRequestParams,
@@ -1900,26 +2228,7 @@ impl ServerHandler for Handler {
         async move {
             match request.uri.as_str() {
                 "omnitun://status" => {
-                    let pid = crate::proxy::PROXY_PID.load(std::sync::atomic::Ordering::Relaxed);
-                    let port =
-                        crate::proxy::CLASH_API_PORT.load(std::sync::atomic::Ordering::Relaxed);
-                    let proxy_port =
-                        crate::proxy::PROXY_PORT.load(std::sync::atomic::Ordering::Relaxed);
-                    let binary_installed = {
-                        let s = self.state.lock().await;
-                        s.bin_path.exists()
-                    };
-                    let status_str = if pid > 0 { "connected" } else { "disconnected" };
-                    let status = serde_json::json!({
-                        "status": status_str,
-                        "connected": pid > 0,
-                        "pid": pid,
-                        "proxy_port": proxy_port,
-                        "clash_api_port": port,
-                        "binary_installed": binary_installed,
-                        "active_server_id": "",
-                        "uptime_secs": serde_json::Value::Null,
-                    });
+                    let status = self.status_snapshot().await?;
                     let json =
                         serde_json::to_string_pretty(&status).unwrap_or_else(|_| "{}".into());
                     Ok(ReadResourceResult::new(vec![ResourceContents::text(
@@ -1972,8 +2281,8 @@ impl ServerHandler for Handler {
                 "omnitun://settings" => {
                     let s = self.state.lock().await;
                     let settings = s.settings_mgr.load().unwrap_or_default();
-                    let json =
-                        serde_json::to_string_pretty(&settings).unwrap_or_else(|_| "{}".into());
+                    let json = serde_json::to_string_pretty(&settings_json(&settings))
+                        .unwrap_or_else(|_| "{}".into());
                     Ok(ReadResourceResult::new(vec![ResourceContents::text(
                         json,
                         "omnitun://settings",
@@ -2054,6 +2363,7 @@ impl ServerHandler for Handler {
         }
     }
 
+    #[allow(clippy::manual_async_fn)]
     fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -2132,4 +2442,89 @@ pub fn run(data_dir: PathBuf) -> Result<(), String> {
             .map_err(|e| format!("MCP error: {e}"))?;
         Ok(())
     })
+}
+
+// ============================================================================
+// MCP contract tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_json_never_exposes_ipinfo_token() {
+        let mut settings = AppSettings::default();
+        settings.ipinfo_token = "mcp-secret-token-must-not-leak".into();
+
+        let json = settings_json(&settings);
+        let serialized = json.to_string();
+
+        assert!(json.get("ipinfoToken").is_none());
+        assert!(!serialized.contains("mcp-secret-token-must-not-leak"));
+        assert_eq!(json["ipinfoTokenConfigured"], true);
+    }
+
+    #[test]
+    fn proxy_port_arguments_are_validated_without_truncation() {
+        assert_eq!(
+            required_u16_arg(&serde_json::json!({"port": 443}), "port", 1).unwrap(),
+            443
+        );
+        assert_eq!(
+            required_u16_arg(&serde_json::json!({"port": 65535}), "port", 1).unwrap(),
+            65535
+        );
+        assert!(required_u16_arg(&serde_json::json!({"port": 0}), "port", 1).is_err());
+        assert!(required_u16_arg(&serde_json::json!({"port": 70000}), "port", 1).is_err());
+        assert!(required_u16_arg(&serde_json::json!({"port": -1}), "port", 1).is_err());
+        assert!(required_u16_arg(&serde_json::json!({"port": 5055.5}), "port", 1).is_err());
+        assert!(required_u16_arg(&serde_json::json!({}), "port", 1).is_err());
+    }
+
+    #[test]
+    fn optional_proxy_port_uses_saved_value_and_validates_overrides() {
+        assert_eq!(
+            optional_u16_arg(&serde_json::json!({}), "proxy_port", 1080, 1024).unwrap(),
+            1080
+        );
+        assert_eq!(
+            optional_u16_arg(
+                &serde_json::json!({"proxy_port": 18080}),
+                "proxy_port",
+                1080,
+                1024
+            )
+            .unwrap(),
+            18080
+        );
+        assert!(optional_u16_arg(&serde_json::json!({}), "proxy_port", 505, 1024).is_err());
+        assert!(optional_u16_arg(
+            &serde_json::json!({"proxy_port": 70000}),
+            "proxy_port",
+            1080,
+            1024
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn routing_mode_accepts_only_supported_values() {
+        assert_eq!(
+            routing_mode_arg(&serde_json::json!({}), "local-proxy").unwrap(),
+            "local-proxy"
+        );
+        assert_eq!(
+            routing_mode_arg(
+                &serde_json::json!({"routing_mode": "system-proxy"}),
+                "local-proxy"
+            )
+            .unwrap(),
+            "system-proxy"
+        );
+        assert!(
+            routing_mode_arg(&serde_json::json!({"routing_mode": "auto"}), "local-proxy").is_err()
+        );
+        assert!(routing_mode_arg(&serde_json::json!({"routing_mode": 1}), "local-proxy").is_err());
+    }
 }

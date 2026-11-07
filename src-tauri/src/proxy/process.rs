@@ -24,6 +24,60 @@ use std::os::windows::process::CommandExt;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Reset Windows Internet Settings after sing-box was force-terminated.
+/// taskkill bypasses sing-box's normal shutdown cleanup, so system-proxy mode
+/// must explicitly clear Internet Settings and WinHTTP on the MCP stop path.
+pub fn reset_system_proxy() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        const SETTINGS_KEY: &str =
+            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+        let mut enable = std::process::Command::new("reg");
+        enable.args([
+            "add",
+            SETTINGS_KEY,
+            "/v",
+            "ProxyEnable",
+            "/t",
+            "REG_DWORD",
+            "/d",
+            "0",
+            "/f",
+        ]);
+        enable.creation_flags(CREATE_NO_WINDOW);
+        let output = enable
+            .output()
+            .map_err(|e| format!("Failed to disable Windows system proxy: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "Failed to disable Windows system proxy: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        for value in ["ProxyServer", "AutoConfigURL"] {
+            let mut delete = std::process::Command::new("reg");
+            delete.args(["delete", SETTINGS_KEY, "/v", value, "/f"]);
+            delete.creation_flags(CREATE_NO_WINDOW);
+            if let Err(error) = delete.output() {
+                tracing::warn!(target: "process", "Could not remove Windows proxy value {value}: {error}");
+            }
+        }
+        let mut winhttp = std::process::Command::new("netsh");
+        winhttp.args(["winhttp", "reset", "proxy"]);
+        winhttp.creation_flags(CREATE_NO_WINDOW);
+        match winhttp.output() {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => tracing::warn!(
+                target: "process",
+                "WinHTTP proxy reset returned non-zero: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Err(error) => tracing::warn!(target: "process", "WinHTTP proxy reset failed: {error}"),
+        }
+    }
+    Ok(())
+}
+
 // ── PID file management ──────────────────────────────────────────────
 // Stores the sing-box PID so stale orphans from a killed session can be
 // cleaned up on next launch. Path is set once from setup().
@@ -66,6 +120,68 @@ pub fn remove_pid_file() {
         if let Some(ref path) = *guard {
             let _ = std::fs::remove_file(path);
         }
+    }
+}
+
+/// Read the PID owned by another OmniTun process (GUI or MCP).
+/// Stale/malformed files are discarded, but a live process is never killed here.
+/// Publish an intentional stop request for another OmniTun process.
+/// The request is tied to the PID to avoid suppressing recovery for a later run.
+pub fn request_manual_stop(data_dir: &Path, pid: u32) -> Result<(), String> {
+    std::fs::create_dir_all(data_dir)
+        .map_err(|e| format!("Failed to create application data directory: {e}"))?;
+    std::fs::write(data_dir.join("singbox.stop"), pid.to_string())
+        .map_err(|e| format!("Failed to publish manual stop request: {e}"))
+}
+
+/// Consume a manual-stop request only when it belongs to this watchdog's PID.
+pub fn consume_manual_stop_request(data_dir: &Path, pid: u32) -> bool {
+    let path = data_dir.join("singbox.stop");
+    let requested_pid = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok());
+    if requested_pid == Some(pid) {
+        let _ = std::fs::remove_file(path);
+        true
+    } else {
+        false
+    }
+}
+
+/// Remove a stop request if the matching process could not be terminated.
+pub fn clear_manual_stop_request(data_dir: &Path, pid: u32) {
+    let path = data_dir.join("singbox.stop");
+    if std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        == Some(pid)
+    {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+pub fn read_pid_file() -> Option<u32> {
+    let path = PID_FILE.lock().ok()?.clone()?;
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            tracing::warn!(target: "process", "[pidfile] cannot read shared PID file: {error}");
+            return None;
+        }
+    };
+    let pid = match content.trim().parse::<u32>() {
+        Ok(pid) if pid > 0 => pid,
+        _ => {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+    };
+    if crate::is_process_alive(pid) {
+        Some(pid)
+    } else {
+        let _ = std::fs::remove_file(&path);
+        None
     }
 }
 
@@ -301,8 +417,8 @@ impl ProcessManager {
     }
 
     // Headless spawn — same as start() but no AppHandle.
-    // Used by the MCP server. Does NOT write the PID file (the caller
-    // should call write_pid_file_headless separately if needed).
+    // Used by MCP and testing tools. Writes the shared PID file and keeps
+    // its JobObject in this ProcessManager for orphan protection.
     pub async fn start_headless(&self, config_path: &Path) -> Result<u32, ProxyError> {
         let existing_pid = *self.pid.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pid) = existing_pid {
@@ -736,6 +852,30 @@ unsafe fn prctl(option: i32, arg: u64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_manual_stop_request_is_scoped_to_pid_and_consumed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        request_manual_stop(dir.path(), 4242).unwrap();
+
+        assert!(!consume_manual_stop_request(dir.path(), 3131));
+        assert!(dir.path().join("singbox.stop").exists());
+        assert!(consume_manual_stop_request(dir.path(), 4242));
+        assert!(!dir.path().join("singbox.stop").exists());
+        assert!(!consume_manual_stop_request(dir.path(), 4242));
+    }
+
+    #[test]
+    fn test_manual_stop_request_can_be_cleared_only_for_matching_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        request_manual_stop(dir.path(), 4242).unwrap();
+
+        clear_manual_stop_request(dir.path(), 3131);
+        assert!(dir.path().join("singbox.stop").exists());
+
+        clear_manual_stop_request(dir.path(), 4242);
+        assert!(!dir.path().join("singbox.stop").exists());
+    }
 
     #[tokio::test]
     async fn test_initial_state_not_running() {

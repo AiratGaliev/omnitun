@@ -29,3 +29,6 @@ dist-ssr
 # Certs and keys
 *.pem
 *.key
+
+# Generated platform-specific MCP sidecar binaries
+src-tauri/binaries/omnitun-mcp-*

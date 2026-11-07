@@ -58,15 +58,6 @@ fn load_real_profiles() -> Vec<serde_json::Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: skip test when profiles are missing
-// ---------------------------------------------------------------------------
-fn skip_if_empty(profiles: &[serde_json::Value]) {
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json missing or empty");
-    }
-}
-
-// ---------------------------------------------------------------------------
 // 1. Basic data integrity
 // ---------------------------------------------------------------------------
 

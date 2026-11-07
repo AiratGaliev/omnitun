@@ -93,7 +93,8 @@ impl ProfileManager {
 
     pub fn load(&mut self) -> Result<(), ProxyError> {
         // Use the synchronous connection — lock once for all queries.
-        let conn = self.sync_conn.lock().unwrap();
+        // Recover from poisoned mutex — see save_to_disk rationale.
+        let conn = self.sync_conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, url, updated_at, last_tested,
@@ -232,7 +233,7 @@ impl ProfileManager {
     ///       2. save() gracefully skips rows that hit CHECK/NOT NULL constraints
     ///   - `server_cache`: save() does NOT touch this table.
     pub fn save(&mut self) -> Result<(), ProxyError> {
-        let mut conn = self.sync_conn.lock().unwrap();
+        let mut conn = self.sync_conn.lock().unwrap_or_else(|e| e.into_inner());
         let tx = conn.transaction().map_err(|e| {
             ProxyError::subscription(
                 ErrorCode::SubscriptionSaveFailed,
@@ -492,6 +493,11 @@ impl ProfileManager {
     ) -> Result<SubscriptionProfile, ProxyError> {
         let clean_url = url.trim().to_string();
 
+        let cancel_token = app
+            .try_state::<std::sync::Arc<std::sync::Mutex<tokio_util::sync::CancellationToken>>>()
+            .map(|token| token.lock().unwrap_or_else(|e| e.into_inner()).clone())
+            .unwrap_or_else(tokio_util::sync::CancellationToken::new);
+
         if self.profiles.iter().any(|p| p.url == clean_url) {
             return Err(ProxyError::subscription(
                 ErrorCode::SubscriptionDuplicateUrl,
@@ -499,27 +505,43 @@ impl ProfileManager {
             ));
         }
 
-        let mut servers = if clean_url.starts_with("http://") || clean_url.starts_with("https://") {
-            // Try through existing proxy first, fall back to direct
-            match crate::subscription::fetch_subscription(&clean_url, proxy_port_from_app(app))
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    if proxy_port_from_app(app).is_some() {
+        let fetch = async {
+            if clean_url.starts_with("http://") || clean_url.starts_with("https://") {
+                // Try through the existing proxy first, then fall back to direct.
+                match crate::subscription::fetch_subscription(&clean_url, proxy_port_from_app(app))
+                    .await
+                {
+                    Ok(servers) => Ok(servers),
+                    Err(error) if proxy_port_from_app(app).is_some() => {
                         tracing::error!(
                             target: "subscription",
-                            "Proxy fetch failed, retrying direct: {e}",
+                            "Proxy fetch failed, retrying direct: {error}",
                         );
-                        crate::subscription::fetch_subscription(&clean_url, None).await?
-                    } else {
-                        return Err(e);
+                        crate::subscription::fetch_subscription(&clean_url, None).await
                     }
+                    Err(error) => Err(error),
                 }
+            } else {
+                crate::subscription::parser::parse_subscription(&clean_url)
             }
-        } else {
-            crate::subscription::parser::parse_subscription(&clean_url)?
         };
+
+        let mut servers = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(ProxyError::subscription(
+                    ErrorCode::SubscriptionCancelled,
+                    "Subscription operation was cancelled",
+                ));
+            }
+            result = fetch => result?,
+        };
+
+        if cancel_token.is_cancelled() {
+            return Err(ProxyError::subscription(
+                ErrorCode::SubscriptionCancelled,
+                "Subscription operation was cancelled",
+            ));
+        }
 
         // Save profile to SQLite IMMEDIATELY (with empty servers) so the profile
         // persists even if the app is closed during the long batch test below.
@@ -569,7 +591,7 @@ impl ProfileManager {
                         &settings,
                         servers,
                         &profile_id,
-                        tokio_util::sync::CancellationToken::new(),
+                        cancel_token.clone(),
                         event_tx,
                         Some(progress_tx),
                         &self.db,
@@ -583,6 +605,15 @@ impl ProfileManager {
                 servers
             }
         };
+
+        if cancel_token.is_cancelled() && servers.is_empty() {
+            self.profiles.retain(|profile| profile.id != profile_id);
+            self.save()?;
+            return Err(ProxyError::subscription(
+                ErrorCode::SubscriptionCancelled,
+                "Subscription operation was cancelled",
+            ));
+        }
 
         // Persist cache to disk so negative entries survive app restart.
         if let Some(cache) = app.try_state::<std::sync::Arc<crate::proxy::cache::ServerCache>>() {
@@ -784,6 +815,10 @@ struct TestEngine {
     socks_port: u16,
     server_hash: u64,
     pm: crate::proxy::process::ProcessManager,
+    /// Temp dir created by `spawn_test_engine` (config.json + sing-box logs).
+    /// Retained so it can be removed on engine replacement and shutdown —
+    /// otherwise every spawn leaks an `omnitun-engine-<uuid>` dir in %TEMP%.
+    test_dir: std::path::PathBuf,
 }
 
 impl TestEngine {
@@ -795,6 +830,24 @@ impl TestEngine {
             s.id.hash(&mut h);
         }
         h.finish()
+    }
+
+    /// Best-effort cleanup of the engine's temp dir (config.json + logs).
+    /// Idempotent — safe to call multiple times. Never panics.
+    fn cleanup_test_dir(&self) {
+        if self.test_dir.as_os_str().is_empty() {
+            return;
+        }
+        if let Err(e) = std::fs::remove_dir_all(&self.test_dir) {
+            // NotFound is expected when already cleaned — only log real failures.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::debug!(
+                    target: "subscription",
+                    "Testing engine: could not remove temp dir {:?}: {e}",
+                    self.test_dir
+                );
+            }
+        }
     }
 }
 
@@ -853,29 +906,40 @@ pub(crate) async fn ensure_test_engine(
         let guard = TEST_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref engine) = *guard {
             if engine.server_hash == hash {
-                // Engine alive with matching config — check process still runs
-                let alive = std::process::Command::new("tasklist")
-                    .arg("/FI")
-                    .arg(format!("PID eq {}", engine.pid))
-                    .output()
-                    .ok()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).contains(&engine.pid.to_string()))
-                    .unwrap_or(false);
-                if alive {
+                // Engine alive with matching config — check process still runs.
+                // Cross-platform: `crate::is_process_alive` uses OpenProcess (Windows)
+                // or `kill -0` (Unix). The previous `tasklist` call only worked on
+                // Windows and silently returned false on Unix, causing the engine to
+                // be needlessly respawned on every clash_api_test call.
+                if crate::is_process_alive(engine.pid) {
                     return Some((engine.clash_port, engine.socks_port));
                 }
             }
         }
     }
 
-    // Need to start a new engine — kill old one first (frees ports)
+    // Need to start a new engine — kill old one first (frees ports + temp dir)
     {
-        let guard = TEST_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref old) = *guard {
+        let mut guard = TEST_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(old) = guard.take() {
             tracing::info!(target: "subscription", "Testing engine: servers changed, killing old engine (pid {})", old.pid);
-            let _ = std::process::Command::new("taskkill")
-                .args(["/pid", &old.pid.to_string(), "/f"])
-                .output();
+            // Cross-platform kill (matches process.rs pattern). Previously only
+            // `taskkill` was used, which is a no-op on Unix and left the old
+            // engine's sing-box process running.
+            #[cfg(windows)]
+            {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/pid", &old.pid.to_string(), "/f"])
+                    .output();
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &old.pid.to_string()])
+                    .output();
+            }
+            // Clean up the replaced engine's temp dir (config.json + logs).
+            old.cleanup_test_dir();
         }
     }
     // Short pause so OS releases ports after killing old engine
@@ -900,13 +964,14 @@ pub(crate) async fn ensure_test_engine(
         }
     }
 
-    if let Some((pid, clash_port, socks_port, pm)) = last_result {
+    if let Some((pid, clash_port, socks_port, pm, test_dir)) = last_result {
         let engine = TestEngine {
             pid,
             clash_port,
             socks_port,
             server_hash: hash,
             pm,
+            test_dir,
         };
         let mut guard = TEST_ENGINE.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(engine);
@@ -918,14 +983,16 @@ pub(crate) async fn ensure_test_engine(
 /// Kill the persistent testing engine (called on app exit).
 /// Calls the ProcessManager::stop() on the engine's own PM —
 /// PID, JobObject, and PID file are all managed by that instance.
+/// Also removes the engine's temp dir (config.json + logs) to avoid the
+/// `omnitun-engine-<uuid>` leak described in AUDIT-PLAN BUG-2.
 pub(crate) fn shutdown_test_engine() {
     if let Ok(mut guard) = TEST_ENGINE.lock() {
-        if let Some(ref engine) = *guard {
+        if let Some(engine) = guard.take() {
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 let _ = runtime.block_on(engine.pm.stop());
             }
+            engine.cleanup_test_dir();
         }
-        *guard = None;
     }
 }
 
@@ -937,7 +1004,13 @@ async fn spawn_test_engine(
     servers: &[ServerProfile],
     data_dir: &Path,
     settings: &crate::settings::AppSettings,
-) -> Option<(u32, u16, u16, crate::proxy::process::ProcessManager)> {
+) -> Option<(
+    u32,
+    u16,
+    u16,
+    crate::proxy::process::ProcessManager,
+    std::path::PathBuf,
+)> {
     use serde_json::json;
     use std::time::Duration;
 
@@ -955,6 +1028,14 @@ async fn spawn_test_engine(
         return None;
     }
 
+    // From here `test_dir` exists on disk. Every failure path below MUST
+    // clean it up — otherwise each spawn leaks an `omnitun-engine-<uuid>`
+    // directory in %TEMP% (see AUDIT-PLAN BUG-2). The helper closure makes
+    // every early return a single line and cannot be forgotten.
+    let cleanup_dir = |d: &std::path::Path| {
+        let _ = std::fs::remove_dir_all(d);
+    };
+
     // Find free ports dynamically (not from PortPool — stale TIME_WAIT ports
     // from failed engines would block sequential port reuse).
     fn find_free_port() -> Option<u16> {
@@ -964,8 +1045,13 @@ async fn spawn_test_engine(
         drop(listener);
         Some(port)
     }
-    let clash_port = find_free_port()?;
-    let socks_port = find_free_port()?;
+    let (clash_port, socks_port) = match (find_free_port(), find_free_port()) {
+        (Some(c), Some(s)) => (c, s),
+        _ => {
+            cleanup_dir(&test_dir);
+            return None;
+        }
+    };
 
     // Build a minimal config like batch test + Clash API (no base.json).
     let mut outbounds: Vec<serde_json::Value> = Vec::with_capacity(servers.len() + 2);
@@ -986,6 +1072,7 @@ async fn spawn_test_engine(
     }
     if outbounds.len() <= 2 && !servers.is_empty() {
         tracing::warn!(target: "subscription", "Testing engine: no valid outbounds ({} servers given)", servers.len());
+        cleanup_dir(&test_dir);
         return None;
     }
     let log_path = test_dir.join("sing-box.log");
@@ -1025,8 +1112,16 @@ async fn spawn_test_engine(
     });
 
     let config_path = test_dir.join("config.json");
-    if std::fs::write(&config_path, serde_json::to_string_pretty(&config).ok()?).is_err() {
+    let config_str = match serde_json::to_string_pretty(&config) {
+        Ok(s) => s,
+        Err(_) => {
+            cleanup_dir(&test_dir);
+            return None;
+        }
+    };
+    if std::fs::write(&config_path, config_str).is_err() {
         tracing::warn!(target: "subscription", "Testing engine: failed to write config");
+        cleanup_dir(&test_dir);
         return None;
     }
 
@@ -1039,6 +1134,7 @@ async fn spawn_test_engine(
         Ok(output) if !output.status.success() => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             tracing::warn!(target: "subscription", "Testing engine: config check failed:\n{stderr}");
+            cleanup_dir(&test_dir);
             return None;
         }
         Err(e) => {
@@ -1057,6 +1153,7 @@ async fn spawn_test_engine(
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(target: "subscription", "Testing engine: start_headless_test failed: {e}");
+            cleanup_dir(&test_dir);
             return None;
         }
     };
@@ -1067,15 +1164,22 @@ async fn spawn_test_engine(
         let stderr_path = test_dir.join("sing-box-stderr.log");
         let stderr_content = std::fs::read_to_string(&stderr_path).unwrap_or_default();
         tracing::warn!(target: "subscription", "Testing engine: process died immediately (pid {pid}):\n{stderr_content}");
+        cleanup_dir(&test_dir);
         return None;
     }
 
     // Wait for Clash API to be ready (up to 15s)
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(3))
         .build()
-        .ok()?;
+    {
+        Ok(c) => c,
+        Err(_) => {
+            cleanup_dir(&test_dir);
+            return None;
+        }
+    };
 
     let api_ready = {
         let url = format!("http://127.0.0.1:{clash_port}/version");
@@ -1094,10 +1198,12 @@ async fn spawn_test_engine(
     if !api_ready {
         tracing::warn!(target: "subscription", "Testing engine: Clash API not ready in 15s (port {})", clash_port);
         let _ = pm.stop().await;
+        cleanup_dir(&test_dir);
         return None;
     }
 
-    Some((pid, clash_port, socks_port, pm))
+    // Success — transfer test_dir ownership to the caller; it owns cleanup now.
+    Some((pid, clash_port, socks_port, pm, test_dir))
 }
 
 /// probe ALL servers via GET /proxies/proxy-{i}/delay,
@@ -1323,14 +1429,191 @@ async fn get_old_servers_ping(profile_id: &str, db: &DbPool) -> HashMap<String, 
     .unwrap_or_default()
 }
 
+/// Atomically replace one profile's persisted server snapshot.
+///
+/// Empty or completely rejected snapshots leave the previous rows untouched.
+/// Per-row constraint failures are logged and skipped; if no new row can be
+/// stored, the transaction is rolled back so the previous snapshot survives.
+fn persist_profile_servers(
+    conn: &mut rusqlite::Connection,
+    profile_id: &str,
+    servers: &[ServerProfile],
+) -> Result<Vec<String>, rusqlite::Error> {
+    if servers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM servers WHERE profile_id = ?1",
+        rusqlite::params![profile_id],
+    )?;
+
+    let mut inserted_ids = Vec::with_capacity(servers.len());
+    for server in servers {
+        let result = tx.execute(
+            "INSERT INTO servers
+             (profile_id, server_hash, protocol, server, port,
+              uuid, password, method, sni, flow,
+              public_key, private_key,
+              transport_type, transport_path, transport_host,
+              reality_pbk, reality_sid,
+              wg_local_address, wg_allowed_ips, wg_dns, wg_mtu, wg_keepalive,
+              username, ping_ms, behind_cdn, flag, country_name, city_name,
+              exit_server, exit_flag, exit_country_name, exit_city_name, original_name)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,
+                     ?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,
+                     ?29,?30,?31,?32,?33)",
+            rusqlite::params![
+                profile_id,
+                server.id,
+                server.protocol,
+                server.server,
+                server.port,
+                server.uuid,
+                server.password,
+                server.method,
+                server.sni,
+                server.flow,
+                server.public_key,
+                server.private_key,
+                server.transport_type,
+                server.transport_path,
+                server.transport_host,
+                server.reality_pbk,
+                server.reality_sid,
+                server.wg_local_address,
+                server.wg_allowed_ips,
+                server.wg_dns,
+                server.wg_mtu,
+                server.wg_keepalive,
+                server.username,
+                server.ping_ms,
+                server.behind_cdn as i32,
+                server.flag,
+                server.country_name,
+                server.city_name,
+                server.exit_server,
+                server.exit_flag,
+                server.exit_country_name,
+                server.exit_city_name,
+                server.original_name,
+            ],
+        );
+
+        match result {
+            Ok(_) => inserted_ids.push(server.id.clone()),
+            Err(error) => {
+                tracing::error!(
+                    target: "subscription",
+                    "Server {} skipped during snapshot commit: {error}",
+                    server.id
+                );
+            }
+        }
+    }
+
+    if inserted_ids.is_empty() {
+        tx.rollback()?;
+        return Ok(Vec::new());
+    }
+
+    tx.commit()?;
+    Ok(inserted_ids)
+}
+
+#[cfg(test)]
+mod snapshot_persistence_tests {
+    use super::*;
+
+    fn connection_with_profile() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::db::migrations::CREATE_TABLES_SQL)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO profiles (id, name, url) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["profile-test", "test", "content://test"],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn server(id: &str) -> ServerProfile {
+        ServerProfile {
+            id: id.to_string(),
+            protocol: "trojan".to_string(),
+            server: "example.com".to_string(),
+            port: 443,
+            ping_ms: Some(25),
+            flag: Some("US".to_string()),
+            country_name: Some("United States".to_string()),
+            exit_server: Some("203.0.113.10".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn persisted_ids(conn: &rusqlite::Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT server_hash FROM servers WHERE profile_id = ?1 ORDER BY server_hash")
+            .unwrap();
+        stmt.query_map(rusqlite::params!["profile-test"], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn empty_snapshot_keeps_last_committed_servers() {
+        let mut conn = connection_with_profile();
+        persist_profile_servers(&mut conn, "profile-test", &[server("old-server")]).unwrap();
+
+        let inserted = persist_profile_servers(&mut conn, "profile-test", &[]).unwrap();
+
+        assert!(inserted.is_empty());
+        assert_eq!(persisted_ids(&conn), vec!["old-server".to_string()]);
+    }
+
+    #[test]
+    fn failed_snapshot_insert_rolls_back_server_deletion() {
+        let mut conn = connection_with_profile();
+        persist_profile_servers(&mut conn, "profile-test", &[server("old-server")]).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_server_inserts
+             BEFORE INSERT ON servers
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced persistence failure');
+             END;",
+        )
+        .unwrap();
+
+        let inserted =
+            persist_profile_servers(&mut conn, "profile-test", &[server("new-server")]).unwrap();
+
+        assert!(inserted.is_empty());
+        assert_eq!(persisted_ids(&conn), vec!["old-server".to_string()]);
+    }
+
+    #[test]
+    fn successful_snapshot_replaces_old_servers_atomically() {
+        let mut conn = connection_with_profile();
+        persist_profile_servers(&mut conn, "profile-test", &[server("old-server")]).unwrap();
+
+        let inserted =
+            persist_profile_servers(&mut conn, "profile-test", &[server("new-server")]).unwrap();
+
+        assert_eq!(inserted, vec!["new-server".to_string()]);
+        assert_eq!(persisted_ids(&conn), vec!["new-server".to_string()]);
+    }
+}
+
 /// Multi-phase server processing with incremental event emission and
 /// SQLite persistence.
 ///
-/// Phase 0 (prepare + INSERT): dedup, ID preservation, cross-profile dedup, INSERT
-/// Phase 0.5 (restore): restore exit data + ping from old DB rows
+/// Phase 0 (prepare): dedup, ID preservation, cross-profile dedup
+/// Phase 0.5 (restore): read exit data + ping from the last committed DB snapshot
 /// Phase 1 (cache): emit fresh cached entries from server_cache table
 /// Phase 2 (preflight): Clash API ping test + pre-filter dead servers
-/// Phase 3 (batch): deep test via BatchingEngine, write results to SQLite
+/// Phase 3 (batch + commit): deep test, then atomically replace the DB snapshot
 ///
 /// Each phase emits `ServerTestedEvent` via `event_tx` for streaming UI updates.
 /// When `progress_tx` is `Some`, aggregate `RefreshProgress` is emitted after each
@@ -1449,31 +1732,13 @@ pub async fn process_servers_incremental(
             before - unique.len());
     }
 
-    // ═══ PHASE 0.5: Read old exit/ping BEFORE DELETE ════════════════
-    // Must read before DELETE+INSERT below, because the old rows are gone
-    // after the delete. Keyed by server_hash (= server.id after ID preservation).
+    // Phase 0.5: read the previous snapshot before final atomic replacement.
     let old_exit = get_old_servers_exit(profile_id, db).await;
     let old_ping = get_old_servers_ping(profile_id, db).await;
 
-    // ═══ PHASE 0: DELETE old servers — no INSERT ═════════════════════
-    // DESIGN (schema v2-v5): `servers` table has NOT NULL constraints on
-    // `ping_ms`, `flag`, `country_name`. Every row must have REAL data.
-    // 🚫 NO phase except Phase 3 (batch test) writes to `servers`.
-    //
-    // Phase 0 only clears stale rows. The fresh servers will be INSERTed
-    // in Phase 3 post-processing, AFTER batch test provides real data.
-    let pid = profile_id.to_string();
-    let _ = db
-        .call(
-            move |conn| -> Result<(), tokio_rusqlite::Error<rusqlite::Error>> {
-                conn.execute(
-                    "DELETE FROM servers WHERE profile_id = ?1",
-                    rusqlite::params![pid],
-                )?;
-                Ok(())
-            },
-        )
-        .await;
+    // Preserve the currently committed server snapshot throughout testing.
+    // Phase 3 POST replaces it atomically after validated results exist.
+    // Replace it atomically in Phase 3 POST only after validated results exist.
 
     // ═══ PHASE 0.5: Restore exit data + ping from old rows ═══════════
     // Keyed by server_hash (= server.id after ID preservation).
@@ -1547,13 +1812,12 @@ pub async fn process_servers_incremental(
     }
 
     // ═══ PHASE 1: Cache hit — via server_cache (no JOIN with servers) ═
-    // `servers` was DELETEd in Phase 0. JOIN with servers is impossible.
+    // The previous committed server snapshot remains available until Phase 3 POST.
     // Instead, query server_cache directly for fresh positive entries,
     // then filter in-memory to only those in our `unique` set.
     //
-    // Cache-hit servers skip Phases 2-3 (no re-test) and are INSERTed
-    // directly in Phase 3 POST-processing with their cached data.
-    // Non-cache servers go through preflight → batch test → INSERT.
+    // Cache-hit servers skip testing and join the final atomic snapshot.
+    // Other servers are preflighted and batch-tested before replacement.
     let fresh_cutoff = chrono::Utc::now().timestamp() - 600; // 10 min POSITIVE_STALE_SECS
     let all_fresh_positive: std::collections::HashSet<String> = {
         let cutoff = fresh_cutoff;
@@ -1667,15 +1931,30 @@ pub async fn process_servers_incremental(
         return cache_hit_servers;
     }
 
-    let preflight_pings = clash_api_test(
-        &needs_batch,
-        data_dir,
-        settings,
-        Some(cache),
-        None::<&AppHandle>,
-        profile_id,
-    )
-    .await;
+    if cancel.is_cancelled() {
+        tracing::info!(target: "subscription", "Refresh cancelled before preflight");
+        return Vec::new();
+    }
+
+    let preflight_pings = tokio::select! {
+        _ = cancel.cancelled() => {
+            tracing::info!(target: "subscription", "Refresh cancelled during Clash API preflight");
+            return Vec::new();
+        }
+        pings = clash_api_test(
+            &needs_batch,
+            data_dir,
+            settings,
+            Some(cache),
+            None::<&AppHandle>,
+            profile_id,
+        ) => pings,
+    };
+
+    if cancel.is_cancelled() {
+        tracing::info!(target: "subscription", "Refresh cancelled after preflight");
+        return Vec::new();
+    }
 
     let ping_count = preflight_pings.len();
     // Exclude negative-cache servers from dead-filter and remove them from
@@ -1683,7 +1962,8 @@ pub async fn process_servers_incremental(
     // is_cached_negative, so they are not in preflight_pings. Without removal
     // they would still go to Phase 3 batch testing, wasting resources and
     // incrementing consecutive_failures on each cycle.
-    let mut negative_cache_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut negative_cache_ids: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for s in &needs_batch {
         if cache.is_cached_negative(&s.id).await {
             negative_cache_ids.insert(s.id.clone());
@@ -1777,6 +2057,10 @@ pub async fn process_servers_incremental(
     }
 
     // ═══ PHASE 1.5: DNS resolve + GeoIP + CDN entry detection ════════
+    if cancel.is_cancelled() {
+        tracing::info!(target: "subscription", "Refresh cancelled after preflight filtering");
+        return Vec::new();
+    }
     if needs_batch.is_empty() {
         return cache_hit_servers;
     }
@@ -1815,16 +2099,38 @@ pub async fn process_servers_incremental(
         });
     }
     let mut dns_results: HashMap<String, String> = HashMap::new();
-    while let Some(res) = dns_set.join_next().await {
+    loop {
+        let next = tokio::select! {
+            _ = cancel.cancelled() => {
+                dns_set.abort_all();
+                while dns_set.join_next().await.is_some() {}
+                tracing::info!(target: "subscription", "Refresh cancelled during DNS enrichment");
+                return Vec::new();
+            }
+            result = dns_set.join_next() => result,
+        };
+        let Some(res) = next else {
+            break;
+        };
         if let Ok(Some((sid, ip))) = res {
             dns_results.insert(sid, ip);
         }
     }
 
     for s in &mut needs_batch {
+        if cancel.is_cancelled() {
+            return Vec::new();
+        }
         if let Some(ip) = dns_results.get(&s.id) {
             // Entry GeoIP
-            if let Some(info) = crate::proxy::geoip::resolve_hostname(ip).await {
+            let geo_info = tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!(target: "subscription", "Refresh cancelled during GeoIP enrichment");
+                    return Vec::new();
+                }
+                info = crate::proxy::geoip::resolve_hostname(ip) => info,
+            };
+            if let Some(info) = geo_info {
                 if s.country_name.is_none() {
                     s.country_name = Some(info.country_name.clone());
                 }
@@ -1953,8 +2259,19 @@ pub async fn process_servers_incremental(
         // Step 2: GeoIP enrichment for flag/country_name (for UI display)
         if crate::proxy::geoip::is_ready() {
             for s in &mut cache_hit_servers {
+                if cancel.is_cancelled() {
+                    tracing::info!(target: "subscription", "Refresh cancelled during cached GeoIP enrichment");
+                    return Vec::new();
+                }
                 if s.flag.is_none() || s.country_name.is_none() {
-                    if let Some(info) = crate::proxy::geoip::resolve_hostname(&s.server).await {
+                    let geo_info = tokio::select! {
+                        _ = cancel.cancelled() => {
+                            tracing::info!(target: "subscription", "Refresh cancelled during cached GeoIP enrichment");
+                            return Vec::new();
+                        }
+                        info = crate::proxy::geoip::resolve_hostname(&s.server) => info,
+                    };
+                    if let Some(info) = geo_info {
                         if s.flag.is_none() {
                             s.flag = Some(info.country_code.clone());
                         }
@@ -1981,15 +2298,25 @@ pub async fn process_servers_incremental(
         return cache_hit_servers;
     }
 
+    if cancel.is_cancelled() {
+        tracing::info!(target: "subscription", "Refresh cancelled before deep batch test");
+        return Vec::new();
+    }
+
     crate::proxy::cache::batch_test_incremental(
         cache,
         &needs_batch,
-        Some(cancel),
+        Some(cancel.clone()),
         profile_id,
         &event_tx,
         db,
     )
     .await;
+
+    if cancel.is_cancelled() {
+        tracing::info!(target: "subscription", "Refresh cancelled during batch; previous server snapshot retained");
+        return Vec::new();
+    }
 
     tracing::info!(target: "subscription",
         "Phase 3 (batch): {} servers sent to BatchingEngine", needs_batch.len());
@@ -2059,117 +2386,44 @@ pub async fn process_servers_incremental(
         );
     }
 
-    // ═══ PHASE 3 POST-PROCESS: SINGLE WRITER for servers table ══════
-    // 🚫 NO other phase writes to `servers`. This is the ONLY INSERT point.
-    //
-    // All servers entering this block have REAL data:
-    //   - cache_hit_servers — fresh data from server_cache (Phase 1 filtered)
-    //   - needs_batch — survived batch test AND exit-data filter (real ping/exit)
-    //
-    // If any server triggers a CHECK v3 or NOT NULL violation, it means a
-    // genuine pipeline defect — the constraint fires as designed.
+    // PHASE 3 POST-PROCESS: atomically replace the persisted server snapshot.
+    // The previous snapshot is untouched until a completed result is ready.
     let survivors_after_filters = needs_batch.len();
-    // ═══ FIX: return_servers must include BOTH cache_hit_servers AND batch survivors ═══
-    // BUG (critical): return_servers = needs_batch.clone() only captured batch-test
-    // survivors. When ALL batch servers failed (e.g. all in negative cache during
-    // preflight followed by batch failure), needs_batch was empty → return_servers empty
-    // → caller saved the profile with 0 servers → ALL previously working servers lost!
-    // Fix: concat cache_hit_servers + needs_batch before moving cache_hit_servers.
-    let return_servers = [&cache_hit_servers[..], &needs_batch[..]].concat();
+    let mut return_servers = [&cache_hit_servers[..], &needs_batch[..]].concat();
     let mut all_to_persist = cache_hit_servers;
     all_to_persist.append(&mut needs_batch);
+
+    if cancel.is_cancelled() {
+        tracing::info!(target: "subscription", "Refresh cancelled before server snapshot commit");
+        return Vec::new();
+    }
+
     if !all_to_persist.is_empty() {
-        let servers_for_insert = all_to_persist;
         let pid = profile_id.to_string();
-        let _ = db
-            .call(move |conn| -> Result<(), tokio_rusqlite::Error<rusqlite::Error>> {
-                let tx = conn.transaction()?;
-                tx.execute(
-                    "DELETE FROM servers WHERE profile_id = ?1",
-                    rusqlite::params![pid],
-                )?;
-                for s in &servers_for_insert {
-                    if let Err(e) = tx.execute(
-                        "INSERT INTO servers
-                         (profile_id, server_hash, protocol, server, port,
-                          uuid, password, method, sni, flow,
-                          public_key, private_key,
-                          transport_type, transport_path, transport_host,
-                          reality_pbk, reality_sid,
-                          wg_local_address, wg_allowed_ips, wg_dns, wg_mtu, wg_keepalive,
-                          username, ping_ms, behind_cdn, flag, country_name, city_name,
-                          exit_server, exit_flag, exit_country_name, exit_city_name, original_name)
-                         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,
-                                 ?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,
-                                 ?29,?30,?31,?32,?33)",
-                        rusqlite::params![
-                            pid,
-                            s.id,
-                            s.protocol,
-                            s.server,
-                            s.port,
-                            s.uuid,
-                            s.password,
-                            s.method,
-                            s.sni,
-                            s.flow,
-                            s.public_key,
-                            s.private_key,
-                            s.transport_type,
-                            s.transport_path,
-                            s.transport_host,
-                            s.reality_pbk,
-                            s.reality_sid,
-                            s.wg_local_address,
-                            s.wg_allowed_ips,
-                            s.wg_dns,
-                            s.wg_mtu,
-                            s.wg_keepalive,
-                            s.username,
-                            s.ping_ms,
-                            s.behind_cdn as i32,
-                            s.flag,
-                            s.country_name,
-                            s.city_name,
-                            s.exit_server,
-                            s.exit_flag,
-                            s.exit_country_name,
-                            s.exit_city_name,
-                            s.original_name,
-                        ],
-                    ) {
-                        // FOREIGN KEY: caller will persist via save() after this
-                        // function returns — expected, not a defect.
-                        // NOT NULL: genuine pipeline defect (server missing ping/exit).
-                        let is_fk = match &e {
-                            rusqlite::Error::SqliteFailure(
-                                rusqlite::ffi::Error { code, extended_code },
-                                ..
-                            ) => *code == rusqlite::ffi::ErrorCode::ConstraintViolation
-                                && *extended_code == 787, // SQLITE_CONSTRAINT_FOREIGNKEY
-                            _ => false,
-                        };
-                        if is_fk {
-                            tracing::warn!(
-                                target: "subscription",
-                                "Phase 3 POST: server {} FK — profile was deleted between test and persist, batch results saved to cache only",
-                                s.id,
-                            );
-                        } else {
-                            tracing::error!(
-                                target: "subscription",
-                                "[BUG] Phase 3 POST: server {} FAILED constraint: {e} — \
-                                 this indicates a pipeline defect (missing ping/exit data \
-                                 after batch test)",
-                                s.id,
-                            );
-                        }
-                    }
-                }
-                tx.commit()?;
-                Ok(())
-            })
+        let persisted = db
+            .call(move |conn| persist_profile_servers(conn, &pid, &all_to_persist))
             .await;
+
+        let persisted_ids = match persisted {
+            Ok(ids) if !ids.is_empty() => ids,
+            Ok(_) => {
+                tracing::error!(
+                    target: "subscription",
+                    "Phase 3 POST: no server passed persistence constraints; previous snapshot was retained"
+                );
+                return Vec::new();
+            }
+            Err(error) => {
+                tracing::error!(
+                    target: "subscription",
+                    "Phase 3 POST: snapshot transaction failed; previous snapshot was retained: {error}"
+                );
+                return Vec::new();
+            }
+        };
+
+        let persisted_ids: std::collections::HashSet<String> = persisted_ids.into_iter().collect();
+        return_servers.retain(|server| persisted_ids.contains(&server.id));
     }
 
     // Progress: Phase 3 complete — emit batch results

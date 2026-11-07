@@ -144,6 +144,7 @@
   "subscriptionFetchFailed": "Не удалось загрузить подписку. Проверьте URL и сеть.",
   "subscriptionParseFailed": "Не удалось разобрать содержимое подписки.",
   "subscriptionNoServers": "В подписке не найдено серверов.",
+  "subscriptionCancelled": "Операция подписки была отменена.",
   "subscriptionSaveFailed": "Не удалось сохранить данные подписки на диск.",
   "configGenerationFailed": "Не удалось сгенерировать конфигурацию прокси.",
   "configUnsupportedProtocol": "Один из серверов использует неподдерживаемый протокол.",

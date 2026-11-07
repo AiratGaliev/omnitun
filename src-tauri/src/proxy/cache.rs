@@ -518,15 +518,21 @@ impl ServerCache {
         let mut store = self.store.write().await;
         let previous = store.get(server_id).cloned();
 
+        // PRESERVE previously_worked across repeated failures: a server that
+        // once worked must keep the fast-retry base TTL (60s) on every failure,
+        // not drop to the never-worked base (86400s) after the 2nd failure.
+        // This must match the SQL path in `flush_cache_batch` which uses
+        // `ELSE server_cache.previously_worked` to avoid the same drift.
         let (consecutive_failures, previously_worked) = match previous {
             Some(CacheEntry {
                 status:
                     CacheStatus::Negative {
                         consecutive_failures,
+                        previously_worked,
                         ..
                     },
                 ..
-            }) => (consecutive_failures + 1, false),
+            }) => (consecutive_failures + 1, previously_worked),
             Some(CacheEntry {
                 status: CacheStatus::Positive { .. },
                 ..
@@ -705,7 +711,11 @@ impl ServerCache {
     /// It does NOT write to servers, profiles, or test_history.
     pub async fn save_to_disk(&self) {
         let store = self.store.read().await;
-        let conn = self.sync_conn.lock().unwrap();
+        // Recover from poisoned mutex (consistent with the rest of the codebase):
+        // a panic in another thread while holding this lock would otherwise crash
+        // every subsequent save, taking down the command. The connection itself
+        // is not corrupted by the poisoning — only the lock state is.
+        let conn = self.sync_conn.lock().unwrap_or_else(|e| e.into_inner());
         for (_key, entry) in store.iter() {
             let (
                 status,
@@ -797,6 +807,26 @@ impl ServerCache {
                 tracing::error!(target: "cache", "Failed to save cache entry: {e}");
             }
         }
+    }
+
+    /// Clear persisted, source-of-truth, and hot cache entries.
+    ///
+    /// This is intentionally one operation so callers cannot observe an empty
+    /// SQLite table while stale entries remain available through the hot cache.
+    pub async fn clear_all(&self) -> Result<(), String> {
+        {
+            let conn = self
+                .sync_conn
+                .lock()
+                .map_err(|_| "Cache database lock is poisoned".to_string())?;
+            conn.execute("DELETE FROM server_cache", [])
+                .map_err(|e| format!("Failed to clear persisted server cache: {e}"))?;
+        }
+
+        self.hot.invalidate_all();
+        self.hot.run_pending_tasks().await;
+        self.store.write().await.clear();
+        Ok(())
     }
 
     /// Load server_cache entries from SQLite into the in-memory store.
@@ -1084,11 +1114,24 @@ pub async fn batch_test_incremental(
     let mut positives: Vec<PositiveResult> = Vec::new();
     let mut negatives: Vec<(String, String)> = Vec::new();
 
-    while let Some(res) = set.join_next().await {
-        if cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
-            set.abort_all();
+    loop {
+        let next = if let Some(token) = cancel.as_ref() {
+            tokio::select! {
+                _ = token.cancelled() => {
+                    set.abort_all();
+                    while set.join_next().await.is_some() {}
+                    None
+                }
+                result = set.join_next() => result,
+            }
+        } else {
+            set.join_next().await
+        };
+
+        let Some(res) = next else {
             break;
-        }
+        };
+
         match res {
             Ok((server_id, Ok(Ok(positive)))) => {
                 let p = positive.clone();
@@ -1122,6 +1165,9 @@ pub async fn batch_test_incremental(
                 positives.push(p);
             }
             Ok((server_id, Ok(Err(e)))) => {
+                if e == "Cancelled" {
+                    continue;
+                }
                 let _ = event_tx.send(crate::events::ServerTestedEvent {
                     profile_id: profile_id.to_string(),
                     phase: "error".into(),
@@ -1560,6 +1606,43 @@ mod tests {
         assert_eq!(cache.negative_count().await, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_clear_all_removes_persistent_store_and_hot_entries() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let cache = ServerCache::new(dir.path());
+        {
+            let mut store = cache.store.write().await;
+            store.insert("positive".into(), make_entry("positive", 10));
+            store.insert("negative".into(), make_neg("negative", 1, false, "timeout"));
+        }
+        cache
+            .hot
+            .insert(
+                "positive".into(),
+                Arc::new(HotEntry {
+                    ping_ms: 10,
+                    tested_at: 1_000_000,
+                }),
+            )
+            .await;
+        cache.save_to_disk().await;
+
+        assert_eq!(cache.positive_count().await, 1);
+        assert_eq!(cache.negative_count().await, 1);
+        assert!(cache.hot.get("positive").await.is_some());
+
+        cache.clear_all().await.unwrap();
+
+        assert_eq!(cache.positive_count().await, 0);
+        assert_eq!(cache.negative_count().await, 0);
+        assert!(cache.hot.get("positive").await.is_none());
+        let conn = cache.get_sync_conn().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM server_cache", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

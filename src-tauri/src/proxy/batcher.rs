@@ -169,6 +169,20 @@ async fn process_batch(
     data_dir: &Path,
     cancel: &Arc<std::sync::Mutex<CancellationToken>>,
 ) {
+    let mut active_batch = Vec::with_capacity(batch.len());
+    for request in batch {
+        if request.cancel.is_cancelled() {
+            let _ = request.reply.send(Err("Cancelled".to_string()));
+        } else {
+            active_batch.push(request);
+        }
+    }
+    let batch = active_batch;
+    if batch.is_empty() {
+        tracing::debug!(target: "cache", "[Batcher] skipped batch: all requests were already cancelled");
+        return;
+    }
+
     // Read the CURRENT token at the start of this batch. If cancel_refresh
     // fired during a previous batch, the old token is cancelled but this
     // call reads the NEW (un-cancelled) token.
@@ -399,8 +413,20 @@ async fn process_batch(
     let pid = child.id();
     tracing::info!(target: "cache", "[Batcher] sing-box started (PID {pid})");
 
-    // Wait for sing-box to initialize
-    tokio::time::sleep(Duration::from_millis(SINGBOX_STARTUP_MS)).await;
+    // Wait for sing-box to initialize, but stop immediately if the batch is cancelled.
+    tokio::select! {
+        _ = token.cancelled() => {
+            #[cfg(windows)]
+            drop(_job_guard);
+            kill_singbox(pid);
+            for request in batch {
+                let _ = request.reply.send(Err("Cancelled".to_string()));
+            }
+            let _ = std::fs::remove_dir_all(&test_dir);
+            return;
+        }
+        _ = tokio::time::sleep(Duration::from_millis(SINGBOX_STARTUP_MS)) => {}
+    }
 
     // Port readiness check — ensure sing-box actually bound the ports
     let mut ports_ready = false;
@@ -450,12 +476,30 @@ async fn process_batch(
                         serde_json::to_string_pretty(&safe_cfg).unwrap_or_default());
                 }
             }
-            // Don't delete test_dir — save config for debugging
+            // Preserve config+log for debugging by COPYING them into
+            // data_dir/batch-debug (same as the total-failure path below),
+            // then remove the temp dir. Leaving it in %TEMP% leaks one
+            // omnitun-batch-<uuid> dir per config-error batch (AUDIT-PLAN BUG-C3).
+            let debug_dir = data_dir.join("batch-debug");
+            if std::fs::create_dir_all(&debug_dir).is_ok() {
+                let _ = std::fs::copy(test_dir.join("config.json"), debug_dir.join("config.json"));
+                let sb_log = test_dir.join("sing-box.log");
+                if sb_log.exists() {
+                    let _ = std::fs::copy(&sb_log, debug_dir.join("sing-box.log"));
+                }
+                let sb_err = test_dir.join("sing-box-stderr.log");
+                if sb_err.exists() {
+                    let _ = std::fs::copy(&sb_err, debug_dir.join("sing-box-stderr.log"));
+                }
+                tracing::info!(target: "cache",
+                    "[Batcher] config+log preserved at {:?} for debugging", debug_dir);
+            }
             for req in batch {
                 let _ = req
                     .reply
                     .send(Err(format!("sing-box exited with status {status}")));
             }
+            let _ = std::fs::remove_dir_all(&test_dir);
             return;
         }
         Ok(None) => {
@@ -466,19 +510,41 @@ async fn process_batch(
         }
     }
 
-    // 4. Test all servers in parallel through their individual ports
+    // 4. Test all servers in parallel through their individual ports.
+    //
+    // IMPORTANT: the reply `oneshot::Sender` is NOT moved into the spawned
+    // task. If it were, aborting a task (deadline) or a panic would drop the
+    // sender → the caller's `rx.await` returns `RecvError` → no
+    // `ServerTestedEvent`, no `test_history` row, and the server vanishes
+    // from the UI ("Tested 47/50 forever"). Instead we keep the sender in a
+    // side table keyed by server id; the task returns only the result, and
+    // the collector loop drains the matching sender here. Anything left in
+    // the table after the loop is explicitly replied-to as an error.
     let mut set = tokio::task::JoinSet::new();
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TESTS));
+    // pending_replies: server_id -> (reply sender, server id for cache).
+    type BatchReply =
+        tokio::sync::oneshot::Sender<Result<crate::proxy::cache::PositiveResult, String>>;
+    let mut pending_replies: std::collections::HashMap<String, (BatchReply, String)> =
+        std::collections::HashMap::with_capacity(batch.len());
 
     for (idx, req) in batch.into_iter().enumerate() {
         let port = port_list[idx];
         let sem = semaphore.clone();
-        let cancel = token.clone();
-
+        let global_cancel = token.clone();
+        let request_cancel = req.cancel.clone();
+        let server_id: String = req.server.id.clone();
+        let server_id_for_cache: String = req.server.id.clone();
+        pending_replies.insert(server_id.clone(), (req.reply, server_id_for_cache));
+        let owned_server = req.server;
         set.spawn(async move {
             let _permit = sem.acquire().await;
-            let res = test_single_server(port, &req.server, &cancel).await;
-            (req, res)
+            let res = tokio::select! {
+                _ = global_cancel.cancelled() => Err("Cancelled".to_string()),
+                _ = request_cancel.cancelled() => Err("Cancelled".to_string()),
+                result = test_single_server(port, &owned_server, &request_cancel) => result,
+            };
+            (owned_server.id, res)
         });
     }
 
@@ -492,19 +558,26 @@ async fn process_batch(
     let mut success_count = 0usize;
     let mut fail_count = 0usize;
 
-    while let Some(res) = set.join_next().await {
-        if tokio::time::Instant::now() >= batch_deadline {
-            tracing::warn!(target:"cache", "[Batcher] batch deadline (90s) exceeded — aborting {} remaining task(s)", set.len());
-            set.abort_all();
-            break;
-        }
+    loop {
+        let res = match tokio::time::timeout_at(batch_deadline, set.join_next()).await {
+            Ok(Some(result)) => result,
+            Ok(None) => break,
+            Err(_) => {
+                tracing::warn!(
+                    target: "cache",
+                    "[Batcher] batch deadline (90s) exceeded ? aborting {} remaining task(s)",
+                    set.len()
+                );
+                set.abort_all();
+                while set.join_next().await.is_some() {}
+                break;
+            }
+        };
         match res {
-            Ok((req, Ok(result))) => {
-                // Log any diagnostics caught during the test (e.g. outlet IP in CDN ranges)
+            Ok((sid, Ok(result))) => {
                 if let Some(warning) = &result.diagnostic_warning {
                     tracing::info!(target: "cache", "{warning}");
                 }
-
                 let positive = PositiveResult {
                     server_id: result.server_id.clone(),
                     ping_ms: result.ping_ms,
@@ -529,7 +602,9 @@ async fn process_batch(
                         tracing::warn!(target: "cache",
                             "[Batcher] server {} passed — ping {}ms, NO outlet IP (non-CDN, negative)",
                             result.server_id, result.ping_ms);
-                        let _ = req.reply.send(Err(reason));
+                        if let Some((reply, _)) = pending_replies.remove(&sid) {
+                            let _ = reply.send(Err(reason));
+                        }
                         fail_count += 1;
                         continue;
                     }
@@ -537,7 +612,9 @@ async fn process_batch(
                         .update_positive(&result.server_id, positive.clone())
                         .await;
                 }
-                let _ = req.reply.send(Ok(positive));
+                if let Some((reply, _)) = pending_replies.remove(&sid) {
+                    let _ = reply.send(Ok(positive));
+                }
                 success_count += 1;
                 match result.outlet_ip {
                     Some(ref ip) => tracing::info!(target: "cache",
@@ -546,11 +623,15 @@ async fn process_batch(
                         "[Batcher] server {} passed — ping {}ms, NO outlet IP (behind CDN — expected)", result.server_id, result.ping_ms),
                 }
             }
-            Ok((req, Err(e))) => {
-                if let Some(cache) = cache {
-                    cache.update_negative(&req.server.id, e.clone()).await;
+            Ok((sid, Err(e))) => {
+                if let Some((reply, sid_cache)) = pending_replies.remove(&sid) {
+                    if e != "Cancelled" {
+                        if let Some(cache) = cache.as_ref() {
+                            cache.update_negative(&sid_cache, e.clone()).await;
+                        }
+                    }
+                    let _ = reply.send(Err(e));
                 }
-                let _ = req.reply.send(Err(e));
                 fail_count += 1;
             }
             Err(e) => {
@@ -558,6 +639,21 @@ async fn process_batch(
                 fail_count += 1;
             }
         }
+    }
+
+    // Any reply still pending here belongs to a task that was aborted or
+    // panicked before producing a result. Reply with an explicit error so the
+    // caller's `rx.await` resolves, a `ServerTestedEvent` is emitted, and the
+    // server is recorded as negative in the cache. Without this the server
+    // would vanish from the UI ("Tested 47/50 forever").
+    for (sid, (reply, sid_cache)) in pending_replies.drain() {
+        let reason = "Batch aborted before completion (deadline/panic)".to_string();
+        if let Some(cache) = cache.as_ref() {
+            cache.update_negative(&sid_cache, reason.clone()).await;
+        }
+        let _ = reply.send(Err(reason));
+        fail_count += 1;
+        tracing::warn!(target: "cache", "[Batcher] resolved orphaned reply for server {sid} as failed");
     }
 
     // 6. Stop sing-box
@@ -914,9 +1010,23 @@ fn kill_singbox(pid: u32) {
     }
     #[cfg(not(windows))]
     {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .output();
+        // sing-box is spawned in its own process group (process_group(0) above),
+        // so kill the WHOLE group with `kill -9 -<pgid>` to avoid orphaning any
+        // child subprocess sing-box may have spawned. A bare `kill -9 <pid>`
+        // only terminates the leader and can leave children reparented to init.
+        // Fall back to killing just the pid if the group kill fails (e.g. the
+        // process already exited or never set its own pgrp).
+        let neg = format!("-{}", pid);
+        let killed_group = std::process::Command::new("kill")
+            .args(["-9", &neg])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !killed_group {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .output();
+        }
     }
 }
 
