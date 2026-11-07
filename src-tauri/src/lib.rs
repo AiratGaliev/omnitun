@@ -3490,7 +3490,7 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
             .arg("-0")
             .arg(pid.to_string())
             .output()
-            .map_or(false, |o| o.status.success())
+            .is_ok_and(|o| o.status.success())
     }
 }
 

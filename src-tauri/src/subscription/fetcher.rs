@@ -1,6 +1,7 @@
 use crate::proxy::{ErrorCode, ProxyError};
 
 /// Trait so the fetcher can be mocked in tests.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait SubscriptionFetcher {
     async fn fetch(&self, url: &str) -> Result<String, ProxyError>;

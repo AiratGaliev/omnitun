@@ -17,12 +17,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 #[cfg(not(windows))]
 use std::os::unix::process::CommandExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Reset Windows Internet Settings after sing-box was force-terminated.
 /// taskkill bypasses sing-box's normal shutdown cleanup, so system-proxy mode
@@ -440,15 +441,18 @@ impl ProcessManager {
             ProxyError::process(ErrorCode::ProcessStartFailed, "Invalid binary path")
         })?;
 
+        #[cfg(windows)]
         let stderr_path = std::path::Path::new(config_str)
             .parent()
             .map(|p| p.join("sing-box-stderr.log"))
             .unwrap_or_else(|| std::path::PathBuf::from("sing-box-stderr.log"));
+        #[cfg(windows)]
         let stderr_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&stderr_path)
             .ok();
+        #[cfg(windows)]
         let stderr_stdio = match stderr_file {
             Some(ref file) => std::process::Stdio::from(file.try_clone().unwrap_or_else(|_| {
                 std::fs::OpenOptions::new()

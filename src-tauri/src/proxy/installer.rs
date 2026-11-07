@@ -349,6 +349,14 @@ impl Installer {
         {
             "linux-amd64.tar.gz"
         }
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            "darwin-amd64.tar.gz"
+        }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            "darwin-arm64.tar.gz"
+        }
     }
 }
 

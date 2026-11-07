@@ -716,7 +716,7 @@ impl ServerCache {
         // every subsequent save, taking down the command. The connection itself
         // is not corrupted by the poisoning — only the lock state is.
         let conn = self.sync_conn.lock().unwrap_or_else(|e| e.into_inner());
-        for (_key, entry) in store.iter() {
+        for entry in store.values() {
             let (
                 status,
                 ping_ms,

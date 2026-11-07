@@ -60,6 +60,9 @@ jobs:
             patchelf \
             libxdo-dev
 
+      - name: Prepare MCP sidecar
+        run: npm run prepare:mcp-sidecar
+
       - name: Lint (TypeScript)
         run: npm run lint
 
