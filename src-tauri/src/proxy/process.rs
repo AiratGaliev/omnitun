@@ -727,10 +727,12 @@ impl ProcessManager {
         })?;
 
         // Open stderr log file next to config.json for diagnostics.
+        #[cfg(windows)]
         let stderr_path = std::path::Path::new(config_path)
             .parent()
             .map(|p| p.join("sing-box-stderr.log"))
             .unwrap_or_else(|| std::path::PathBuf::from("sing-box-stderr.log"));
+        #[cfg(windows)]
         let stderr_file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -738,6 +740,7 @@ impl ProcessManager {
             .ok();
 
         // Pre-compute stderr Stdio: use the log file if available, null otherwise.
+        #[cfg(windows)]
         let stderr_stdio = match stderr_file {
             Some(ref file) => std::process::Stdio::from(file.try_clone().unwrap_or_else(|_| {
                 // Fallback: create a new file handle. This should never fail
