@@ -2635,7 +2635,13 @@ mod extra_tests {
         let mut ok = 0u32;
         let mut fail = 0u32;
         for (i, s) in servers.iter().enumerate() {
-            match generate_config(&cache, 2080, "local-proxy", &[s.clone()], &settings) {
+            match generate_config(
+                &cache,
+                2080,
+                "local-proxy",
+                std::slice::from_ref(s),
+                &settings,
+            ) {
                 Ok((cfg_str, _)) => {
                     let tmp = cache.join(format!("c-{i}.json"));
                     let _ = std::fs::write(&tmp, &cfg_str);
@@ -2819,8 +2825,10 @@ mod extra_tests {
         let _ = std::fs::create_dir_all(&cache);
 
         // autoConnectFastest=false → should produce single outbound per server
-        let mut settings_no_fastest = AppSettings::default();
-        settings_no_fastest.auto_connect_fastest = false;
+        let settings_no_fastest = AppSettings {
+            auto_connect_fastest: false,
+            ..AppSettings::default()
+        };
 
         let (cfg_str, _) = generate_config(
             &cache,
@@ -2847,8 +2855,10 @@ mod extra_tests {
         );
 
         // autoConnectFastest=true → should produce multiple outbounds + urltest
-        let mut settings_fastest = AppSettings::default();
-        settings_fastest.auto_connect_fastest = true;
+        let settings_fastest = AppSettings {
+            auto_connect_fastest: true,
+            ..AppSettings::default()
+        };
 
         let (cfg_str, _) =
             generate_config(&cache, 2080, "local-proxy", &servers, &settings_fastest).unwrap();

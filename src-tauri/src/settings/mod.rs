@@ -210,18 +210,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        let mut original = AppSettings::default();
-        original.routing_mode = "local-proxy".into();
-        original.proxy_port = 9090;
-        original.allow_lan = false;
-        original.allowed_countries = vec!["US".into(), "DE".into()];
-        original.blocked_protocols = vec!["trojan".into()];
-        original.language = "ru".into();
-        original.anti_dpi = false;
-        original.enable_mux = true;
-        original.minimize_to_tray = true;
-        original.block_cdn_nodes = true;
-        original.ipinfo_token = "test_token_123".into();
+        let original = AppSettings {
+            routing_mode: "local-proxy".into(),
+            proxy_port: 9090,
+            allow_lan: false,
+            allowed_countries: vec!["US".into(), "DE".into()],
+            blocked_protocols: vec!["trojan".into()],
+            language: "ru".into(),
+            anti_dpi: false,
+            enable_mux: true,
+            minimize_to_tray: true,
+            block_cdn_nodes: true,
+            ipinfo_token: "test_token_123".into(),
+            ..AppSettings::default()
+        };
 
         {
             let mgr = SettingsManager::new(dir.clone());

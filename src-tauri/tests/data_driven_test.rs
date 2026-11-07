@@ -390,10 +390,10 @@ fn test_outlet_ip_guard_doesnt_update_when_same() {
     let real_ip = Some("any.dynamic.ip".to_string());
     let outlet_ip = Some("any.dynamic.ip".to_string());
 
-    let should_update = match (&real_ip, &outlet_ip) {
-        (Some(r), Some(o)) if !r.is_empty() && o != r => true,
-        _ => false,
-    };
+    let should_update = matches!(
+        (&real_ip, &outlet_ip),
+        (Some(r), Some(o)) if !r.is_empty() && o != r
+    );
     assert!(!should_update, "Guard: same IP → не обновлять");
     println!("✓ Guard: outlet IP == real IP → не обновляем");
 }
@@ -404,10 +404,10 @@ fn test_outlet_ip_guard_updates_when_different() {
     let real_ip = Some("any.dynamic.ip".to_string());
     let outlet_ip = Some("different.proxy.ip".to_string());
 
-    let should_update = match (&real_ip, &outlet_ip) {
-        (Some(r), Some(o)) if !r.is_empty() && o != r => true,
-        _ => false,
-    };
+    let should_update = matches!(
+        (&real_ip, &outlet_ip),
+        (Some(r), Some(o)) if !r.is_empty() && o != r
+    );
     assert!(should_update, "Guard: different IP → обновлять");
     println!("✓ Guard: outlet IP != real IP → обновляем");
 }
@@ -415,10 +415,10 @@ fn test_outlet_ip_guard_updates_when_different() {
 /// Guard — не обновлять если реальный IP пустой
 #[test]
 fn test_outlet_ip_guard_skips_when_empty() {
-    let should_update = match (None::<String>, Some("1.2.3.4".to_string())) {
-        (Some(r), Some(o)) if !r.is_empty() && o != r => true,
-        _ => false,
-    };
+    let should_update = matches!(
+        (None::<String>, Some("1.2.3.4".to_string())),
+        (Some(r), Some(o)) if !r.is_empty() && o != r
+    );
     assert!(!should_update, "Guard: empty real IP → не обновлять");
     println!("✓ Guard: empty real IP → не обновляем");
 }
@@ -464,7 +464,7 @@ fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error
     if profiles.is_empty()
         || profiles[0]["servers"]
             .as_array()
-            .map_or(true, |a| a.is_empty())
+            .is_none_or(|a| a.is_empty())
     {
         eprintln!("SKIP: no servers available");
         return Ok(());

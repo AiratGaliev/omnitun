@@ -194,8 +194,8 @@ async fn outlet_vs_entry_country() {
         .unwrap();
 
     println!(
-        "\n{:>3} | {:<8} {:<16} | {:<20} | {:<15} | {}",
-        "#", "Entry", "Server IP", "Exit country", "Exit IP", "Match"
+        "\n{:>3} | {:<8} {:<16} | {:<20} | {:<15} | Match",
+        "#", "Entry", "Server IP", "Exit country", "Exit IP"
     );
     println!("{}", "-".repeat(90));
 

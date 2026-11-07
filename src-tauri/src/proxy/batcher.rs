@@ -1116,26 +1116,28 @@ mod tests {
 
     #[test]
     fn test_batch_constants() {
-        assert!(
-            BATCH_SIZE > 0 && BATCH_SIZE <= 200,
-            "BATCH_SIZE should be between 1 and 200"
-        );
-        assert!(
-            BATCH_TIMEOUT_MS >= 50 && BATCH_TIMEOUT_MS <= 5000,
-            "BATCH_TIMEOUT_MS should be between 50 and 5000"
-        );
-        assert!(
-            TEST_TIMEOUT_SECS >= 2 && TEST_TIMEOUT_SECS <= 30,
-            "TEST_TIMEOUT_SECS should be between 2 and 30"
-        );
-        assert!(
-            SINGBOX_STARTUP_MS >= 100 && SINGBOX_STARTUP_MS <= 5000,
-            "SINGBOX_STARTUP_MS should be between 100 and 5000"
-        );
-        assert!(
-            MAX_CONCURRENT_TESTS >= 1 && MAX_CONCURRENT_TESTS <= 200,
-            "MAX_CONCURRENT_TESTS should be between 1 and 200"
-        );
+        const {
+            assert!(
+                BATCH_SIZE > 0 && BATCH_SIZE <= 200,
+                "BATCH_SIZE should be between 1 and 200"
+            );
+            assert!(
+                BATCH_TIMEOUT_MS >= 50 && BATCH_TIMEOUT_MS <= 5000,
+                "BATCH_TIMEOUT_MS should be between 50 and 5000"
+            );
+            assert!(
+                TEST_TIMEOUT_SECS >= 2 && TEST_TIMEOUT_SECS <= 30,
+                "TEST_TIMEOUT_SECS should be between 2 and 30"
+            );
+            assert!(
+                SINGBOX_STARTUP_MS >= 100 && SINGBOX_STARTUP_MS <= 5000,
+                "SINGBOX_STARTUP_MS should be between 100 and 5000"
+            );
+            assert!(
+                MAX_CONCURRENT_TESTS >= 1 && MAX_CONCURRENT_TESTS <= 200,
+                "MAX_CONCURRENT_TESTS should be between 1 and 200"
+            );
+        };
     }
 
     // ── fetch_outlet_ip_through_port ──────────────────────────────────────

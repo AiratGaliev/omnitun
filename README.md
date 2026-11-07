@@ -116,7 +116,7 @@ npm run dev
 | npm run mcp:run | Build and run the stdio MCP server |
 | cargo fmt -- --check | Check Rust formatting |
 | cargo test | Run Rust unit and integration tests |
-| cargo clippy -- -D warnings | Run Clippy with warnings treated as errors |
+| cargo clippy --all-targets -- -D warnings | Run Clippy for all targets with warnings treated as errors |
 | npm run test:mcp | Build the MCP sidecar and run isolated JSON-RPC functional checks |
 
 ## MCP server integration

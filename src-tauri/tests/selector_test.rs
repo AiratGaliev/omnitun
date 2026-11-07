@@ -485,16 +485,13 @@ async fn selector_switch_and_outlet_ip() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Confirm the switch
-    match client.get(format!("{api_url}/proxies/proxy")).send().await {
-        Ok(r) => {
-            let body = r.text().await.unwrap_or_default();
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(now) = val["now"].as_str() {
-                    println!("Selector now: {now}");
-                }
+    if let Ok(response) = client.get(format!("{api_url}/proxies/proxy")).send().await {
+        let body = response.text().await.unwrap_or_default();
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(now) = val["now"].as_str() {
+                println!("Selector now: {now}");
             }
         }
-        Err(_) => {}
     }
 
     let direct_ip2 = fetch_outlet_ip_retry(proxy_port, 1, 5).await;

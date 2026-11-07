@@ -74,7 +74,7 @@ jobs:
 
       - name: Lint (Rust)
         working-directory: src-tauri
-        run: cargo clippy
+        run: cargo clippy --all-targets
 
       - name: Test (Rust)
         working-directory: src-tauri
