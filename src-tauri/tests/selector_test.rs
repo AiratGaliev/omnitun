@@ -19,30 +19,49 @@ use std::time::Duration;
 
 fn app_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
-    {
-        let base = std::env::var("APPDATA").expect("APPDATA not set");
-        PathBuf::from(base).join("com.omnitun.desktop")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home)
-            .join(".config")
-            .join("com.omnitun.desktop")
-    }
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Library")
+        .join("Application Support");
+
+    #[cfg(target_os = "linux")]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir);
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let base = std::env::temp_dir();
+
+    base.join("com.omnitun.desktop")
 }
 
 fn singbox() -> PathBuf {
     #[cfg(target_os = "windows")]
-    let name = "sing-box.exe";
+    let binary_name = "sing-box.exe";
     #[cfg(not(target_os = "windows"))]
-    let name = "sing-box";
+    let binary_name = "sing-box";
 
-    let m = app_data_dir().join("binaries").join(name);
-    if m.exists() {
-        return m;
+    let bundled = app_data_dir().join("binaries").join(binary_name);
+    if bundled.is_file() {
+        return bundled;
     }
-    PathBuf::from(name)
+
+    if let Some(path) = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|directory| directory.join(binary_name))
+            .find(|candidate| candidate.is_file())
+    }) {
+        return path;
+    }
+
+    PathBuf::from(binary_name)
 }
 
 /// Find a free TCP port in the ephemeral range.

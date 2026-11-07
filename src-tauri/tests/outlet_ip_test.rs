@@ -10,16 +10,59 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn app_data_dir() -> PathBuf {
-    let base = std::env::var("APPDATA").expect("APPDATA not set");
-    PathBuf::from(base).join("com.omnitun.desktop")
+    #[cfg(target_os = "windows")]
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Library")
+        .join("Application Support");
+
+    #[cfg(target_os = "linux")]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir);
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let base = std::env::temp_dir();
+
+    base.join("com.omnitun.desktop")
 }
 
 fn singbox() -> PathBuf {
-    let m = app_data_dir().join("binaries").join("sing-box.exe");
-    if m.exists() {
-        return m;
+    #[cfg(target_os = "windows")]
+    let binary_name = "sing-box.exe";
+    #[cfg(not(target_os = "windows"))]
+    let binary_name = "sing-box";
+
+    let bundled = app_data_dir().join("binaries").join(binary_name);
+    if bundled.is_file() {
+        return bundled;
     }
-    PathBuf::from("sing-box.exe")
+
+    if let Some(path) = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|directory| directory.join(binary_name))
+            .find(|candidate| candidate.is_file())
+    }) {
+        return path;
+    }
+
+    PathBuf::from(binary_name)
+}
+
+struct ChildGuard(std::process::Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
 
 fn free_port(skip: &[u16]) -> Option<u16> {
@@ -141,7 +184,7 @@ async fn outlet_vs_entry_country() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let pid = child.id();
+    let _child_guard = ChildGuard(child);
     tokio::time::sleep(Duration::from_millis(800)).await;
 
     // Sequential test (simpler, avoids borrow issues)
@@ -256,10 +299,5 @@ async fn outlet_vs_entry_country() {
         ok + fail
     );
 
-    let _ = Command::new("taskkill")
-        .args(["/f", "/pid", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .output();
     let _ = std::fs::remove_dir_all(&dir);
 }

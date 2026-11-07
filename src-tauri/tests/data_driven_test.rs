@@ -7,32 +7,49 @@ use std::process::Command;
 
 fn app_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
-    {
-        PathBuf::from(std::env::var("APPDATA").expect("APPDATA not set"))
-            .join("com.omnitun.desktop")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-        PathBuf::from(home)
-            .join(".config")
-            .join("com.omnitun.desktop")
-    }
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Library")
+        .join("Application Support");
+
+    #[cfg(target_os = "linux")]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir);
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let base = std::env::temp_dir();
+
+    base.join("com.omnitun.desktop")
 }
 
 fn singbox_binary() -> PathBuf {
-    let m = app_data_dir().join("binaries").join("sing-box.exe");
-    if m.exists() {
-        return m;
+    #[cfg(target_os = "windows")]
+    let binary_name = "sing-box.exe";
+    #[cfg(not(target_os = "windows"))]
+    let binary_name = "sing-box";
+
+    let bundled = app_data_dir().join("binaries").join(binary_name);
+    if bundled.is_file() {
+        return bundled;
     }
-    let p = std::env::var("PATH").unwrap_or_default();
-    for dir in p.split(';') {
-        let c = PathBuf::from(dir).join("sing-box.exe");
-        if c.exists() {
-            return c;
-        }
+
+    if let Some(path) = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|directory| directory.join(binary_name))
+            .find(|candidate| candidate.is_file())
+    }) {
+        return path;
     }
-    PathBuf::from("sing-box.exe")
+
+    PathBuf::from(binary_name)
 }
 
 fn profiles_path() -> PathBuf {
