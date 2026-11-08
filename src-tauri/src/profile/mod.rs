@@ -2564,8 +2564,11 @@ mod extra_tests {
     use std::collections::HashMap;
     use std::process::Command;
 
-    fn test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("omnitun-test-{}-{}", std::process::id(), name))
+    fn test_dir(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("omnitun-{name}-"))
+            .tempdir()
+            .expect("Could not create isolated profile smoke-test directory")
     }
 
     fn app_data_dir() -> PathBuf {
@@ -2609,32 +2612,22 @@ mod extra_tests {
     #[test]
     fn test_each_server_generates_valid_config() {
         let servers = load_real_servers();
-        if servers.is_empty() {
-            eprintln!("SKIP: no servers in profiles.json");
-            return;
-        }
         let binary = singbox();
-        if !binary.exists() {
-            eprintln!("SKIP: no sing-box binary");
-            return;
-        }
-
         let cache = test_dir("singles");
-        let _ = std::fs::create_dir_all(&cache);
-        let settings = AppSettings::default();
+                let settings = AppSettings::default();
 
         let mut ok = 0u32;
         let mut fail = 0u32;
         for (i, s) in servers.iter().enumerate() {
             match generate_config(
-                &cache,
+                cache.path(),
                 2080,
                 "local-proxy",
                 std::slice::from_ref(s),
                 &settings,
             ) {
                 Ok((cfg_str, _)) => {
-                    let tmp = cache.join(format!("c-{i}.json"));
+                    let tmp = cache.path().join(format!("c-{i}.json"));
                     let _ = std::fs::write(&tmp, &cfg_str);
                     let out = Command::new(&binary)
                         .args(["check", "-c"])
@@ -2663,8 +2656,7 @@ mod extra_tests {
                 }
             }
         }
-        let _ = std::fs::remove_dir_all(&cache);
-        println!(
+                println!(
             "  single-outbound configs: {ok}/{total} passed, {fail} failed",
             total = ok + fail
         );
@@ -2681,23 +2673,18 @@ mod extra_tests {
     fn test_batch_config_with_selector_passes_check() {
         let servers = load_real_servers();
         let binary = singbox();
-        if !binary.exists() {
-            eprintln!("SKIP");
-            return;
-        }
-
         let mut outbounds: Vec<serde_json::Value> = vec![
             json!({"type": "direct", "tag": "direct"}),
             json!({"type": "block", "tag": "block"}),
         ];
         let mut proxy_tags = vec!["direct".to_string()];
         for s in &servers {
-            if let Ok(mut ob) = build_outbound(s) {
-                let tag = format!("proxy-{}", s.id);
-                ob["tag"] = json!(&tag);
-                proxy_tags.push(tag);
-                outbounds.push(ob);
-            }
+            let mut outbound = build_outbound(s)
+                .expect("Every fixture server must produce a supported sing-box outbound");
+            let tag = format!("proxy-{}", s.id);
+            outbound["tag"] = json!(&tag);
+            proxy_tags.push(tag);
+            outbounds.push(outbound);
         }
         outbounds.push(json!({"type": "selector", "tag": "proxy", "outbounds": proxy_tags}));
 
@@ -2710,8 +2697,7 @@ mod extra_tests {
         });
 
         let tmp = test_dir("batch-config");
-        let _ = std::fs::create_dir_all(&tmp);
-        let p = tmp.join("batch.json");
+                let p = tmp.path().join("batch.json");
         std::fs::write(&p, serde_json::to_string_pretty(&config).unwrap()).unwrap();
         let out = Command::new(&binary)
             .args(["check", "-c"])
@@ -2723,8 +2709,7 @@ mod extra_tests {
             "Batch config check failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let _ = std::fs::remove_dir_all(&tmp);
-        println!(
+                println!(
             "  batch config with {} servers: sing-box check ✓",
             servers.len()
         );
@@ -2736,16 +2721,11 @@ mod extra_tests {
     #[test]
     fn test_full_config_has_all_required_sections() {
         let servers = load_real_servers();
-        if servers.is_empty() {
-            eprintln!("SKIP: no servers in profiles.json");
-            return;
-        }
         let cache = test_dir("full-check");
-        let _ = std::fs::create_dir_all(&cache);
-        let settings = AppSettings::default();
+                let settings = AppSettings::default();
 
         let (cfg_str, _) = generate_config(
-            &cache,
+            cache.path(),
             2080,
             "local-proxy",
             &[servers[0].clone()],
@@ -2796,8 +2776,7 @@ mod extra_tests {
             "Expected 3+ outbounds (direct, block, proxy)"
         );
 
-        let _ = std::fs::remove_dir_all(&cache);
-        println!("  Full config: DNS ✓ Route ✓ Inbounds ✓ Outbounds ✓");
+                println!("  Full config: DNS ✓ Route ✓ Inbounds ✓ Outbounds ✓");
     }
 
     // -----------------------------------------------------------------------
@@ -2808,13 +2787,8 @@ mod extra_tests {
         // This tests the logic in lib.rs: when autoConnectFastest=false,
         // alternativeServers must be empty so no urltest group is added
         let servers = load_real_servers();
-        if servers.is_empty() {
-            eprintln!("SKIP: no real servers loaded (profiles.json missing or empty)");
-            return;
-        }
         let cache = test_dir("alt-servers");
-        let _ = std::fs::create_dir_all(&cache);
-
+        
         // autoConnectFastest=false → should produce single outbound per server
         let settings_no_fastest = AppSettings {
             auto_connect_fastest: false,
@@ -2822,7 +2796,7 @@ mod extra_tests {
         };
 
         let (cfg_str, _) = generate_config(
-            &cache,
+            cache.path(),
             2080,
             "local-proxy",
             &[servers[0].clone()],
@@ -2852,7 +2826,7 @@ mod extra_tests {
         };
 
         let (cfg_str, _) =
-            generate_config(&cache, 2080, "local-proxy", &servers, &settings_fastest).unwrap();
+            generate_config(cache.path(), 2080, "local-proxy", &servers, &settings_fastest).unwrap();
         let cfg: serde_json::Value = serde_json::from_str(&cfg_str).unwrap();
         let obs = cfg["outbounds"].as_array().unwrap();
 
@@ -2863,8 +2837,7 @@ mod extra_tests {
             "With autoConnectFastest=true, expected urltest outbound group"
         );
 
-        let _ = std::fs::remove_dir_all(&cache);
-        println!("  alternativeServers: off when fastest=false, on when fastest=true ✓");
+                println!("  alternativeServers: off when fastest=false, on when fastest=true ✓");
     }
 
     // -----------------------------------------------------------------------
@@ -2873,13 +2846,7 @@ mod extra_tests {
     #[test]
     fn test_refresh_preserves_server_ids() -> Result<(), Box<dyn std::error::Error>> {
         let servers = load_real_servers();
-        if servers.len() < 2 {
-            eprintln!(
-                "SKIP: need at least 2 servers for ID test, got {}",
-                servers.len()
-            );
-            return Ok(());
-        }
+        assert!(servers.len() >= 2, "The profile smoke fixture must contain at least two servers");
 
         // Simulate "old" servers with known IDs (as if loaded from saved profiles.json)
         let old_servers: Vec<ServerProfile> = servers.iter().take(5).cloned().collect();
@@ -2959,13 +2926,11 @@ mod extra_tests {
     #[tokio::test]
     async fn test_remove_nonexistent_returns_error() {
         let dir = test_dir("remove_err");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let mut mgr = ProfileManager::new(dir.clone(), test_db().await);
+        let mut mgr = ProfileManager::new(dir.path().to_path_buf(), test_db().await);
         let result = mgr.remove("nonexistent");
         assert!(result.is_err());
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+            }
 }
