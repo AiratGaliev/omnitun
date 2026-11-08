@@ -58,8 +58,24 @@ jobs:
             patchelf \
             libxdo-dev
 
-      - name: Build
-        run: npm run tauri build
+      # WiX v3 uses VBScript during MSI linking. Tauri reports a generic
+      # "failed to run light.exe" when this Windows optional feature is absent.
+      - name: Enable VBScript for WiX MSI bundling
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $feature = Get-WindowsOptionalFeature -Online -FeatureName VBSCRIPT
+          if ($feature.State -ne 'Enabled') {
+            Enable-WindowsOptionalFeature -Online -FeatureName VBSCRIPT -All -NoRestart
+          }
+
+          $feature = Get-WindowsOptionalFeature -Online -FeatureName VBSCRIPT
+          if ($feature.State -ne 'Enabled') {
+            throw 'Windows optional feature VBSCRIPT is not enabled; WiX MSI bundling cannot continue.'
+          }
+
+      - name: Build Tauri application and installers
+        run: npm run tauri:build
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}

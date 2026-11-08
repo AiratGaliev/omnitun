@@ -18,6 +18,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepare:mcp-sidecar": "node scripts/prepare-mcp-sidecar.mjs",
+    "prepare:mcp-sidecar:placeholder": "node scripts/prepare-mcp-sidecar.mjs --placeholder",
     "test:mcp": "npm run prepare:mcp-sidecar && node scripts/test-mcp-server.mjs"
   },
   "dependencies": {

@@ -39,6 +39,14 @@ const sidecar = resolve(
 );
 
 mkdirSync(sidecarDirectory, { recursive: true });
+
+if (process.argv.includes("--placeholder")) {
+  // Rust CI jobs only need this path for tauri-build validation. The zero-byte
+  // marker is never executed or shipped; release builds create the real binary.
+  if (!existsSync(sidecar)) writeFileSync(sidecar, Buffer.alloc(0));
+  console.log("Prepared MCP sidecar placeholder: " + sidecar);
+  process.exit(0);
+}
 // Tauri's build script validates externalBin paths while compiling the MCP
 // crate itself. Create a temporary marker to break that bootstrap cycle, then
 // always replace it with the real binary before the Tauri bundle step starts.

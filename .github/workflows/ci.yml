@@ -15,7 +15,34 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  lint-and-test:
+  frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Lint (TypeScript)
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Test (TypeScript)
+        run: npm test
+
+      - name: Build (TypeScript)
+        run: npm run build
+
+  rust:
     strategy:
       fail-fast: false
       matrix:
@@ -30,19 +57,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-
-      - name: Install frontend dependencies
-        run: npm ci
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-
-      - name: Rust format check
-        working-directory: src-tauri
-        run: cargo fmt -- --check
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -60,31 +79,22 @@ jobs:
             patchelf \
             libxdo-dev
 
-      - name: Prepare MCP sidecar
-        run: npm run prepare:mcp-sidecar
+      # Tauri's build script requires the external binary path to exist even
+      # when CI only checks/tests the Rust application. Do not compile the
+      # standalone MCP release binary here; release builds replace this marker.
+      - name: Prepare MCP sidecar placeholder
+        run: npm run prepare:mcp-sidecar:placeholder
 
-      - name: Lint (TypeScript)
-        run: npm run lint
-
-      - name: Format check
-        run: npm run format:check
-
-      - name: Test (TypeScript)
-        run: npm test
+      - name: Rust format check
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: src-tauri
+        run: cargo fmt -- --check
 
       - name: Lint (Rust)
+        if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
         run: cargo clippy --all-targets
 
       - name: Test (Rust)
         working-directory: src-tauri
         run: cargo test
-
-      - name: Build (TypeScript)
-        run: npm run build
-
-      - name: Build (Tauri)
-        run: npm run tauri:build
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
