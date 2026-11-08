@@ -72,10 +72,7 @@ fn load_servers() -> Vec<serde_json::Value> {
 #[ignore = "manual VPN smoke test; requires disposable fixtures and external IP service"]
 async fn outlet_vs_entry_country() {
     let servers = load_servers();
-    if servers.is_empty() {
-        eprintln!("SKIP: no servers loaded");
-        return;
-    }
+    assert!(!servers.is_empty(), "Required fixture contains no servers");
     let bin = singbox();
     assert!(bin.is_file(), "Required sing-box binary is missing: {:?}", bin);
 
@@ -90,34 +87,26 @@ async fn outlet_vs_entry_country() {
     let mut labels: Vec<(usize, String, String)> = Vec::new();
 
     for (i, sv) in servers.iter().enumerate() {
-        let sp: omnitun_lib::proxy::ServerProfile = match serde_json::from_value(sv.clone()) {
-            Ok(s) => s,
-            _ => continue,
-        };
-        let p = match free_port(&ports) {
-            Some(x) => x,
-            _ => continue,
-        };
+        let sp: omnitun_lib::proxy::ServerProfile = serde_json::from_value(sv.clone())
+            .expect("Fixture server must deserialize as ServerProfile");
+        let p = free_port(&ports).expect("Could not allocate a local loopback port");
         let tag = format!("s{i}");
-        if let Ok(mut ob) = omnitun_lib::proxy::config::build_outbound(&sp) {
-            ob["tag"] = serde_json::json!(&tag);
-            inbs.push(serde_json::json!({"type": "mixed","tag":format!("in{i}"),
-                "listen":"127.0.0.1","listen_port":p}));
-            ports.push(p);
-            obs.push(ob);
-            routes.push(serde_json::json!({"inbound_port":[p],"outbound":tag}));
-            labels.push((
-                i,
-                sv["flag"].as_str().unwrap_or("?").to_string(),
-                sv["country_name"].as_str().unwrap_or("?").to_string(),
-            ));
-        }
+        let mut ob = omnitun_lib::proxy::config::build_outbound(&sp)
+            .expect("Fixture server must produce a supported sing-box outbound");
+        ob["tag"] = serde_json::json!(&tag);
+        inbs.push(serde_json::json!({"type": "mixed","tag":format!("in{i}"),
+            "listen":"127.0.0.1","listen_port":p}));
+        ports.push(p);
+        obs.push(ob);
+        routes.push(serde_json::json!({"inbound_port":[p],"outbound":tag}));
+        labels.push((
+            i,
+            sv["flag"].as_str().unwrap_or("?").to_string(),
+            sv["country_name"].as_str().unwrap_or("?").to_string(),
+        ));
     }
 
-    if ports.is_empty() {
-        eprintln!("No servers");
-        return;
-    }
+    assert!(!ports.is_empty(), "No usable server was selected from the required fixture");
     println!("Testing {} servers via sing-box", ports.len());
 
     let cfg = serde_json::json!({
@@ -127,22 +116,20 @@ async fn outlet_vs_entry_country() {
         "route":{"rules":routes,"final":"direct","auto_detect_interface":true,"default_domain_resolver":"local"},
     });
 
-    let dir = std::env::temp_dir().join(format!("ot-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg_p = dir.join("c.json");
+    let dir = tempfile::tempdir().expect("Could not create isolated sing-box test directory");
+    let cfg_p = dir.path().join("c.json");
     std::fs::write(&cfg_p, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
 
-    if !Command::new(&bin)
+    let check = Command::new(&bin)
         .args(["check", "-c"])
         .arg(&cfg_p)
         .output()
-        .unwrap()
-        .status
-        .success()
-    {
-        let _ = std::fs::remove_dir_all(&dir);
-        return;
-    }
+        .expect("Could not run sing-box config validation");
+    assert!(
+        check.status.success(),
+        "sing-box rejected outlet-IP config:\n{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
 
     let child = Command::new(&bin)
         .args(["run", "-c"])
@@ -265,7 +252,7 @@ async fn outlet_vs_entry_country() {
         fail,
         ok + fail
     );
+    assert!(ok > 0, "No server completed the external outlet-IP smoke check");
 
     drop(_child_guard);
-    let _ = std::fs::remove_dir_all(&dir);
 }
