@@ -39,13 +39,22 @@ fn profiles_path() -> PathBuf {
 fn load_real_profiles() -> Vec<serde_json::Value> {
     let path = profiles_path();
     let content = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!("Required disposable fixture is missing at {}: {error}", path.display())
+        panic!(
+            "Required disposable fixture is missing at {}: {error}",
+            path.display()
+        )
     });
     let profiles: Vec<serde_json::Value> = serde_json::from_str(&content)
         .expect("profiles.json fixture must contain a JSON array");
-    assert!(!profiles.is_empty(), "profiles.json fixture must contain at least one profile");
     assert!(
-        profiles.first().and_then(|profile| profile["servers"].as_array()).is_some_and(|servers| !servers.is_empty()),
+        !profiles.is_empty(),
+        "profiles.json fixture must contain at least one profile"
+    );
+    assert!(
+        profiles
+            .first()
+            .and_then(|profile| profile["servers"].as_array())
+            .is_some_and(|servers| !servers.is_empty()),
         "The first fixture profile must contain at least one server",
     );
     profiles
@@ -394,7 +403,10 @@ fn test_display_name_doesnt_show_raw_ip() -> Result<(), Box<dyn std::error::Erro
 fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error>> {
     let profiles = load_real_profiles();
     assert!(
-        profiles.first().and_then(|profile| profile["servers"].as_array()).is_some_and(|servers| !servers.is_empty()),
+        profiles
+            .first()
+            .and_then(|profile| profile["servers"].as_array())
+            .is_some_and(|servers| !servers.is_empty()),
         "The first fixture profile must contain servers",
     );
     let servers: Vec<omnitun_lib::proxy::ServerProfile> = profiles[0]["servers"]

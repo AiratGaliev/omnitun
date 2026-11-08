@@ -2571,19 +2571,25 @@ mod extra_tests {
     }
 
     fn app_data_dir() -> PathBuf {
-        PathBuf::from(std::env::var_os("OMNITUN_TEST_DATA_DIR")
-            .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"))
+        PathBuf::from(
+            std::env::var_os("OMNITUN_TEST_DATA_DIR")
+                .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"),
+        )
     }
 
     fn singbox() -> PathBuf {
         let binary_name = crate::proxy::installer::Installer::binary_name();
         let bundled = app_data_dir().join("binaries").join(&binary_name);
-        if bundled.is_file() { return bundled; }
+        if bundled.is_file() {
+            return bundled;
+        }
         if let Some(path) = std::env::var_os("PATH").and_then(|paths| {
             std::env::split_paths(&paths)
                 .map(|directory| directory.join(&binary_name))
                 .find(|candidate| candidate.is_file())
-        }) { return path; }
+        }) {
+            return path;
+        }
         panic!("Required sing-box binary is missing from fixture binaries/ and PATH");
     }
 
@@ -2592,16 +2598,24 @@ mod extra_tests {
         let json = std::fs::read_to_string(&path).unwrap_or_else(|error| {
             panic!("Required disposable fixture is missing at {}: {error}", path.display())
         });
-        let data: serde_json::Value = serde_json::from_str(&json)
-            .expect("profiles.json fixture must contain valid JSON");
-        let servers = data.get(0).and_then(|p| p.get("servers"))
+        let data: serde_json::Value =
+            serde_json::from_str(&json).expect("profiles.json fixture must contain valid JSON");
+        let servers = data
+            .get(0)
+            .and_then(|profile| profile.get("servers"))
             .and_then(serde_json::Value::as_array)
             .expect("profiles.json must contain a first profile with a servers array");
-        let parsed: Vec<ServerProfile> = servers.iter()
-            .map(|server| serde_json::from_value(server.clone())
-                .expect("Fixture server must deserialize as ServerProfile"))
+        let parsed: Vec<ServerProfile> = servers
+            .iter()
+            .map(|server| {
+                serde_json::from_value(server.clone())
+                    .expect("Fixture server must deserialize as ServerProfile")
+            })
             .collect();
-        assert!(!parsed.is_empty(), "profiles.json fixture must contain at least one server");
+        assert!(
+            !parsed.is_empty(),
+            "profiles.json fixture must contain at least one server"
+        );
         parsed
     }
 
@@ -2627,7 +2641,8 @@ mod extra_tests {
             ) {
                 Ok((cfg_str, _)) => {
                     let tmp = cache.path().join(format!("c-{i}.json"));
-                    std::fs::write(&tmp, &cfg_str).expect("Could not write generated sing-box config");
+                    std::fs::write(&tmp, &cfg_str)
+                        .expect("Could not write generated sing-box config");
                     let out = Command::new(&binary)
                         .args(["check", "-c"])
                         .arg(&tmp)
@@ -2635,7 +2650,7 @@ mod extra_tests {
                     if let Ok(o) = out {
                         if o.status.success() {
                             ok += 1;
-                } else {
+                        } else {
                             fail += 1;
                             eprintln!(
                                 "  FAIL {}/{}: {} — stderr: {}",
@@ -2844,7 +2859,10 @@ mod extra_tests {
     #[test]
     fn test_refresh_preserves_server_ids() -> Result<(), Box<dyn std::error::Error>> {
         let servers = load_real_servers();
-        assert!(servers.len() >= 2, "The profile smoke fixture must contain at least two servers");
+        assert!(
+            servers.len() >= 2,
+            "The profile smoke fixture must contain at least two servers"
+        );
 
         // Simulate "old" servers with known IDs (as if loaded from saved profiles.json)
         let old_servers: Vec<ServerProfile> = servers.iter().take(5).cloned().collect();

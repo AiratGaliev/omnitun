@@ -28,7 +28,12 @@ pub fn generate_config(
 ) -> Result<(String, u16), ProxyError> {
     let stats_port = find_available_port().unwrap_or(20000);
     let result = omnitun_core::proxy::config::generate_config(
-        cache_dir, proxy_port, routing_mode, profiles, settings, stats_port,
+        cache_dir,
+        proxy_port,
+        routing_mode,
+        profiles,
+        settings,
+        stats_port,
     )?;
     crate::proxy::CLASH_API_PORT.store(stats_port, std::sync::atomic::Ordering::Relaxed);
     Ok(result)
@@ -44,7 +49,9 @@ pub fn generate_batch_config(
         tls_insecure: crate::proxy::batcher::batch_tls_insecure(),
         enable_mux: crate::proxy::batcher::batch_enable_mux(),
     };
-    omnitun_core::proxy::config::generate_batch_config(servers, ports, test_dir, options)
+    omnitun_core::proxy::config::generate_batch_config(
+        servers, ports, test_dir, options,
+    )
 }
 
 pub fn write_config(json: &str, config_dir: &Path) -> Result<std::path::PathBuf, ProxyError> {

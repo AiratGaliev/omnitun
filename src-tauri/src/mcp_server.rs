@@ -2473,7 +2473,10 @@ mod tests {
             "stop_proxy",
             "clear_cache",
         ] {
-            assert!(tool_names.contains(&required), "Missing MCP tool: {required}");
+            assert!(
+                tool_names.contains(&required),
+                "Missing MCP tool: {required}"
+            );
         }
 
         let resources = serde_json::to_value(define_resources()).unwrap();
@@ -2489,7 +2492,10 @@ mod tests {
             "omnitun://cache",
             "omnitun://singbox/config",
         ] {
-            assert!(resource_uris.contains(&required), "Missing MCP resource: {required}");
+            assert!(
+                resource_uris.contains(&required),
+                "Missing MCP resource: {required}"
+            );
         }
     }
 

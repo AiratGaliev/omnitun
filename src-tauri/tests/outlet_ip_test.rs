@@ -10,8 +10,10 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn app_data_dir() -> PathBuf {
-    PathBuf::from(std::env::var_os("OMNITUN_TEST_DATA_DIR")
-        .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"))
+    PathBuf::from(
+        std::env::var_os("OMNITUN_TEST_DATA_DIR")
+            .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"),
+    )
 }
 
 fn singbox() -> PathBuf {
@@ -57,13 +59,19 @@ fn free_port(skip: &[u16]) -> Option<u16> {
 fn load_servers() -> Vec<serde_json::Value> {
     let path = app_data_dir().join("profiles.json");
     let content = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-        panic!("Required disposable fixture is missing at {}: {error}", path.display())
+        panic!(
+            "Required disposable fixture is missing at {}: {error}",
+            path.display()
+        )
     });
     let data: serde_json::Value = serde_json::from_str(&content)
         .expect("profiles.json fixture must contain valid JSON");
-    let servers = data.get(0).and_then(|p| p.get("servers"))
+    let servers = data
+        .get(0)
+        .and_then(|profile| profile.get("servers"))
         .and_then(serde_json::Value::as_array)
-        .expect("profiles.json must contain a first profile with a servers array").clone();
+        .expect("profiles.json must contain a first profile with a servers array")
+        .clone();
     assert!(!servers.is_empty(), "profiles.json fixture must contain servers");
     servers
 }

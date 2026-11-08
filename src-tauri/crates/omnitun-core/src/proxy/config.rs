@@ -772,7 +772,11 @@ pub struct BatchConfigOptions {
 
 impl Default for BatchConfigOptions {
     fn default() -> Self {
-        Self { anti_dpi: true, tls_insecure: true, enable_mux: false }
+        Self {
+            anti_dpi: true,
+            tls_insecure: true,
+            enable_mux: false,
+        }
     }
 }
 
@@ -906,7 +910,14 @@ mod tests {
         profiles: &[ServerProfile],
         settings: &AppSettings,
     ) -> Result<(String, u16), ProxyError> {
-        super::generate_config(cache_dir, proxy_port, routing_mode, profiles, settings, 20000)
+        super::generate_config(
+            cache_dir,
+            proxy_port,
+            routing_mode,
+            profiles,
+            settings,
+            20000,
+        )
     }
 
     fn generate_batch_config(
@@ -914,7 +925,12 @@ mod tests {
         ports: &[u16],
         test_dir: &std::path::Path,
     ) -> Result<Value, ProxyError> {
-        super::generate_batch_config(servers, ports, test_dir, BatchConfigOptions::default())
+        super::generate_batch_config(
+            servers,
+            ports,
+            test_dir,
+            BatchConfigOptions::default(),
+        )
     }
 
     fn default_settings() -> AppSettings {
