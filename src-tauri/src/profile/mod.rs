@@ -2775,7 +2775,7 @@ mod extra_tests {
             "Expected 3+ outbounds (direct, block, proxy)"
         );
 
-                println!("  Full config: DNS ✓ Route ✓ Inbounds ✓ Outbounds ✓");
+        println!("  Full config: DNS ✓ Route ✓ Inbounds ✓ Outbounds ✓");
     }
 
     // -----------------------------------------------------------------------
@@ -2787,7 +2787,6 @@ mod extra_tests {
         // alternativeServers must be empty so no urltest group is added
         let servers = load_real_servers();
         let cache = test_dir("alt-servers");
-        
         // autoConnectFastest=false → should produce single outbound per server
         let settings_no_fastest = AppSettings {
             auto_connect_fastest: false,
@@ -2836,7 +2835,7 @@ mod extra_tests {
             "With autoConnectFastest=true, expected urltest outbound group"
         );
 
-                println!("  alternativeServers: off when fastest=false, on when fastest=true ✓");
+        println!("  alternativeServers: off when fastest=false, on when fastest=true ✓");
     }
 
     // -----------------------------------------------------------------------
@@ -2929,7 +2928,5 @@ mod extra_tests {
         let mut mgr = ProfileManager::new(dir.path().to_path_buf(), test_db().await);
         let result = mgr.remove("nonexistent");
         assert!(result.is_err());
-
-
     }
 }
