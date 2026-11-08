@@ -30,6 +30,8 @@ jobs:
           cache: npm
       - name: Install frontend dependencies
         run: npm ci
+      - name: Prepare Tauri external binary placeholder
+        run: npm run prepare:mcp-sidecar:placeholder
       - name: Frontend regression checks
         run: |
           npm run lint
@@ -81,6 +83,8 @@ jobs:
           cache: npm
       - name: Install frontend dependencies
         run: npm ci
+      - name: Prepare Tauri external binary placeholder
+        run: npm run prepare:mcp-sidecar:placeholder
       - name: Frontend release-readiness checks
         run: |
           npm run lint

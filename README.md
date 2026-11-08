@@ -278,7 +278,7 @@ If a promotion gate fails, stop the promotion. Fix the issue in a topic branch, 
 
 ### CI and release policy
 
-The intended distinction is: quick feedback during daily development, broader integration validation during promotion, and production packaging only for a release. Keep the following distinction visible until the staged CI redesign in OMN-5 is implemented.
+The intended distinction is: quick feedback during daily development, broader integration validation during promotion, and production packaging only for a release. The staged CI redesign is implemented in the workflows above; keep this table aligned with their actual triggers and checks.
 
 **Implemented workflow behaviour:**
 
