@@ -272,8 +272,7 @@ fn test_all_servers_pass_singbox_check() -> Result<(), Box<dyn std::error::Error
         eprintln!("SKIP: profiles.json is empty");
         return Ok(());
     }
-    let tmp_dir = std::env::temp_dir().join(format!("omnitun-singbox-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp_dir)?;
+    let tmp_dir = tempfile::tempdir()?;
 
     let servers: Vec<_> = profiles
         .iter()
@@ -300,7 +299,7 @@ fn test_all_servers_pass_singbox_check() -> Result<(), Box<dyn std::error::Error
             },
         });
 
-        let config_path = tmp_dir.join(format!("c-{}.json", i));
+        let config_path = tmp_dir.path().join(format!("c-{}.json", i));
         std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
 
         let output = Command::new(&binary)
@@ -317,7 +316,6 @@ fn test_all_servers_pass_singbox_check() -> Result<(), Box<dyn std::error::Error
         );
     }
 
-    let _ = std::fs::remove_dir_all(&tmp_dir);
     println!("✓ sing-box check: {total}/{total} servers passed");
     Ok(())
 }
@@ -507,8 +505,10 @@ fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error
 
     // Verify it passes sing-box check
     let binary = singbox_binary();
-    if binary.exists() {
-        let tmp = std::env::temp_dir().join("omnitun-batch-test.json");
+    assert!(binary.is_file(), "Required sing-box binary is missing: {:?}", binary);
+    {
+        let check_dir = tempfile::tempdir()?;
+        let tmp = check_dir.path().join("omnitun-batch-test.json");
         std::fs::write(&tmp, serde_json::to_string_pretty(&config)?)?;
         let out = Command::new(&binary)
             .args(["check", "-c"])
@@ -519,7 +519,6 @@ fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error
             "Batch config check failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let _ = std::fs::remove_file(&tmp);
     }
 
     println!("✓ Batch test config has correct selector structure");
