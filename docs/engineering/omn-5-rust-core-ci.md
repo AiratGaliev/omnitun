@@ -54,13 +54,14 @@ Profile-driven smoke tests require `OMNITUN_TEST_DATA_DIR`; they do not infer AP
 
 ## Verification evidence (2026-11-08)
 
-- Dev CI run `42485317188` on commit `1742fa7`: both frontend and Rust Core jobs completed successfully. The workflow executed the configured lint, formatting, typecheck, Vitest, Rust format, Core tests and Core Clippy steps.
+- Initial successful Dev CI run `42485317188` on commit `1742fa7`: both frontend and Rust Core jobs completed successfully. The workflow executed the configured lint, formatting, typecheck, Vitest, Rust format, Core tests and Core Clippy steps.
+- Post-audit Dev CI run `42487861622` on post-fix commit `c755536`: both `frontend` and `rust-core` completed successfully. The Core test job ran 35 tests successfully and Clippy completed with warnings denied.
 - Local Windows frontend checks passed: `npm run lint`, `npm run format:check`, `npm run typecheck`, and `npm test` (89 passed, 6 skipped).
 - Local Windows Rust checks passed: workspace tests (168 passed, 1 ignored), Core tests (35 passed), workspace/Core Clippy with warnings denied, and `cargo fmt --all -- --check`.
 - `cargo metadata --locked` and `cargo tree -p omnitun-core` completed. The Core dependency graph contains only `base64`, `serde`, `serde_json`, `thiserror`, `tracing`, `url` and `uuid`; no Tauri, MCP transport, Tokio, SQLite or OS process dependency.
 - The optional data-driven integration target compiled with `user-data-smoke`; the DNS-template test was corrected to read the Core-owned template used by production config generation.
 - Local Windows `npm run test:mcp:artifact` passed against the built MCP sidecar: 27 tools, 8 resources, all resource reads, settings persistence/validation, secret redaction and cross-process process lifecycle checks.
-- The first successful GitHub Rust job reported a Cargo cache miss. A subsequent same-lockfile run is still needed to confirm cache restoration.
+- Cargo cache verification: the initial run missed; the repeat run restored the exact matching cache key (`v0-rust-rust-core-Linux-x64-c2e3c2da-85109c64`, about 201 MB). Core tests then finished in 2 seconds and Clippy in 1.5 seconds.
 
 ## Verification still outstanding
 
@@ -68,7 +69,6 @@ Profile-driven smoke tests require `OMNITUN_TEST_DATA_DIR`; they do not infer AP
 2. A promotion PR `test → main` validating the final release-readiness workflow.
 3. A safe version-tag run proving production Tauri bundles, the real target MCP sidecar and installer artifacts; only the Windows MCP artifact smoke was run locally.
 4. Profile-driven sing-box fixture tests remain opt-in through `user-data-smoke` and are not automatically invoked by the promotion workflow. The external VPN/IP tests remain manual/ignored.
-5. A repeated Actions run with the same lockfile to capture a Cargo cache hit and elapsed-time comparison.
-6. Branch protection: the repository rulesets endpoint returned an empty list during this audit; the legacy branch-protection endpoint returned HTTP 403 for the connected integration, so required branch protection settings could not be confirmed.
+5. Branch protection: the repository rulesets endpoint returned an empty list during this audit; the legacy branch-protection endpoint returned HTTP 403 for the connected integration, so required branch protection settings could not be confirmed.
 
 The dependency boundary is now supported by Cargo metadata/tree output as well as manifest and import inspection. The historical billing-related runner admission failure was resolved before the successful run above; it was not a code failure.
