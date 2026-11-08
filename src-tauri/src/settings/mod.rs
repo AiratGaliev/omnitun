@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-pub use omnitun_core::settings::{AppSettings, CustomCountry, AVAILABLE_TEST_URLS};
+pub use omnitun_core::settings::AppSettings;
 
 pub struct SettingsManager {
     file_path: PathBuf,
@@ -36,6 +36,7 @@ impl SettingsManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omnitun_core::settings::CustomCountry;
 
     fn test_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
