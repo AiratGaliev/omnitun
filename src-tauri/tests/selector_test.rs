@@ -327,7 +327,7 @@ async fn selector_switch_and_outlet_ip() {
     // FIX: previously both stdout and stderr were sent to /dev/null, which
     // made it impossible to diagnose startup failures. Now we redirect
     // stderr to a file in the test dir so we can dump it on failure.
-    let log_path = dir.join("sing-box.stderr.log");
+    let log_path = dir.path().join("sing-box.stderr.log");
     let stderr_file = std::fs::File::create(&log_path).unwrap();
     let child = Command::new(&bin)
         .args(["run", "-c"])
