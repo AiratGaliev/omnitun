@@ -30,8 +30,6 @@ jobs:
           cache: npm
       - name: Install frontend dependencies
         run: npm ci
-      - name: Prepare Tauri external binary placeholder
-        run: npm run prepare:mcp-sidecar:placeholder
       - name: Frontend regression checks
         run: |
           npm run lint
@@ -42,6 +40,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Prepare Tauri external binary placeholder
+        run: npm run prepare:mcp-sidecar:placeholder
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
@@ -83,8 +83,6 @@ jobs:
           cache: npm
       - name: Install frontend dependencies
         run: npm ci
-      - name: Prepare Tauri external binary placeholder
-        run: npm run prepare:mcp-sidecar:placeholder
       - name: Frontend release-readiness checks
         run: |
           npm run lint
@@ -96,6 +94,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Prepare Tauri external binary placeholder
+        run: npm run prepare:mcp-sidecar:placeholder
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
