@@ -164,7 +164,6 @@ The directory contains the SQLite database, settings, logs, GeoIP data and the d
 - Do not commit API tokens, private keys, user subscription URLs or real credentials.
 - sing-box configuration and logs can contain sensitive connection metadata; redact them before sharing diagnostics.
 
-
 ## Development workflow and contributor rules
 
 These rules apply to every contributor and AI coding agent working in this repository. They define the expected development process; a green CI run or a successful local build does not authorize bypassing review or promotion steps.
@@ -377,7 +376,6 @@ The system statuses `Canceled` and `Duplicate` remain available. Use the existin
 Each engineering issue must describe the problem/current behaviour, expected outcome, scope and exclusions, test plan, and verifiable acceptance criteria. Link related tasks instead of copying the same requirements into multiple issues.
 
 For ordinary engineering delivery, **Done** means the implementation meets its acceptance criteria, scoped automated checks have passed, relevant documentation is updated, and the reviewed PR has been merged into `dev`. Promotion work is complete only when its own target-branch and acceptance criteria are satisfied. Creating a PR or writing code alone is not completion.
-
 
 ## Project status
 
