@@ -12,7 +12,7 @@ use installer::Installer;
 pub use process::ProcessManager;
 pub use process::{cleanup_stale_pid, remove_pid_file, set_pid_file_path, write_pid_file};
 use serde::{Deserialize, Serialize};
-pub use omnitun_core::{ErrorCode, ProxyError, ServerProfile};
+pub use omnitun_core::{ErrorCode, ErrorDetail, ProxyError, ServerProfile};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;

@@ -6,7 +6,7 @@ const readJson = (file) => JSON.parse(readFileSync(resolve(root, file), 'utf8'))
 const packageVersion = readJson('package.json').version;
 const tauriVersion = readJson('src-tauri/tauri.conf.json').version;
 const cargoToml = readFileSync(resolve(root, 'src-tauri/Cargo.toml'), 'utf8');
-const cargoVersion = cargoToml.match(/^version\\s*=\\s*"([^"]+)"\\s*$/m)?.[1];
+const cargoVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"\s*$/m)?.[1];
 
 if (!cargoVersion) throw new Error('Could not read the root Cargo package version');
 const versions = { packageVersion, tauriVersion, cargoVersion };

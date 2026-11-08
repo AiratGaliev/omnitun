@@ -44,7 +44,7 @@ pub fn parse_subscription(data: &str) -> Result<Vec<ServerProfile>, ProxyError> 
     Ok(servers)
 }
 
-fn try_base64_decode(data: &str) -> Result<String, anyhow::Error> {
+fn try_base64_decode(data: &str) -> Result<String, base64::DecodeError> {
     use base64::Engine as _;
     let trimmed = data.trim();
     let clean: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
