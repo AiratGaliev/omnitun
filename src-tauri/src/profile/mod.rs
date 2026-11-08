@@ -2614,7 +2614,7 @@ mod extra_tests {
         let servers = load_real_servers();
         let binary = singbox();
         let cache = test_dir("singles");
-                let settings = AppSettings::default();
+        let settings = AppSettings::default();
 
         let mut ok = 0u32;
         let mut fail = 0u32;
@@ -2628,7 +2628,7 @@ mod extra_tests {
             ) {
                 Ok((cfg_str, _)) => {
                     let tmp = cache.path().join(format!("c-{i}.json"));
-                    let _ = std::fs::write(&tmp, &cfg_str);
+                    std::fs::write(&tmp, &cfg_str).expect("Could not write generated sing-box config");
                     let out = Command::new(&binary)
                         .args(["check", "-c"])
                         .arg(&tmp)
@@ -2636,7 +2636,7 @@ mod extra_tests {
                     if let Ok(o) = out {
                         if o.status.success() {
                             ok += 1;
-                        } else {
+                } else {
                             fail += 1;
                             eprintln!(
                                 "  FAIL {}/{}: {} — stderr: {}",
@@ -2656,7 +2656,7 @@ mod extra_tests {
                 }
             }
         }
-                println!(
+        println!(
             "  single-outbound configs: {ok}/{total} passed, {fail} failed",
             total = ok + fail
         );
@@ -2697,7 +2697,7 @@ mod extra_tests {
         });
 
         let tmp = test_dir("batch-config");
-                let p = tmp.path().join("batch.json");
+        let p = tmp.path().join("batch.json");
         std::fs::write(&p, serde_json::to_string_pretty(&config).unwrap()).unwrap();
         let out = Command::new(&binary)
             .args(["check", "-c"])
@@ -2926,7 +2926,6 @@ mod extra_tests {
     #[tokio::test]
     async fn test_remove_nonexistent_returns_error() {
         let dir = test_dir("remove_err");
-                std::fs::create_dir_all(&dir).unwrap();
 
         let mut mgr = ProfileManager::new(dir.path().to_path_buf(), test_db().await);
         let result = mgr.remove("nonexistent");
