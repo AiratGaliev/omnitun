@@ -26,7 +26,13 @@ if (!existsSync(executable)) {
 }
 
 const temporaryRoot = mkdtempSync(join(tmpdir(), 'omnitun-mcp-functional-'));
-const dataDir = join(temporaryRoot, 'com.omnitun.desktop');
+const isWindows = targetTriple.includes('windows');
+const isMacOS = targetTriple.includes('apple');
+const dataDir = isWindows
+  ? join(temporaryRoot, 'com.omnitun.desktop')
+  : isMacOS
+    ? join(temporaryRoot, 'Library', 'Application Support', 'omnitun')
+    : join(temporaryRoot, 'omnitun');
 const configDir = join(dataDir, 'config');
 mkdirSync(configDir, { recursive: true });
 
@@ -115,7 +121,11 @@ try {
 
   const env = {
     ...process.env,
-    APPDATA: temporaryRoot,
+    ...(isWindows
+      ? { APPDATA: temporaryRoot }
+      : isMacOS
+        ? { HOME: temporaryRoot }
+        : { XDG_DATA_HOME: temporaryRoot }),
     RUST_LOG: 'error',
   };
 
@@ -257,11 +267,11 @@ try {
 
   // Exercise a real ProcessManager start without touching a real VPN binary.
   // A tiny local executable ignores sing-box arguments and only stays alive;
-  // the MCP server still uses the real Windows JobObject + shared PID logic.
+  // the MCP server exercises its real platform-specific process and PID handling.
   const binaryDirectory = join(dataDir, 'binaries');
   mkdirSync(binaryDirectory, { recursive: true });
   const fakeSource = join(temporaryRoot, 'fake-singbox.rs');
-  const fakeBinary = join(binaryDirectory, 'sing-box.exe');
+  const fakeBinary = join(binaryDirectory, 'sing-box' + (isWindows ? '.exe' : ''));
   writeFileSync(
     fakeSource,
     'fn main() { std::thread::sleep(std::time::Duration::from_secs(180)); }',

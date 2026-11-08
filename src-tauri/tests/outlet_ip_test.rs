@@ -10,28 +10,10 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn app_data_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Library")
-        .join("Application Support");
-
-    #[cfg(target_os = "linux")]
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    let base = std::env::temp_dir();
-
-    base.join("com.omnitun.desktop")
+    PathBuf::from(
+        std::env::var_os("OMNITUN_TEST_DATA_DIR")
+            .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"),
+    )
 }
 
 fn singbox() -> PathBuf {
@@ -75,42 +57,39 @@ fn free_port(skip: &[u16]) -> Option<u16> {
 }
 
 fn load_servers() -> Vec<serde_json::Value> {
-    let p = app_data_dir().join("profiles.json");
-    let content = match std::fs::read_to_string(&p) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("SKIP: cannot read profiles.json at {}: {e}", p.display());
-            return Vec::new();
-        }
-    };
-    let d: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("SKIP: invalid JSON in profiles.json: {e}");
-            return Vec::new();
-        }
-    };
-    match d[0]["servers"].as_array() {
-        Some(arr) => arr.clone(),
-        None => {
-            eprintln!("SKIP: no servers in profiles.json");
-            Vec::new()
-        }
-    }
+    let path = app_data_dir().join("profiles.json");
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "Required disposable fixture is missing at {}: {error}",
+            path.display()
+        )
+    });
+    let data: serde_json::Value =
+        serde_json::from_str(&content).expect("profiles.json fixture must contain valid JSON");
+    let servers = data
+        .get(0)
+        .and_then(|profile| profile.get("servers"))
+        .and_then(serde_json::Value::as_array)
+        .expect("profiles.json must contain a first profile with a servers array")
+        .clone();
+    assert!(
+        !servers.is_empty(),
+        "profiles.json fixture must contain servers"
+    );
+    servers
 }
 
 #[tokio::test]
+#[ignore = "manual VPN smoke test; requires disposable fixtures and external IP service"]
 async fn outlet_vs_entry_country() {
     let servers = load_servers();
-    if servers.is_empty() {
-        eprintln!("SKIP: no servers loaded");
-        return;
-    }
+    assert!(!servers.is_empty(), "Required fixture contains no servers");
     let bin = singbox();
-    if !bin.exists() {
-        eprintln!("SKIP: no sing-box");
-        return;
-    }
+    assert!(
+        bin.is_file(),
+        "Required sing-box binary is missing: {:?}",
+        bin
+    );
 
     // Build config: each server receives its own inbound port
     let mut obs: Vec<serde_json::Value> = vec![
@@ -123,34 +102,29 @@ async fn outlet_vs_entry_country() {
     let mut labels: Vec<(usize, String, String)> = Vec::new();
 
     for (i, sv) in servers.iter().enumerate() {
-        let sp: omnitun_lib::proxy::ServerProfile = match serde_json::from_value(sv.clone()) {
-            Ok(s) => s,
-            _ => continue,
-        };
-        let p = match free_port(&ports) {
-            Some(x) => x,
-            _ => continue,
-        };
+        let sp: omnitun_lib::proxy::ServerProfile = serde_json::from_value(sv.clone())
+            .expect("Fixture server must deserialize as ServerProfile");
+        let p = free_port(&ports).expect("Could not allocate a local loopback port");
         let tag = format!("s{i}");
-        if let Ok(mut ob) = omnitun_lib::proxy::config::build_outbound(&sp) {
-            ob["tag"] = serde_json::json!(&tag);
-            inbs.push(serde_json::json!({"type": "mixed","tag":format!("in{i}"),
-                "listen":"127.0.0.1","listen_port":p}));
-            ports.push(p);
-            obs.push(ob);
-            routes.push(serde_json::json!({"inbound_port":[p],"outbound":tag}));
-            labels.push((
-                i,
-                sv["flag"].as_str().unwrap_or("?").to_string(),
-                sv["country_name"].as_str().unwrap_or("?").to_string(),
-            ));
-        }
+        let mut ob = omnitun_lib::proxy::config::build_outbound(&sp)
+            .expect("Fixture server must produce a supported sing-box outbound");
+        ob["tag"] = serde_json::json!(&tag);
+        inbs.push(serde_json::json!({"type": "mixed","tag":format!("in{i}"),
+            "listen":"127.0.0.1","listen_port":p}));
+        ports.push(p);
+        obs.push(ob);
+        routes.push(serde_json::json!({"inbound_port":[p],"outbound":tag}));
+        labels.push((
+            i,
+            sv["flag"].as_str().unwrap_or("?").to_string(),
+            sv["country_name"].as_str().unwrap_or("?").to_string(),
+        ));
     }
 
-    if ports.is_empty() {
-        eprintln!("No servers");
-        return;
-    }
+    assert!(
+        !ports.is_empty(),
+        "No usable server was selected from the required fixture"
+    );
     println!("Testing {} servers via sing-box", ports.len());
 
     let cfg = serde_json::json!({
@@ -160,22 +134,20 @@ async fn outlet_vs_entry_country() {
         "route":{"rules":routes,"final":"direct","auto_detect_interface":true,"default_domain_resolver":"local"},
     });
 
-    let dir = std::env::temp_dir().join(format!("ot-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg_p = dir.join("c.json");
+    let dir = tempfile::tempdir().expect("Could not create isolated sing-box test directory");
+    let cfg_p = dir.path().join("c.json");
     std::fs::write(&cfg_p, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
 
-    if !Command::new(&bin)
+    let check = Command::new(&bin)
         .args(["check", "-c"])
         .arg(&cfg_p)
         .output()
-        .unwrap()
-        .status
-        .success()
-    {
-        let _ = std::fs::remove_dir_all(&dir);
-        return;
-    }
+        .expect("Could not run sing-box config validation");
+    assert!(
+        check.status.success(),
+        "sing-box rejected outlet-IP config:\n{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
 
     let child = Command::new(&bin)
         .args(["run", "-c"])
@@ -298,7 +270,10 @@ async fn outlet_vs_entry_country() {
         fail,
         ok + fail
     );
+    assert!(
+        ok > 0,
+        "No server completed the external outlet-IP smoke check"
+    );
 
     drop(_child_guard);
-    let _ = std::fs::remove_dir_all(&dir);
 }

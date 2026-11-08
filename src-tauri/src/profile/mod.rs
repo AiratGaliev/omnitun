@@ -2503,7 +2503,6 @@ mod tests {
     async fn test_load_nonexistent_file_returns_empty() {
         let dir = test_dir("nonexistent");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
 
         let mut mgr = ProfileManager::new(dir.clone(), test_db().await);
         mgr.load().unwrap();
@@ -2553,7 +2552,8 @@ mod tests {
 /// - "🇨🇭 Switzerland" → Some("CH")
 /// - "🇵🇱 Warsaw" → Some("PL")
 /// - "some-server" → None
-#[cfg(test)]
+// Manual-only suite; requires a disposable OMNITUN_TEST_DATA_DIR fixture.
+#[cfg(all(test, feature = "user-data-smoke"))]
 mod extra_tests {
     use super::*;
     use crate::proxy::config::build_outbound;
@@ -2563,53 +2563,63 @@ mod extra_tests {
     use std::collections::HashMap;
     use std::process::Command;
 
-    fn test_dir(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("omnitun-test-{}-{}", std::process::id(), name))
+    fn test_dir(name: &str) -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("omnitun-{name}-"))
+            .tempdir()
+            .expect("Could not create isolated profile smoke-test directory")
     }
 
     fn app_data_dir() -> PathBuf {
-        #[cfg(windows)]
-        {
-            PathBuf::from(std::env::var("APPDATA").expect("APPDATA not set"))
-                .join("com.omnitun.desktop")
-        }
-        #[cfg(not(windows))]
-        {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home)
-                .join(".config")
-                .join("com.omnitun.desktop")
-        }
+        PathBuf::from(
+            std::env::var_os("OMNITUN_TEST_DATA_DIR")
+                .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"),
+        )
     }
 
     fn singbox() -> PathBuf {
-        let m = app_data_dir()
-            .join("binaries")
-            .join(crate::proxy::installer::Installer::binary_name());
-        if m.exists() {
-            return m;
+        let binary_name = crate::proxy::installer::Installer::binary_name();
+        let bundled = app_data_dir().join("binaries").join(&binary_name);
+        if bundled.is_file() {
+            return bundled;
         }
-        PathBuf::from("sing-box.exe")
+        if let Some(path) = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|directory| directory.join(&binary_name))
+                .find(|candidate| candidate.is_file())
+        }) {
+            return path;
+        }
+        panic!("Required sing-box binary is missing from fixture binaries/ and PATH");
     }
 
     fn load_real_servers() -> Vec<ServerProfile> {
-        let p = app_data_dir().join("profiles.json");
-        let Ok(json) = std::fs::read_to_string(&p) else {
-            eprintln!("SKIP: profiles.json not found at {}", p.display());
-            return Vec::new();
-        };
-        let Ok(data) = serde_json::from_str::<serde_json::Value>(&json) else {
-            eprintln!("SKIP: invalid profiles.json");
-            return Vec::new();
-        };
-        data[0]["servers"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|s| serde_json::from_value(s.clone()).ok())
-                    .collect()
+        let path = app_data_dir().join("profiles.json");
+        let json = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "Required disposable fixture is missing at {}: {error}",
+                path.display()
+            )
+        });
+        let data: serde_json::Value =
+            serde_json::from_str(&json).expect("profiles.json fixture must contain valid JSON");
+        let servers = data
+            .get(0)
+            .and_then(|profile| profile.get("servers"))
+            .and_then(serde_json::Value::as_array)
+            .expect("profiles.json must contain a first profile with a servers array");
+        let parsed: Vec<ServerProfile> = servers
+            .iter()
+            .map(|server| {
+                serde_json::from_value(server.clone())
+                    .expect("Fixture server must deserialize as ServerProfile")
             })
-            .unwrap_or_default()
+            .collect();
+        assert!(
+            !parsed.is_empty(),
+            "profiles.json fixture must contain at least one server"
+        );
+        parsed
     }
 
     // -----------------------------------------------------------------------
@@ -2618,33 +2628,24 @@ mod extra_tests {
     #[test]
     fn test_each_server_generates_valid_config() {
         let servers = load_real_servers();
-        if servers.is_empty() {
-            eprintln!("SKIP: no servers in profiles.json");
-            return;
-        }
         let binary = singbox();
-        if !binary.exists() {
-            eprintln!("SKIP: no sing-box binary");
-            return;
-        }
-
         let cache = test_dir("singles");
-        let _ = std::fs::create_dir_all(&cache);
         let settings = AppSettings::default();
 
         let mut ok = 0u32;
         let mut fail = 0u32;
         for (i, s) in servers.iter().enumerate() {
             match generate_config(
-                &cache,
+                cache.path(),
                 2080,
                 "local-proxy",
                 std::slice::from_ref(s),
                 &settings,
             ) {
                 Ok((cfg_str, _)) => {
-                    let tmp = cache.join(format!("c-{i}.json"));
-                    let _ = std::fs::write(&tmp, &cfg_str);
+                    let tmp = cache.path().join(format!("c-{i}.json"));
+                    std::fs::write(&tmp, &cfg_str)
+                        .expect("Could not write generated sing-box config");
                     let out = Command::new(&binary)
                         .args(["check", "-c"])
                         .arg(&tmp)
@@ -2672,7 +2673,6 @@ mod extra_tests {
                 }
             }
         }
-        let _ = std::fs::remove_dir_all(&cache);
         println!(
             "  single-outbound configs: {ok}/{total} passed, {fail} failed",
             total = ok + fail
@@ -2690,23 +2690,18 @@ mod extra_tests {
     fn test_batch_config_with_selector_passes_check() {
         let servers = load_real_servers();
         let binary = singbox();
-        if !binary.exists() {
-            eprintln!("SKIP");
-            return;
-        }
-
         let mut outbounds: Vec<serde_json::Value> = vec![
             json!({"type": "direct", "tag": "direct"}),
             json!({"type": "block", "tag": "block"}),
         ];
         let mut proxy_tags = vec!["direct".to_string()];
         for s in &servers {
-            if let Ok(mut ob) = build_outbound(s) {
-                let tag = format!("proxy-{}", s.id);
-                ob["tag"] = json!(&tag);
-                proxy_tags.push(tag);
-                outbounds.push(ob);
-            }
+            let mut outbound = build_outbound(s)
+                .expect("Every fixture server must produce a supported sing-box outbound");
+            let tag = format!("proxy-{}", s.id);
+            outbound["tag"] = json!(&tag);
+            proxy_tags.push(tag);
+            outbounds.push(outbound);
         }
         outbounds.push(json!({"type": "selector", "tag": "proxy", "outbounds": proxy_tags}));
 
@@ -2719,8 +2714,7 @@ mod extra_tests {
         });
 
         let tmp = test_dir("batch-config");
-        let _ = std::fs::create_dir_all(&tmp);
-        let p = tmp.join("batch.json");
+        let p = tmp.path().join("batch.json");
         std::fs::write(&p, serde_json::to_string_pretty(&config).unwrap()).unwrap();
         let out = Command::new(&binary)
             .args(["check", "-c"])
@@ -2732,7 +2726,6 @@ mod extra_tests {
             "Batch config check failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let _ = std::fs::remove_dir_all(&tmp);
         println!(
             "  batch config with {} servers: sing-box check ✓",
             servers.len()
@@ -2745,16 +2738,11 @@ mod extra_tests {
     #[test]
     fn test_full_config_has_all_required_sections() {
         let servers = load_real_servers();
-        if servers.is_empty() {
-            eprintln!("SKIP: no servers in profiles.json");
-            return;
-        }
         let cache = test_dir("full-check");
-        let _ = std::fs::create_dir_all(&cache);
         let settings = AppSettings::default();
 
         let (cfg_str, _) = generate_config(
-            &cache,
+            cache.path(),
             2080,
             "local-proxy",
             &[servers[0].clone()],
@@ -2805,7 +2793,6 @@ mod extra_tests {
             "Expected 3+ outbounds (direct, block, proxy)"
         );
 
-        let _ = std::fs::remove_dir_all(&cache);
         println!("  Full config: DNS ✓ Route ✓ Inbounds ✓ Outbounds ✓");
     }
 
@@ -2817,13 +2804,7 @@ mod extra_tests {
         // This tests the logic in lib.rs: when autoConnectFastest=false,
         // alternativeServers must be empty so no urltest group is added
         let servers = load_real_servers();
-        if servers.is_empty() {
-            eprintln!("SKIP: no real servers loaded (profiles.json missing or empty)");
-            return;
-        }
         let cache = test_dir("alt-servers");
-        let _ = std::fs::create_dir_all(&cache);
-
         // autoConnectFastest=false → should produce single outbound per server
         let settings_no_fastest = AppSettings {
             auto_connect_fastest: false,
@@ -2831,7 +2812,7 @@ mod extra_tests {
         };
 
         let (cfg_str, _) = generate_config(
-            &cache,
+            cache.path(),
             2080,
             "local-proxy",
             &[servers[0].clone()],
@@ -2860,8 +2841,14 @@ mod extra_tests {
             ..AppSettings::default()
         };
 
-        let (cfg_str, _) =
-            generate_config(&cache, 2080, "local-proxy", &servers, &settings_fastest).unwrap();
+        let (cfg_str, _) = generate_config(
+            cache.path(),
+            2080,
+            "local-proxy",
+            &servers,
+            &settings_fastest,
+        )
+        .unwrap();
         let cfg: serde_json::Value = serde_json::from_str(&cfg_str).unwrap();
         let obs = cfg["outbounds"].as_array().unwrap();
 
@@ -2872,7 +2859,6 @@ mod extra_tests {
             "With autoConnectFastest=true, expected urltest outbound group"
         );
 
-        let _ = std::fs::remove_dir_all(&cache);
         println!("  alternativeServers: off when fastest=false, on when fastest=true ✓");
     }
 
@@ -2882,13 +2868,10 @@ mod extra_tests {
     #[test]
     fn test_refresh_preserves_server_ids() -> Result<(), Box<dyn std::error::Error>> {
         let servers = load_real_servers();
-        if servers.len() < 2 {
-            eprintln!(
-                "SKIP: need at least 2 servers for ID test, got {}",
-                servers.len()
-            );
-            return Ok(());
-        }
+        assert!(
+            servers.len() >= 2,
+            "The profile smoke fixture must contain at least two servers"
+        );
 
         // Simulate "old" servers with known IDs (as if loaded from saved profiles.json)
         let old_servers: Vec<ServerProfile> = servers.iter().take(5).cloned().collect();
@@ -2968,13 +2951,9 @@ mod extra_tests {
     #[tokio::test]
     async fn test_remove_nonexistent_returns_error() {
         let dir = test_dir("remove_err");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
 
-        let mut mgr = ProfileManager::new(dir.clone(), test_db().await);
+        let mut mgr = ProfileManager::new(dir.path().to_path_buf(), test_db().await);
         let result = mgr.remove("nonexistent");
         assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -106,6 +106,7 @@ npm run dev
 | Command | Purpose |
 |---|---|
 | npm run dev | Vite development server |
+| npm run typecheck | TypeScript type-check without producing a bundle |
 | npm run build | TypeScript check and frontend production build |
 | npm run tauri | Run the Tauri desktop application |
 | npm run tauri:build | Build the desktop application bundle |
@@ -118,6 +119,8 @@ npm run dev
 | cargo test | Run Rust unit and integration tests |
 | cargo clippy --all-targets -- -D warnings | Run Clippy for all targets with warnings treated as errors |
 | npm run test:mcp | Build the MCP sidecar and run isolated JSON-RPC functional checks |
+| npm run test:mcp:artifact | Test an already-built MCP sidecar without rebuilding it |
+| npm run check:release-metadata | Verify frontend, Cargo and Tauri versions match |
 
 ## MCP server integration
 
@@ -275,29 +278,25 @@ If a promotion gate fails, stop the promotion. Fix the issue in a topic branch, 
 
 ### CI and release policy
 
-The intended distinction is: quick feedback during daily development, broader integration validation during promotion, and production packaging only for a release. Keep the following distinction visible until the staged CI redesign in OMN-5 is implemented.
+The intended distinction is: quick feedback during daily development, broader integration validation during promotion, and production packaging only for a release. The staged CI redesign is implemented in the workflows above; keep this table aligned with their actual triggers and checks.
 
-**Current workflow behaviour (verified in `.github/workflows/ci.yml` and `.github/workflows/release.yml`):**
+**Implemented workflow behaviour:**
 
-| Workflow | Trigger | Current checks |
+| Workflow | Trigger | Checks |
 |---|---|---|
-| CI — frontend | Push to `dev`, `test`, `main`; PR targeting these branches | `npm ci`, ESLint, Prettier, Vitest and `npm run build` (TypeScript + Vite production frontend build) on Ubuntu |
-| CI — Rust | Same push/PR triggers | Rust format and Clippy on Ubuntu; `cargo test` on Windows, macOS and Ubuntu; Rust cache is enabled per runner |
-| CI — MCP sidecar preparation | Same CI runs | Creates a placeholder external-binary path for Tauri build-script validation; it does **not** compile the real MCP executable |
-| Release | Push of a `v*` tag | Runs `npm run tauri:build` and builds the real MCP sidecar through the Tauri `beforeBuildCommand`; current release matrix builds Windows x86_64 and Linux x86_64 bundles |
+| CI — frontend | Push to `dev`; PR targeting `dev` | ESLint, Prettier, TypeScript type-check without bundle, Vitest |
+| CI — Rust Core | Same | Rust formatting; `cargo test -p omnitun-core --locked`; Core Clippy on one Ubuntu runner |
+| Promotion — `dev → test` | PR from `dev` into `test` | Frontend regression; desktop host/Core and MCP handler tests on Windows, macOS and Linux; Clippy on Ubuntu |
+| Promotion — `test → main` | PR from `test` into `main` | Frontend and full Rust/MCP regression; version metadata validation; no installer packaging |
+| Release | Push of a `v*` tag | Production frontend, Tauri bundles/installers and MCP sidecar; functional smoke against the built sidecar before artifacts are uploaded |
 
-The current CI does not run `tauri build`, create installers or execute `npm run test:mcp` on every push. However, it still runs a frontend production build and the Rust test/Clippy targets; `cargo test` must compile the test executables and their dependency graph. A Cargo dependency rebuild is not the same as a Tauri installer build.
+The dev Rust job builds only `omnitun-core`; it does not build Tauri, MCP executable/sidecar or installers. The Core crate has no Tauri, WebView, desktop plugin, SQLite, Tokio runtime, process, reqwest or MCP transport dependency. Cargo still compiles the Core and its required dependencies/tests; this is materially smaller than compiling the desktop host.
 
-**Target policy tracked by [OMN-5](https://linear.app/omnitun/issue/OMN-5/razdelit-rust-core-bystryj-dev-ci-i-release-build-prilozheniyamcp):**
+The release workflow remains the only workflow that runs `npm run tauri:build` and produces desktop bundles/installers. The MCP artifact test runs against the sidecar already built by Tauri's `beforeBuildCommand`; it does not rebuild the executable.
 
-| Stage | Intended checks |
-|---|---|
-| `dev` topic PRs | Fast frontend lint/format/type-check and unit tests; Rust formatting, independent Core unit tests and Core Clippy. No Tauri application build, installer packaging, real MCP executable build or system/integration suite |
-| `dev → test` | Full applicable Rust/desktop/MCP integration tests, isolated sing-box fixtures and platform-specific validation. No production installers |
-| `test → main` | Release-readiness regression, configuration, version and updater checks; avoid rebuilding installers or duplicating expensive work without a reason |
-| Version tag / Release | Production frontend, Tauri application, real MCP executable/sidecar, supported installers, signatures and updater artifacts |
+Profile-driven sing-box/IP tests are opt-in through the `user-data-smoke` Cargo feature. They require an explicit `OMNITUN_TEST_DATA_DIR` pointing to a disposable fixture directory; they never infer `APPDATA`, HOME or the normal OmniTun profile. External-IP VPN tests are additionally ignored until deliberately selected with Cargo's `--ignored` flag. They are not part of automatic dev or promotion CI.
 
-The target fast Rust pipeline depends on extracting a Tauri-independent `omnitun-core` crate and classifying the existing integration tests. Until OMN-5 is implemented and verified, do not assume that today's CI already follows the target stage separation. Do not simply delete slow tests to make CI faster: move them to the correct stage and preserve their coverage.
+Cargo cache remains enabled for the `src-tauri` workspace. Cache reuse is runner/target/toolchain-specific; Core checks no longer need to restore or compile Tauri's desktop dependency graph in the first place.
 
 ### Local checks before a PR
 
@@ -315,21 +314,27 @@ git diff --check
 npm ci
 npm run lint
 npm run format:check
+npm run typecheck
 npm test
-npm run build
+# npm run build is a production bundle check, not a routine fast-dev check.
 ~~~
 
 **Rust changes** (from `src-tauri/`):
 
 ~~~bash
-cargo fmt -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt --all -- --check
+cargo test -p omnitun-core --locked
+cargo clippy -p omnitun-core --all-targets --locked -- -D warnings
+# For desktop-host changes and promotion-level regression:
+cargo test --workspace --locked
+cargo test -p omnitun --features mcp-server --lib --locked
 ~~~
 
-**MCP changes:** `npm run test:mcp` builds/stages the target-specific MCP sidecar and then runs isolated JSON-RPC functional checks. Run it for MCP changes and understand that it performs a real Rust MCP build; it is not a lightweight frontend/unit-test command.
+**MCP changes:** `cargo test -p omnitun --features mcp-server --lib --locked` checks handlers/contracts without producing a sidecar. `npm run test:mcp` builds/stages the target-specific sidecar and runs process-level JSON-RPC checks. Release runs `npm run test:mcp:artifact` after the production sidecar has already been built.
 
 **Desktop packaging:** `npm run tauri:build` creates the desktop application bundle/installers and builds the MCP sidecar through Tauri's `beforeBuildCommand`. Treat it as a release/package validation, not a routine check for every small change.
+
+**Opt-in profile/sing-box smoke tests:** create a disposable data directory containing a sanitized `profiles.json` fixture and set `OMNITUN_TEST_DATA_DIR` to it before running `cargo test --features user-data-smoke`. Never point it at the normal application data directory. External VPN/IP tests are ignored by default; run them deliberately with `cargo test --features user-data-smoke --test outlet_ip_test -- --ignored` or the corresponding selector target.
 
 **Local integration fixtures:** start the isolated Docker test environment with:
 

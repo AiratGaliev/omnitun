@@ -2138,6 +2138,35 @@ fn define_tools() -> Vec<Tool> {
     ]
 }
 
+fn define_resources() -> Vec<Resource> {
+    vec![
+        Resource::new("omnitun://status", "Proxy Status")
+            .with_description("Current proxy connection status: connected/disconnected/error with PID, port, and exit IP.")
+            .with_mime_type("application/json"),
+        Resource::new("omnitun://logs/recent", "Recent Logs")
+            .with_description("Last 200 log entries from the application logger ring buffer.")
+            .with_mime_type("application/json"),
+        Resource::new("omnitun://settings", "App Settings")
+            .with_description("Current application settings: theme, proxy mode, IP info token, etc.")
+            .with_mime_type("application/json"),
+        Resource::new("omnitun://profiles", "Subscription Profiles")
+            .with_description("All subscription profiles with their server lists and test results.")
+            .with_mime_type("application/json"),
+        Resource::new("omnitun://cache", "Server cache statistics (positive/negative counts)")
+            .with_description("Current positive and negative cache counts from the dual-layer cache.")
+            .with_mime_type("application/json"),
+        Resource::new("omnitun://geoip/status", "GeoIP database installation metadata")
+            .with_description("Download dates, file sizes, and availability of GeoIP databases.")
+            .with_mime_type("application/json"),
+        Resource::new("omnitun://singbox/stderr", "Last N bytes of sing-box stderr")
+            .with_description("The sing-box process's own log output for debugging start failures.")
+            .with_mime_type("text/plain"),
+        Resource::new("omnitun://singbox/config", "Current sing-box configuration JSON")
+            .with_description("The generated config.json that sing-box is currently running with.")
+            .with_mime_type("application/json"),
+    ]
+}
+
 // ── ServerHandler implementation ─────────────────────────────────────────
 
 impl ServerHandler for Handler {
@@ -2187,32 +2216,7 @@ impl ServerHandler for Handler {
     {
         async {
             Ok(ListResourcesResult {
-                resources: vec![
-                Resource::new("omnitun://status", "Proxy Status")
-                    .with_description("Current proxy connection status: connected/disconnected/error with PID, port, and exit IP.")
-                    .with_mime_type("application/json"),
-                Resource::new("omnitun://logs/recent", "Recent Logs")
-                    .with_description("Last 200 log entries from the application logger ring buffer.")
-                    .with_mime_type("application/json"),
-                Resource::new("omnitun://settings", "App Settings")
-                    .with_description("Current application settings: theme, proxy mode, IP info token, etc.")
-                    .with_mime_type("application/json"),
-                Resource::new("omnitun://profiles", "Subscription Profiles")
-                    .with_description("All subscription profiles with their server lists and test results.")
-                    .with_mime_type("application/json"),
-                Resource::new("omnitun://cache", "Server cache statistics (positive/negative counts)")
-                    .with_description("Current positive and negative cache counts from the dual-layer cache.")
-                    .with_mime_type("application/json"),
-                Resource::new("omnitun://geoip/status", "GeoIP database installation metadata")
-                    .with_description("Download dates, file sizes, and availability of GeoIP databases.")
-                    .with_mime_type("application/json"),
-                Resource::new("omnitun://singbox/stderr", "Last N bytes of sing-box stderr")
-                    .with_description("The sing-box process's own log output for debugging start failures.")
-                    .with_mime_type("text/plain"),
-                Resource::new("omnitun://singbox/config", "Current sing-box configuration JSON")
-                    .with_description("The generated config.json that sing-box is currently running with.")
-                    .with_mime_type("application/json"),
-                ],
+                resources: define_resources(),
                 ..Default::default()
             })
         }
@@ -2451,6 +2455,51 @@ pub fn run(data_dir: PathBuf) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_exposes_required_tools_and_resources() {
+        let tools = serde_json::to_value(define_tools()).unwrap();
+        let tool_list = tools.as_array().expect("tools must be a JSON array");
+        let tool_names: Vec<&str> = tool_list
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+            .collect();
+
+        for required in [
+            "get_status",
+            "get_settings",
+            "update_settings",
+            "start_server_from_subscription",
+            "stop_proxy",
+            "clear_cache",
+        ] {
+            assert!(
+                tool_names.contains(&required),
+                "Missing MCP tool: {required}"
+            );
+        }
+
+        let resources = serde_json::to_value(define_resources()).unwrap();
+        let resource_list = resources
+            .as_array()
+            .expect("resources must be a JSON array");
+        let resource_uris: Vec<&str> = resource_list
+            .iter()
+            .filter_map(|resource| resource.get("uri").and_then(serde_json::Value::as_str))
+            .collect();
+        for required in [
+            "omnitun://status",
+            "omnitun://settings",
+            "omnitun://profiles",
+            "omnitun://cache",
+            "omnitun://singbox/config",
+        ] {
+            assert!(
+                resource_uris.contains(&required),
+                "Missing MCP resource: {required}"
+            );
+        }
+    }
 
     #[test]
     fn settings_json_never_exposes_ipinfo_token() {

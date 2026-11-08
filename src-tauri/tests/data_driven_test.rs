@@ -1,4 +1,4 @@
-/// Data-driven tests using real profiles from profiles.json.
+/// Data-driven tests using disposable profiles.json fixtures.
 ///
 /// Validates config generation, sing-box compatibility, data integrity.
 /// Run: cargo test --test data_driven_test -- --nocapture
@@ -6,28 +6,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn app_data_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Library")
-        .join("Application Support");
-
-    #[cfg(target_os = "linux")]
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    let base = std::env::temp_dir();
-
-    base.join("com.omnitun.desktop")
+    PathBuf::from(
+        std::env::var_os("OMNITUN_TEST_DATA_DIR")
+            .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"),
+    )
 }
 
 fn singbox_binary() -> PathBuf {
@@ -58,20 +40,26 @@ fn profiles_path() -> PathBuf {
 
 fn load_real_profiles() -> Vec<serde_json::Value> {
     let path = profiles_path();
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("SKIP: cannot read profiles.json at {}: {e}", path.display());
-            return Vec::new();
-        }
-    };
-    match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("SKIP: invalid JSON in profiles.json: {e}");
-            Vec::new()
-        }
-    }
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "Required disposable fixture is missing at {}: {error}",
+            path.display()
+        )
+    });
+    let profiles: Vec<serde_json::Value> =
+        serde_json::from_str(&content).expect("profiles.json fixture must contain a JSON array");
+    assert!(
+        !profiles.is_empty(),
+        "profiles.json fixture must contain at least one profile"
+    );
+    assert!(
+        profiles
+            .first()
+            .and_then(|profile| profile["servers"].as_array())
+            .is_some_and(|servers| !servers.is_empty()),
+        "The first fixture profile must contain at least one server",
+    );
+    profiles
 }
 
 // ---------------------------------------------------------------------------
@@ -81,10 +69,6 @@ fn load_real_profiles() -> Vec<serde_json::Value> {
 #[test]
 fn test_load_and_count() {
     let profiles = load_real_profiles();
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json is empty");
-        return;
-    }
     let total: usize = profiles
         .iter()
         .map(|p| p["servers"].as_array().map(|a| a.len()).unwrap_or(0))
@@ -96,10 +80,6 @@ fn test_load_and_count() {
 #[test]
 fn test_all_servers_have_required_fields() {
     let profiles = load_real_profiles();
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json is empty");
-        return;
-    }
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
             let id = s["id"].as_str().unwrap_or("?");
@@ -123,10 +103,6 @@ fn test_all_servers_have_required_fields() {
 fn test_no_orphaned_name_field() {
     // After migration, `name` field must NOT be in profiles.json
     let profiles = load_real_profiles();
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json is empty");
-        return;
-    }
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
             assert!(
@@ -141,10 +117,6 @@ fn test_no_orphaned_name_field() {
 #[test]
 fn test_flag_is_valid_iso_code() {
     let profiles = load_real_profiles();
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json is empty");
-        return;
-    }
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
             if let Some(flag) = s["flag"].as_str() {
@@ -168,10 +140,6 @@ fn test_flag_is_valid_iso_code() {
 #[test]
 fn test_ping_ms_within_reasonable_range() {
     let profiles = load_real_profiles();
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json is empty");
-        return;
-    }
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
             let is_cdn = s["behind_cdn"].as_bool().unwrap_or(false);
@@ -198,10 +166,6 @@ fn test_ping_ms_within_reasonable_range() {
 #[test]
 fn test_build_outbound_all_servers() -> Result<(), Box<dyn std::error::Error>> {
     let profiles = load_real_profiles();
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json is empty");
-        return Ok(());
-    }
     let count = profiles
         .iter()
         .flat_map(|p| p["servers"].as_array().unwrap().iter())
@@ -228,10 +192,6 @@ fn test_build_outbound_all_servers() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn test_build_outbound_never_returns_empty_server() -> Result<(), Box<dyn std::error::Error>> {
     let profiles = load_real_profiles();
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json is empty");
-        return Ok(());
-    }
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
             let server: omnitun_lib::proxy::ServerProfile = serde_json::from_value((*s).clone())?;
@@ -252,10 +212,6 @@ fn test_build_outbound_never_returns_empty_server() -> Result<(), Box<dyn std::e
 #[test]
 fn test_all_outbounds_have_tls_config_for_trojan() -> Result<(), Box<dyn std::error::Error>> {
     let profiles = load_real_profiles();
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json is empty");
-        return Ok(());
-    }
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
             let server: omnitun_lib::proxy::ServerProfile = serde_json::from_value((*s).clone())?;
@@ -290,18 +246,14 @@ fn test_all_outbounds_have_tls_config_for_trojan() -> Result<(), Box<dyn std::er
 #[test]
 fn test_all_servers_pass_singbox_check() -> Result<(), Box<dyn std::error::Error>> {
     let binary = singbox_binary();
-    if !binary.exists() {
-        eprintln!("SKIP: sing-box not found at {:?}", binary);
-        return Ok(());
-    }
+    assert!(
+        binary.is_file(),
+        "Required sing-box binary is missing: {:?}",
+        binary
+    );
 
     let profiles = load_real_profiles();
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json is empty");
-        return Ok(());
-    }
-    let tmp_dir = std::env::temp_dir().join(format!("omnitun-singbox-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp_dir)?;
+    let tmp_dir = tempfile::tempdir()?;
 
     let servers: Vec<_> = profiles
         .iter()
@@ -328,7 +280,7 @@ fn test_all_servers_pass_singbox_check() -> Result<(), Box<dyn std::error::Error
             },
         });
 
-        let config_path = tmp_dir.join(format!("c-{}.json", i));
+        let config_path = tmp_dir.path().join(format!("c-{}.json", i));
         std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
 
         let output = Command::new(&binary)
@@ -345,7 +297,6 @@ fn test_all_servers_pass_singbox_check() -> Result<(), Box<dyn std::error::Error
         );
     }
 
-    let _ = std::fs::remove_dir_all(&tmp_dir);
     println!("✓ sing-box check: {total}/{total} servers passed");
     Ok(())
 }
@@ -353,7 +304,8 @@ fn test_all_servers_pass_singbox_check() -> Result<(), Box<dyn std::error::Error
 /// Test that base.json template has DNS (regression: was missing before fix)
 #[test]
 fn test_base_template_has_dns() -> Result<(), Box<dyn std::error::Error>> {
-    let template: serde_json::Value = serde_json::from_str(include_str!("../config/base.json"))?;
+    let template: serde_json::Value =
+        serde_json::from_str(include_str!("../crates/omnitun-core/src/proxy/base.json"))?;
     let dns = template.get("dns");
     assert!(dns.is_some(), "base.json missing DNS section");
     assert!(
@@ -430,10 +382,6 @@ fn test_outlet_ip_guard_skips_when_empty() {
 #[test]
 fn test_display_name_doesnt_show_raw_ip() -> Result<(), Box<dyn std::error::Error>> {
     let profiles = load_real_profiles();
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json is empty");
-        return Ok(());
-    }
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
             let server: omnitun_lib::proxy::ServerProfile = serde_json::from_value((*s).clone())?;
@@ -461,14 +409,13 @@ fn test_display_name_doesnt_show_raw_ip() -> Result<(), Box<dyn std::error::Erro
 #[test]
 fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error>> {
     let profiles = load_real_profiles();
-    if profiles.is_empty()
-        || profiles[0]["servers"]
-            .as_array()
-            .is_none_or(|a| a.is_empty())
-    {
-        eprintln!("SKIP: no servers available");
-        return Ok(());
-    }
+    assert!(
+        profiles
+            .first()
+            .and_then(|profile| profile["servers"].as_array())
+            .is_some_and(|servers| !servers.is_empty()),
+        "The first fixture profile must contain servers",
+    );
     let servers: Vec<omnitun_lib::proxy::ServerProfile> = profiles[0]["servers"]
         .as_array()
         .unwrap()
@@ -535,8 +482,14 @@ fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error
 
     // Verify it passes sing-box check
     let binary = singbox_binary();
-    if binary.exists() {
-        let tmp = std::env::temp_dir().join("omnitun-batch-test.json");
+    assert!(
+        binary.is_file(),
+        "Required sing-box binary is missing: {:?}",
+        binary
+    );
+    {
+        let check_dir = tempfile::tempdir()?;
+        let tmp = check_dir.path().join("omnitun-batch-test.json");
         std::fs::write(&tmp, serde_json::to_string_pretty(&config)?)?;
         let out = Command::new(&binary)
             .args(["check", "-c"])
@@ -547,7 +500,6 @@ fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error
             "Batch config check failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let _ = std::fs::remove_file(&tmp);
     }
 
     println!("✓ Batch test config has correct selector structure");
@@ -565,10 +517,6 @@ fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error
 #[test]
 fn test_cdn_servers_must_not_have_exit_data() {
     let profiles = load_real_profiles();
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json is empty");
-        return;
-    }
     let mut violations = Vec::new();
     for p in &profiles {
         for s in p["servers"].as_array().unwrap() {
@@ -606,10 +554,6 @@ fn test_cdn_servers_must_not_have_exit_data() {
 #[test]
 fn test_non_cdn_servers_should_have_exit_data() {
     let profiles = load_real_profiles();
-    if profiles.is_empty() {
-        eprintln!("SKIP: profiles.json is empty");
-        return;
-    }
     let mut missing_exit = 0u32;
     let mut total_non_cdn = 0u32;
     for p in &profiles {
