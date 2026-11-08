@@ -2503,7 +2503,6 @@ mod tests {
     async fn test_load_nonexistent_file_returns_empty() {
         let dir = test_dir("nonexistent");
         let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
 
         let mut mgr = ProfileManager::new(dir.clone(), test_db().await);
         mgr.load().unwrap();
@@ -2709,7 +2708,7 @@ mod extra_tests {
             "Batch config check failed:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-                println!(
+        println!(
             "  batch config with {} servers: sing-box check ✓",
             servers.len()
         );
@@ -2722,7 +2721,7 @@ mod extra_tests {
     fn test_full_config_has_all_required_sections() {
         let servers = load_real_servers();
         let cache = test_dir("full-check");
-                let settings = AppSettings::default();
+        let settings = AppSettings::default();
 
         let (cfg_str, _) = generate_config(
             cache.path(),
@@ -2931,5 +2930,6 @@ mod extra_tests {
         let result = mgr.remove("nonexistent");
         assert!(result.is_err());
 
-            }
+
+    }
 }

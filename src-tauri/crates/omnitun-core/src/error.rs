@@ -1,8 +1,6 @@
 use serde::ser::SerializeStruct;
 use thiserror::Error;
 
-use serde::ser::SerializeStruct;
-
 // ─── Structured errors ─────────────────────────────────────────────────────
 //
 // DESIGN:
