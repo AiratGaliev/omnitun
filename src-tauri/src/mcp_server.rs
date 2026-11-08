@@ -2480,7 +2480,9 @@ mod tests {
         }
 
         let resources = serde_json::to_value(define_resources()).unwrap();
-        let resource_list = resources.as_array().expect("resources must be a JSON array");
+        let resource_list = resources
+            .as_array()
+            .expect("resources must be a JSON array");
         let resource_uris: Vec<&str> = resource_list
             .iter()
             .filter_map(|resource| resource.get("uri").and_then(serde_json::Value::as_str))

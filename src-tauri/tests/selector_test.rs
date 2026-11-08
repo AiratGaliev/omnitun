@@ -18,8 +18,10 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn app_data_dir() -> PathBuf {
-    PathBuf::from(std::env::var_os("OMNITUN_TEST_DATA_DIR")
-        .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"))
+    PathBuf::from(
+        std::env::var_os("OMNITUN_TEST_DATA_DIR")
+            .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"),
+    )
 }
 
 fn singbox() -> PathBuf {
@@ -237,10 +239,14 @@ impl Drop for ChildGuard {
 async fn selector_switch_and_outlet_ip() {
     // ── 0. Pre-checks ──────────────────────────────────────────────────────
     let bin = singbox();
-    assert!(bin.is_file(), "Required sing-box binary is missing: {:?}", bin);
+    assert!(
+        bin.is_file(),
+        "Required sing-box binary is missing: {:?}",
+        bin
+    );
 
-    let (_sv, sp) = load_best_server()
-        .expect("Required disposable profiles.json fixture has no usable server");
+    let (_sv, sp) =
+        load_best_server().expect("Required disposable profiles.json fixture has no usable server");
 
     println!(
         "Using server: {} ({}:{} | {})",
@@ -250,8 +256,8 @@ async fn selector_switch_and_outlet_ip() {
         sp.protocol
     );
 
-    let proxy_port = free_port(&[])
-        .expect("Could not allocate a local proxy port for selector smoke test");
+    let proxy_port =
+        free_port(&[]).expect("Could not allocate a local proxy port for selector smoke test");
     let clash_port = free_port(&[proxy_port])
         .expect("Could not allocate a local Clash API port for selector smoke test");
 

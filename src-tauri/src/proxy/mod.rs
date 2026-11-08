@@ -9,10 +9,10 @@ pub mod process;
 use crate::logging::{log, LogLevel, LogSource, Logger};
 use crate::settings::AppSettings;
 use installer::Installer;
+pub use omnitun_core::{ErrorCode, ErrorDetail, ProxyError, ServerProfile};
 pub use process::ProcessManager;
 pub use process::{cleanup_stale_pid, remove_pid_file, set_pid_file_path, write_pid_file};
 use serde::{Deserialize, Serialize};
-pub use omnitun_core::{ErrorCode, ErrorDetail, ProxyError, ServerProfile};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::Arc;
@@ -254,6 +254,14 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
+
+    // Keep the legacy CDN keyword assertions against the Core implementation.
+    fn keyword_cdn_check(host: &str) -> bool {
+        omnitun_core::profile::is_cdn_server(&ServerProfile {
+            server: host.to_string(),
+            ..ServerProfile::default()
+        })
+    }
 
     #[test]
     fn test_keyword_cdn_workers_dev() {

@@ -2596,7 +2596,10 @@ mod extra_tests {
     fn load_real_servers() -> Vec<ServerProfile> {
         let path = app_data_dir().join("profiles.json");
         let json = std::fs::read_to_string(&path).unwrap_or_else(|error| {
-            panic!("Required disposable fixture is missing at {}: {error}", path.display())
+            panic!(
+                "Required disposable fixture is missing at {}: {error}",
+                path.display()
+            )
         });
         let data: serde_json::Value =
             serde_json::from_str(&json).expect("profiles.json fixture must contain valid JSON");
@@ -2838,8 +2841,14 @@ mod extra_tests {
             ..AppSettings::default()
         };
 
-        let (cfg_str, _) =
-            generate_config(cache.path(), 2080, "local-proxy", &servers, &settings_fastest).unwrap();
+        let (cfg_str, _) = generate_config(
+            cache.path(),
+            2080,
+            "local-proxy",
+            &servers,
+            &settings_fastest,
+        )
+        .unwrap();
         let cfg: serde_json::Value = serde_json::from_str(&cfg_str).unwrap();
         let obs = cfg["outbounds"].as_array().unwrap();
 

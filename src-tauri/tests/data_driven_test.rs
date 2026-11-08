@@ -6,8 +6,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn app_data_dir() -> PathBuf {
-    PathBuf::from(std::env::var_os("OMNITUN_TEST_DATA_DIR")
-        .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"))
+    PathBuf::from(
+        std::env::var_os("OMNITUN_TEST_DATA_DIR")
+            .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"),
+    )
 }
 
 fn singbox_binary() -> PathBuf {
@@ -44,8 +46,8 @@ fn load_real_profiles() -> Vec<serde_json::Value> {
             path.display()
         )
     });
-    let profiles: Vec<serde_json::Value> = serde_json::from_str(&content)
-        .expect("profiles.json fixture must contain a JSON array");
+    let profiles: Vec<serde_json::Value> =
+        serde_json::from_str(&content).expect("profiles.json fixture must contain a JSON array");
     assert!(
         !profiles.is_empty(),
         "profiles.json fixture must contain at least one profile"
@@ -244,7 +246,11 @@ fn test_all_outbounds_have_tls_config_for_trojan() -> Result<(), Box<dyn std::er
 #[test]
 fn test_all_servers_pass_singbox_check() -> Result<(), Box<dyn std::error::Error>> {
     let binary = singbox_binary();
-    assert!(binary.is_file(), "Required sing-box binary is missing: {:?}", binary);
+    assert!(
+        binary.is_file(),
+        "Required sing-box binary is missing: {:?}",
+        binary
+    );
 
     let profiles = load_real_profiles();
     let tmp_dir = tempfile::tempdir()?;
@@ -475,7 +481,11 @@ fn test_batch_test_config_has_selector() -> Result<(), Box<dyn std::error::Error
 
     // Verify it passes sing-box check
     let binary = singbox_binary();
-    assert!(binary.is_file(), "Required sing-box binary is missing: {:?}", binary);
+    assert!(
+        binary.is_file(),
+        "Required sing-box binary is missing: {:?}",
+        binary
+    );
     {
         let check_dir = tempfile::tempdir()?;
         let tmp = check_dir.path().join("omnitun-batch-test.json");

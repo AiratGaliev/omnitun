@@ -1,7 +1,7 @@
 // Sing-box DNS config: type-based servers, not legacy address+detour.
 
-use crate::{ErrorCode, ProxyError, ServerProfile};
 use crate::settings::AppSettings;
+use crate::{ErrorCode, ProxyError, ServerProfile};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -925,12 +925,7 @@ mod tests {
         ports: &[u16],
         test_dir: &std::path::Path,
     ) -> Result<Value, ProxyError> {
-        super::generate_batch_config(
-            servers,
-            ports,
-            test_dir,
-            BatchConfigOptions::default(),
-        )
+        super::generate_batch_config(servers, ports, test_dir, BatchConfigOptions::default())
     }
 
     fn default_settings() -> AppSettings {

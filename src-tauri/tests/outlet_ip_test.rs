@@ -64,15 +64,18 @@ fn load_servers() -> Vec<serde_json::Value> {
             path.display()
         )
     });
-    let data: serde_json::Value = serde_json::from_str(&content)
-        .expect("profiles.json fixture must contain valid JSON");
+    let data: serde_json::Value =
+        serde_json::from_str(&content).expect("profiles.json fixture must contain valid JSON");
     let servers = data
         .get(0)
         .and_then(|profile| profile.get("servers"))
         .and_then(serde_json::Value::as_array)
         .expect("profiles.json must contain a first profile with a servers array")
         .clone();
-    assert!(!servers.is_empty(), "profiles.json fixture must contain servers");
+    assert!(
+        !servers.is_empty(),
+        "profiles.json fixture must contain servers"
+    );
     servers
 }
 
@@ -82,7 +85,11 @@ async fn outlet_vs_entry_country() {
     let servers = load_servers();
     assert!(!servers.is_empty(), "Required fixture contains no servers");
     let bin = singbox();
-    assert!(bin.is_file(), "Required sing-box binary is missing: {:?}", bin);
+    assert!(
+        bin.is_file(),
+        "Required sing-box binary is missing: {:?}",
+        bin
+    );
 
     // Build config: each server receives its own inbound port
     let mut obs: Vec<serde_json::Value> = vec![
@@ -114,7 +121,10 @@ async fn outlet_vs_entry_country() {
         ));
     }
 
-    assert!(!ports.is_empty(), "No usable server was selected from the required fixture");
+    assert!(
+        !ports.is_empty(),
+        "No usable server was selected from the required fixture"
+    );
     println!("Testing {} servers via sing-box", ports.len());
 
     let cfg = serde_json::json!({
@@ -260,7 +270,10 @@ async fn outlet_vs_entry_country() {
         fail,
         ok + fail
     );
-    assert!(ok > 0, "No server completed the external outlet-IP smoke check");
+    assert!(
+        ok > 0,
+        "No server completed the external outlet-IP smoke check"
+    );
 
     drop(_child_guard);
 }

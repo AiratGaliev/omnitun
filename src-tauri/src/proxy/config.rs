@@ -4,8 +4,8 @@ use serde_json::Value;
 use std::path::Path;
 
 pub use omnitun_core::proxy::config::{
-    apply_anti_dpi, apply_mux, build_outbound, generate_kill_switch_config,
-    redact_sensitive_data, BatchConfigOptions,
+    apply_anti_dpi, apply_mux, build_outbound, generate_kill_switch_config, redact_sensitive_data,
+    BatchConfigOptions,
 };
 
 pub(crate) fn find_available_port() -> Option<u16> {
@@ -49,9 +49,7 @@ pub fn generate_batch_config(
         tls_insecure: crate::proxy::batcher::batch_tls_insecure(),
         enable_mux: crate::proxy::batcher::batch_enable_mux(),
     };
-    omnitun_core::proxy::config::generate_batch_config(
-        servers, ports, test_dir, options,
-    )
+    omnitun_core::proxy::config::generate_batch_config(servers, ports, test_dir, options)
 }
 
 pub fn write_config(json: &str, config_dir: &Path) -> Result<std::path::PathBuf, ProxyError> {
