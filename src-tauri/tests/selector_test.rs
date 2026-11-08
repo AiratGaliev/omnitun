@@ -18,28 +18,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn app_data_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Library")
-        .join("Application Support");
-
-    #[cfg(target_os = "linux")]
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    let base = std::env::temp_dir();
-
-    base.join("com.omnitun.desktop")
+    PathBuf::from(std::env::var_os("OMNITUN_TEST_DATA_DIR")
+        .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"))
 }
 
 fn singbox() -> PathBuf {
@@ -244,21 +224,14 @@ fn kill_process(pid: u32) {
 }
 
 #[tokio::test]
+#[ignore = "manual VPN smoke test; requires disposable fixtures and external IP service"]
 async fn selector_switch_and_outlet_ip() {
     // ── 0. Pre-checks ──────────────────────────────────────────────────────
     let bin = singbox();
-    if !bin.exists() {
-        eprintln!("SKIP: no sing-box binary found");
-        return;
-    }
+    assert!(bin.is_file(), "Required sing-box binary is missing: {:?}", bin);
 
-    let (_sv, sp) = match load_best_server() {
-        Some(pair) => pair,
-        None => {
-            eprintln!("SKIP: no usable server in profiles.json");
-            return;
-        }
-    };
+    let (_sv, sp) = load_best_server()
+        .expect("Required disposable profiles.json fixture has no usable server");
 
     println!(
         "Using server: {} ({}:{} | {})",

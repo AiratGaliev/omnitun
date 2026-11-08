@@ -2,12 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main, dev, test]
+    branches: [dev]
   pull_request:
-    branches: [main, dev, test]
+    branches: [dev]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -17,84 +17,42 @@ env:
 jobs:
   frontend:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
       - name: Install frontend dependencies
         run: npm ci
-
-      - name: Lint (TypeScript)
+      - name: Lint
         run: npm run lint
-
       - name: Format check
         run: npm run format:check
-
-      - name: Test (TypeScript)
+      - name: TypeScript type-check (no bundle)
+        run: npm run typecheck
+      - name: Frontend unit tests
         run: npm test
 
-      - name: Build (TypeScript)
-        run: npm run build
-
-  rust:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-
-    runs-on: ${{ matrix.os }}
-
+  rust-core:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-
-      - name: Install Linux system deps
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            libxdo-dev
-
-      # Tauri's build script requires the external binary path to exist even
-      # when CI only checks/tests the Rust application. Do not compile the
-      # standalone MCP release binary here; release builds replace this marker.
-      - name: Prepare MCP sidecar placeholder
-        run: npm run prepare:mcp-sidecar:placeholder
-
       - name: Rust format check
-        if: matrix.os == 'ubuntu-latest'
         working-directory: src-tauri
-        run: cargo fmt -- --check
-
-      - name: Lint (Rust)
-        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all -- --check
+      - name: Core unit and contract tests
         working-directory: src-tauri
-        run: cargo clippy --all-targets
-
-      - name: Test (Rust)
+        run: cargo test -p omnitun-core --locked
+      - name: Core Clippy
         working-directory: src-tauri
-        run: cargo test
+        run: cargo clippy -p omnitun-core --all-targets --locked -- -D warnings

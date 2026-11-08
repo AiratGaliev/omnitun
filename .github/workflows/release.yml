@@ -80,6 +80,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
+      - name: Smoke-test the built MCP sidecar
+        run: npm run test:mcp:artifact
+
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v4
         with:

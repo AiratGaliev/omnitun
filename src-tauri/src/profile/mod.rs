@@ -2553,7 +2553,8 @@ mod tests {
 /// - "🇨🇭 Switzerland" → Some("CH")
 /// - "🇵🇱 Warsaw" → Some("PL")
 /// - "some-server" → None
-#[cfg(test)]
+// Manual-only suite; requires a disposable OMNITUN_TEST_DATA_DIR fixture.
+#[cfg(all(test, feature = "user-data-smoke"))]
 mod extra_tests {
     use super::*;
     use crate::proxy::config::build_outbound;
@@ -2568,48 +2569,38 @@ mod extra_tests {
     }
 
     fn app_data_dir() -> PathBuf {
-        #[cfg(windows)]
-        {
-            PathBuf::from(std::env::var("APPDATA").expect("APPDATA not set"))
-                .join("com.omnitun.desktop")
-        }
-        #[cfg(not(windows))]
-        {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home)
-                .join(".config")
-                .join("com.omnitun.desktop")
-        }
+        PathBuf::from(std::env::var_os("OMNITUN_TEST_DATA_DIR")
+            .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"))
     }
 
     fn singbox() -> PathBuf {
-        let m = app_data_dir()
-            .join("binaries")
-            .join(crate::proxy::installer::Installer::binary_name());
-        if m.exists() {
-            return m;
-        }
-        PathBuf::from("sing-box.exe")
+        let binary_name = crate::proxy::installer::Installer::binary_name();
+        let bundled = app_data_dir().join("binaries").join(&binary_name);
+        if bundled.is_file() { return bundled; }
+        if let Some(path) = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|directory| directory.join(&binary_name))
+                .find(|candidate| candidate.is_file())
+        }) { return path; }
+        panic!("Required sing-box binary is missing from fixture binaries/ and PATH");
     }
 
     fn load_real_servers() -> Vec<ServerProfile> {
-        let p = app_data_dir().join("profiles.json");
-        let Ok(json) = std::fs::read_to_string(&p) else {
-            eprintln!("SKIP: profiles.json not found at {}", p.display());
-            return Vec::new();
-        };
-        let Ok(data) = serde_json::from_str::<serde_json::Value>(&json) else {
-            eprintln!("SKIP: invalid profiles.json");
-            return Vec::new();
-        };
-        data[0]["servers"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|s| serde_json::from_value(s.clone()).ok())
-                    .collect()
-            })
-            .unwrap_or_default()
+        let path = app_data_dir().join("profiles.json");
+        let json = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!("Required disposable fixture is missing at {}: {error}", path.display())
+        });
+        let data: serde_json::Value = serde_json::from_str(&json)
+            .expect("profiles.json fixture must contain valid JSON");
+        let servers = data.get(0).and_then(|p| p.get("servers"))
+            .and_then(serde_json::Value::as_array)
+            .expect("profiles.json must contain a first profile with a servers array");
+        let parsed: Vec<ServerProfile> = servers.iter()
+            .map(|server| serde_json::from_value(server.clone())
+                .expect("Fixture server must deserialize as ServerProfile"))
+            .collect();
+        assert!(!parsed.is_empty(), "profiles.json fixture must contain at least one server");
+        parsed
     }
 
     // -----------------------------------------------------------------------

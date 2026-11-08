@@ -2829,6 +2829,7 @@ dependencies = [
  "log",
  "maxminddb",
  "moka",
+ "omnitun-core",
  "reqwest 0.12.28",
  "rmcp",
  "rusqlite",
@@ -2859,6 +2860,18 @@ dependencies = [
  "zip 2.4.2",
 ]
 
+
+[[package]]
+name = "omnitun-core"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "url",
+]
 [[package]]
 name = "once_cell"
 version = "1.21.4"

@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/omnitun-core"]
+resolver = "2"
+
 [package]
 name = "omnitun"
 version = "0.1.0"
@@ -10,6 +14,8 @@ default-run = "omnitun"
 default = ["tauri"]
 tauri = []
 mcp-server = ["dep:rmcp", "dep:tokio-stream", "dep:dirs"]
+# Opt-in smoke tests require a dedicated sanitized fixture directory.
+user-data-smoke = []
 
 [lib]
 name = "omnitun_lib"
@@ -59,6 +65,7 @@ tracing-log = "0.2"
 rmcp = { version = "2.1.0", optional = true, features = ["server", "transport-io"] }
 tokio-stream = { version = "0.1", optional = true }
 dirs = { version = "5", optional = true }
+omnitun-core = { path = "crates/omnitun-core" }
 tokio-rusqlite = { version = "0.7.0", features = ["bundled"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 
@@ -66,3 +73,19 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 tempfile = "3"
 which = "6"
 
+
+
+[[test]]
+name = "data_driven_test"
+path = "tests/data_driven_test.rs"
+required-features = ["user-data-smoke"]
+
+[[test]]
+name = "outlet_ip_test"
+path = "tests/outlet_ip_test.rs"
+required-features = ["user-data-smoke"]
+
+[[test]]
+name = "selector_test"
+path = "tests/selector_test.rs"
+required-features = ["user-data-smoke"]

@@ -19,7 +19,10 @@
     "test:watch": "vitest",
     "prepare:mcp-sidecar": "node scripts/prepare-mcp-sidecar.mjs",
     "prepare:mcp-sidecar:placeholder": "node scripts/prepare-mcp-sidecar.mjs --placeholder",
-    "test:mcp": "npm run prepare:mcp-sidecar && node scripts/test-mcp-server.mjs"
+    "test:mcp": "npm run prepare:mcp-sidecar && node scripts/test-mcp-server.mjs",
+    "typecheck": "tsc --noEmit && tsc --project tsconfig.node.json --noEmit",
+    "test:mcp:artifact": "node scripts/test-mcp-server.mjs",
+    "check:release-metadata": "node scripts/check-release-metadata.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

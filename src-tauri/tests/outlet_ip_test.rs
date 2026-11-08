@@ -10,28 +10,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn app_data_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    let base = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Library")
-        .join("Application Support");
-
-    #[cfg(target_os = "linux")]
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir);
-
-    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    let base = std::env::temp_dir();
-
-    base.join("com.omnitun.desktop")
+    PathBuf::from(std::env::var_os("OMNITUN_TEST_DATA_DIR")
+        .expect("Set OMNITUN_TEST_DATA_DIR to a disposable fixture directory"))
 }
 
 fn singbox() -> PathBuf {
@@ -75,31 +55,21 @@ fn free_port(skip: &[u16]) -> Option<u16> {
 }
 
 fn load_servers() -> Vec<serde_json::Value> {
-    let p = app_data_dir().join("profiles.json");
-    let content = match std::fs::read_to_string(&p) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("SKIP: cannot read profiles.json at {}: {e}", p.display());
-            return Vec::new();
-        }
-    };
-    let d: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("SKIP: invalid JSON in profiles.json: {e}");
-            return Vec::new();
-        }
-    };
-    match d[0]["servers"].as_array() {
-        Some(arr) => arr.clone(),
-        None => {
-            eprintln!("SKIP: no servers in profiles.json");
-            Vec::new()
-        }
-    }
+    let path = app_data_dir().join("profiles.json");
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!("Required disposable fixture is missing at {}: {error}", path.display())
+    });
+    let data: serde_json::Value = serde_json::from_str(&content)
+        .expect("profiles.json fixture must contain valid JSON");
+    let servers = data.get(0).and_then(|p| p.get("servers"))
+        .and_then(serde_json::Value::as_array)
+        .expect("profiles.json must contain a first profile with a servers array").clone();
+    assert!(!servers.is_empty(), "profiles.json fixture must contain servers");
+    servers
 }
 
 #[tokio::test]
+#[ignore = "manual VPN smoke test; requires disposable fixtures and external IP service"]
 async fn outlet_vs_entry_country() {
     let servers = load_servers();
     if servers.is_empty() {
@@ -107,10 +77,7 @@ async fn outlet_vs_entry_country() {
         return;
     }
     let bin = singbox();
-    if !bin.exists() {
-        eprintln!("SKIP: no sing-box");
-        return;
-    }
+    assert!(bin.is_file(), "Required sing-box binary is missing: {:?}", bin);
 
     // Build config: each server receives its own inbound port
     let mut obs: Vec<serde_json::Value> = vec![
