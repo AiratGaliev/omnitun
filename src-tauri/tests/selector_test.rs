@@ -223,6 +223,15 @@ fn kill_process(pid: u32) {
     }
 }
 
+struct ChildGuard(std::process::Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 #[tokio::test]
 #[ignore = "manual VPN smoke test; requires disposable fixtures and external IP service"]
 async fn selector_switch_and_outlet_ip() {
@@ -241,35 +250,18 @@ async fn selector_switch_and_outlet_ip() {
         sp.protocol
     );
 
-    let proxy_port = match free_port(&[]) {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: no free proxy port");
-            return;
-        }
-    };
-    let clash_port = match free_port(&[proxy_port]) {
-        Some(p) => p,
-        None => {
-            eprintln!("SKIP: no free clash API port");
-            return;
-        }
-    };
+    let proxy_port = free_port(&[])
+        .expect("Could not allocate a local proxy port for selector smoke test");
+    let clash_port = free_port(&[proxy_port])
+        .expect("Could not allocate a local Clash API port for selector smoke test");
 
     let server_id = sp.id.clone();
     let proxy_tag = format!("proxy-{server_id}");
 
     // ── 1. Build outbound + config ────────────────────────────────────────
-    let ob = match omnitun_lib::proxy::config::build_outbound(&sp) {
-        Ok(mut ob) => {
-            ob["tag"] = serde_json::json!(&proxy_tag);
-            ob
-        }
-        Err(e) => {
-            eprintln!("SKIP: build_outbound failed: {e}");
-            return;
-        }
-    };
+    let mut ob = omnitun_lib::proxy::config::build_outbound(&sp)
+        .expect("Required fixture server must produce a supported outbound");
+    ob["tag"] = serde_json::json!(&proxy_tag);
 
     let config = serde_json::json!({
         "log": {"level": "info"},
@@ -313,9 +305,8 @@ async fn selector_switch_and_outlet_ip() {
         },
     });
 
-    let dir = std::env::temp_dir().join(format!("sb-sel-{}-{}", std::process::id(), clash_port));
-    std::fs::create_dir_all(&dir).unwrap();
-    let cfg_p = dir.join("c.json");
+    let dir = tempfile::tempdir().expect("Could not create isolated selector test directory");
+    let cfg_p = dir.path().join("c.json");
     std::fs::write(&cfg_p, serde_json::to_string_pretty(&config).unwrap()).unwrap();
 
     // ── Config check ──────────────────────────────────────────────────────
@@ -324,14 +315,11 @@ async fn selector_switch_and_outlet_ip() {
         .arg(&cfg_p)
         .output()
         .unwrap();
-    if !check_out.status.success() {
-        eprintln!(
-            "SKIP: config check failed:\n{}",
-            String::from_utf8_lossy(&check_out.stderr)
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-        return;
-    }
+    assert!(
+        check_out.status.success(),
+        "sing-box rejected selector config:\n{}",
+        String::from_utf8_lossy(&check_out.stderr)
+    );
     println!("✓ Config passed sing-box check");
 
     // ── 2. Start sing-box with stderr captured to a log file ──────────────
@@ -341,21 +329,15 @@ async fn selector_switch_and_outlet_ip() {
     // stderr to a file in the test dir so we can dump it on failure.
     let log_path = dir.join("sing-box.stderr.log");
     let stderr_file = std::fs::File::create(&log_path).unwrap();
-    let child = match Command::new(&bin)
+    let child = Command::new(&bin)
         .args(["run", "-c"])
         .arg(&cfg_p)
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file))
         .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("SKIP: failed to start sing-box: {e}");
-            let _ = std::fs::remove_dir_all(&dir);
-            return;
-        }
-    };
+        .expect("Failed to start sing-box for selector smoke test");
     let pid = child.id();
+    let _child_guard = ChildGuard(child);
     println!("✓ sing-box started, PID {pid}");
     println!("  config: {}", cfg_p.display());
     println!("  stderr: {}", log_path.display());
@@ -370,7 +352,6 @@ async fn selector_switch_and_outlet_ip() {
         eprintln!("\n─── Clash API readiness FAILED ───");
         eprintln!("{e}");
         kill_process(pid);
-        let _ = std::fs::remove_dir_all(&dir);
         // Fail the test explicitly — previously the assertion below would
         // fail with an opaque "got ''" message and no diagnostics.
         panic!("Clash API did not come up: {e}");
@@ -409,11 +390,10 @@ async fn selector_switch_and_outlet_ip() {
 
     // ── First, get real (direct) IP without proxy switching ────────────────
     println!("\n─── Direct outlet IP (selector=direct, default) ───");
-    let direct_ip = fetch_outlet_ip_retry(proxy_port, 2, 5).await;
-    match &direct_ip {
-        Some(ip) => println!("Direct outlet IP: {ip}"),
-        None => eprintln!("Direct outlet IP: FAILED (network issue?)"),
-    }
+    let direct_ip = fetch_outlet_ip_retry(proxy_port, 2, 5)
+        .await
+        .expect("Direct IP service failed during the explicitly selected VPN smoke test");
+    println!("Direct outlet IP: {direct_ip}");
 
     // ── 4. Switch to proxy via PUT ─────────────────────────────────────────
     println!("\n─── Step 4: PUT /proxies/proxy ───");
@@ -441,11 +421,10 @@ async fn selector_switch_and_outlet_ip() {
 
     // ── 5. Fetch outlet IP through proxy ───────────────────────────────────
     println!("\n─── Step 5: Outlet IP via proxy ───");
-    let proxy_ip = fetch_outlet_ip_retry(proxy_port, 3, 8).await;
-    match &proxy_ip {
-        Some(ip) => println!("Outlet IP via {proxy_tag}: {ip}"),
-        None => eprintln!("Outlet IP via proxy: FAILED after retries"),
-    }
+    let proxy_ip = fetch_outlet_ip_retry(proxy_port, 3, 8)
+        .await
+        .expect("Proxy outlet IP service failed during the explicitly selected VPN smoke test");
+    println!("Outlet IP via {proxy_tag}: {proxy_ip}");
 
     // ── 6. Switch back to direct, re-fetch outlet IP ──────────────────────
     // (re-fetch in case the earlier direct fetch was cached or stale)
@@ -468,48 +447,22 @@ async fn selector_switch_and_outlet_ip() {
     }
 
     let direct_ip2 = fetch_outlet_ip_retry(proxy_port, 1, 5).await;
-    let final_direct_ip = direct_ip2.or(direct_ip);
+    let final_direct_ip = direct_ip2.unwrap_or(direct_ip);
 
     // ── 7. Compare IPs (must be different) ─────────────────────────────────
     println!("\n─── Step 7: Comparison ───");
 
     // Prefer the post-switch direct IP
-    match (&proxy_ip, &final_direct_ip) {
-        (Some(proxy), Some(direct)) if proxy != direct => {
-            println!("✓ DIFFERENT — proxy WORKS\n  Direct: {direct}\n  Proxy:  {proxy}");
-        }
-        (Some(proxy), Some(_direct)) => {
-            eprintln!("⚠ SAME IP ({proxy}) — proxy may NOT be routing correctly");
-        }
-        (Some(ip), None) => {
-            eprintln!("⚠ Only proxy IP fetched ({ip}), direct failed");
-        }
-        (None, Some(ip)) => {
-            eprintln!("⚠ Only direct IP fetched ({ip}), proxy failed");
-        }
-        (None, None) => {
-            eprintln!("⚠ Both IP fetches failed — check network/proxy connection");
-        }
-    }
-
-    // Assert if both IPs available
-    if let (Some(proxy), Some(direct)) = (&proxy_ip, &final_direct_ip) {
-        assert_ne!(
-            proxy, direct,
-            "Proxy and direct outlet IPs must differ — proxy not routing correctly"
-        );
-    } else {
-        eprintln!(
-            "WARN: missing IP(s) — direct={:?}, proxy={:?}",
-            final_direct_ip, proxy_ip
-        );
-    }
+    assert_ne!(
+        proxy_ip, final_direct_ip,
+        "Proxy and direct outlet IPs must differ — proxy is not routing traffic"
+    );
+    println!("✓ DIFFERENT — proxy WORKS\n  Direct: {final_direct_ip}\n  Proxy:  {proxy_ip}");
 
     // ── 8. Cleanup: kill sing-box ─────────────────────────────────────────
     println!("\n─── Cleanup ───");
     kill_process(pid);
     println!("✓ sing-box (PID {pid}) killed");
-    let _ = std::fs::remove_dir_all(&dir);
     println!("✓ Test directory cleaned up");
     println!("\n=== TEST COMPLETE ===");
 }
