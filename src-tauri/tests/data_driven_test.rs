@@ -1,4 +1,4 @@
-/// Data-driven tests using real profiles from profiles.json.
+/// Data-driven tests using disposable profiles.json fixtures.
 ///
 /// Validates config generation, sing-box compatibility, data integrity.
 /// Run: cargo test --test data_driven_test -- --nocapture
@@ -304,7 +304,8 @@ fn test_all_servers_pass_singbox_check() -> Result<(), Box<dyn std::error::Error
 /// Test that base.json template has DNS (regression: was missing before fix)
 #[test]
 fn test_base_template_has_dns() -> Result<(), Box<dyn std::error::Error>> {
-    let template: serde_json::Value = serde_json::from_str(include_str!("../config/base.json"))?;
+    let template: serde_json::Value =
+        serde_json::from_str(include_str!("../crates/omnitun-core/src/proxy/base.json"))?;
     let dns = template.get("dns");
     assert!(dns.is_some(), "base.json missing DNS section");
     assert!(

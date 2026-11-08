@@ -2,7 +2,7 @@
 
 ## Evidence and limitations
 
-This boundary map is based on the source tree and checked-in manifests at the OMN-5 implementation base (`dev`, 2026-11-08). The task environment provides GitHub repository inspection/editing but no local terminal or Rust build runner. Therefore `cargo metadata`, `cargo tree -e features`, local builds, cache-hit measurements and elapsed-time baselines have not been executed here. They remain verification items, not claimed results.
+This boundary map is based on the source tree and checked-in manifests at the OMN-5 implementation base (`dev`, 2026-11-08). The initial implementation pass was remote-only; a subsequent local Windows audit and GitHub Actions run added the verification evidence below. Items not executed remain explicitly listed as outstanding.
 
 ## Rust module boundary map
 
@@ -52,15 +52,23 @@ Profile-driven smoke tests require `OMNITUN_TEST_DATA_DIR`; they do not infer AP
 - `test → main`: final frontend/Rust/MCP regression and application version metadata check; no installer packaging.
 - Version tag: production frontend, Tauri bundles, real MCP sidecar and installers, followed by a smoke test of the built sidecar before artifact upload/publication.
 
-## Verification still required
+## Verification evidence (2026-11-08)
 
-The first PR Actions attempt failed before any step ran: GitHub returned failed jobs with no runner name, no steps, no log URL and no job-step records. This is not evidence of a Rust/TypeScript compilation failure. Do not mark commands as passed until the relevant runner steps execute.
+- Dev CI run `42485317188` on commit `1742fa7`: both frontend and Rust Core jobs completed successfully. The workflow executed the configured lint, formatting, typecheck, Vitest, Rust format, Core tests and Core Clippy steps.
+- Local Windows frontend checks passed: `npm run lint`, `npm run format:check`, `npm run typecheck`, and `npm test` (89 passed, 6 skipped).
+- Local Windows Rust checks passed: workspace tests (168 passed, 1 ignored), Core tests (35 passed), workspace/Core Clippy with warnings denied, and `cargo fmt --all -- --check`.
+- `cargo metadata --locked` and `cargo tree -p omnitun-core` completed. The Core dependency graph contains only `base64`, `serde`, `serde_json`, `thiserror`, `tracing`, `url` and `uuid`; no Tauri, MCP transport, Tokio, SQLite or OS process dependency.
+- The optional data-driven integration target compiled with `user-data-smoke`; the DNS-template test was corrected to read the Core-owned template used by production config generation.
+- Local Windows `npm run test:mcp:artifact` passed against the built MCP sidecar: 27 tools, 8 resources, all resource reads, settings persistence/validation, secret redaction and cross-process process lifecycle checks.
+- The first successful GitHub Rust job reported a Cargo cache miss. A subsequent same-lockfile run is still needed to confirm cache restoration.
 
-When runner capacity is available, capture:
-1. Dev CI duration and Cargo cache hit/miss.
-2. A repeat on the same runner/toolchain/lockfile to verify cache reuse.
-3. Promotion PR results across Windows, macOS and Linux.
-4. Test-to-main readiness checks.
-5. A safe version-tag release run confirming the real sidecar and installer artifacts.
+## Verification still outstanding
 
-The dependency boundary above is based on manifests and inspected imports. Full Cargo metadata/tree output and timing data remain uncollected.
+1. A promotion PR `dev → test` running the Windows/macOS/Linux matrix.
+2. A promotion PR `test → main` validating the final release-readiness workflow.
+3. A safe version-tag run proving production Tauri bundles, the real target MCP sidecar and installer artifacts; only the Windows MCP artifact smoke was run locally.
+4. Profile-driven sing-box fixture tests remain opt-in through `user-data-smoke` and are not automatically invoked by the promotion workflow. The external VPN/IP tests remain manual/ignored.
+5. A repeated Actions run with the same lockfile to capture a Cargo cache hit and elapsed-time comparison.
+6. Branch protection: the repository rulesets endpoint returned an empty list during this audit; the legacy branch-protection endpoint returned HTTP 403 for the connected integration, so required branch protection settings could not be confirmed.
+
+The dependency boundary is now supported by Cargo metadata/tree output as well as manifest and import inspection. The historical billing-related runner admission failure was resolved before the successful run above; it was not a code failure.
